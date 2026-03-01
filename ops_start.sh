@@ -44,7 +44,23 @@ cd "$PROJECT_ROOT"
 
 if [ "$SKIP_PULL" -eq 0 ]; then
     echo "[1/6] Pulling latest code..."
-    git pull --ff-only
+    CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo DETACHED)"
+    if [ "$CURRENT_BRANCH" != "main" ]; then
+        if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "ERROR: Current branch is '$CURRENT_BRANCH' with uncommitted changes."
+            echo "Operator start requires syncing from 'main'."
+            echo "Please commit/stash your changes, then run:"
+            echo "  git checkout main"
+            echo "  git branch --set-upstream-to=origin/main main"
+            echo "  ./ops_start.sh"
+            exit 1
+        fi
+        echo "Switching branch '$CURRENT_BRANCH' -> 'main' for operator run..."
+        git checkout main
+    fi
+    git fetch --prune origin main
+    git branch --set-upstream-to=origin/main main >/dev/null 2>&1 || true
+    git pull --ff-only origin main
 else
     echo "[1/6] Pull step skipped."
 fi

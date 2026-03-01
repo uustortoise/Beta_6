@@ -15,9 +15,10 @@ Examples:
 
 Behavior:
   1) Clone Beta_6 repo (if target dir does not exist)
-  2) Configure local hooks path (.githooks)
-  3) Run repository hygiene check
-  4) Optionally create/switch to branch_name
+  2) Sync local main to origin/main (fast-forward only)
+  3) Configure local hooks path (.githooks)
+  4) Run repository hygiene check
+  5) Optionally create/switch to branch_name
 EOF
 }
 
@@ -49,6 +50,18 @@ fi
 
 cd "$TARGET_DIR"
 
+echo "Fetching remote refs (prune stale branches)"
+git fetch --prune origin
+
+echo "Ensuring local main tracks origin/main"
+if git show-ref --verify --quiet refs/heads/main; then
+  git checkout main
+else
+  git checkout -b main origin/main
+fi
+git branch --set-upstream-to=origin/main main >/dev/null 2>&1 || true
+git pull --ff-only origin main
+
 echo "Setting local hooks path to .githooks"
 git config core.hooksPath .githooks
 
@@ -57,7 +70,13 @@ python3 scripts/check_repo_hygiene.py
 
 if [[ -n "$BRANCH_NAME" ]]; then
   echo "Switching to branch: $BRANCH_NAME"
-  git checkout -B "$BRANCH_NAME"
+  if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
+    git checkout "$BRANCH_NAME"
+  elif git ls-remote --exit-code --heads origin "$BRANCH_NAME" >/dev/null 2>&1; then
+    git checkout --track "origin/$BRANCH_NAME"
+  else
+    git checkout -b "$BRANCH_NAME" main
+  fi
 else
   echo "No branch provided. Staying on $(git branch --show-current)."
 fi

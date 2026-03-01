@@ -15,6 +15,7 @@ Usage: ./start-ops.sh [options]
 Operator wrapper for Beta_6 startup.
 - Runs a non-destructive "unused artifact" scan (default on)
 - Then executes ./ops_start.sh with the same options
+- Pull step in ./ops_start.sh syncs from origin/main (operator-safe default)
 
 Options:
   --no-scan       Skip unused-artifact scan

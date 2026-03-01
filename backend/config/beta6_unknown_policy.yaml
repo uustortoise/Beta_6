@@ -1,0 +1,16 @@
+version: v1
+
+unknown_policy:
+  min_confidence: 0.55
+  max_entropy: 1.05
+  outside_sensed_space_threshold: 0.75
+  abstain_label: abstain
+  unknown_label: unknown
+  low_confidence_state: low_confidence
+  unknown_state: unknown
+  outside_sensed_space_state: outside_sensed_space
+
+targets:
+  abstain_rate_min: 0.02
+  abstain_rate_max: 0.20
+  unknown_recall_min: 0.65

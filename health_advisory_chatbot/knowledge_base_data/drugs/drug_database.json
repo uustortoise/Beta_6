@@ -1,0 +1,282 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "last_updated": "2026-02-08",
+    "total_entries": 20,
+    "source": "AGS_Beers_Criteria_2023"
+  },
+  "drugs": [
+    {
+      "id": "drug_lorazepam",
+      "drug_name": "Lorazepam",
+      "generic_name": "lorazepam",
+      "drug_class": "benzodiazepine",
+      "acb_score": 3,
+      "fall_risk": "high",
+      "beers_criteria": true,
+      "beers_recommendation": "AVOID - Increases risk of cognitive impairment, delirium, falls, fractures",
+      "interactions": [
+        {
+          "drug": "zolpidem",
+          "severity": "major",
+          "mechanism": "Additive CNS depression",
+          "recommendation": "Avoid combination in elderly"
+        },
+        {
+          "drug": "morphine",
+          "severity": "major",
+          "mechanism": "Respiratory depression risk",
+          "recommendation": "Reduce dose or avoid"
+        },
+        {
+          "drug": "alcohol",
+          "severity": "severe",
+          "mechanism": "Dangerous sedation",
+          "recommendation": "Absolute contraindication"
+        }
+      ],
+      "contraindications": ["sleep_apnea", "severe_respiratory_insufficiency", "myasthenia_gravis"],
+      "common_conditions": ["anxiety", "insomnia", "agitation"]
+    },
+    {
+      "id": "drug_diphenhydramine",
+      "drug_name": "Diphenhydramine",
+      "generic_name": "diphenhydramine",
+      "drug_class": "antihistamine",
+      "acb_score": 3,
+      "fall_risk": "high",
+      "beers_criteria": true,
+      "beers_recommendation": "AVOID - Highly anticholinergic, increases confusion, constipation, urinary retention",
+      "interactions": [
+        {
+          "drug": "oxybutynin",
+          "severity": "major",
+          "mechanism": "Additive anticholinergic effects",
+          "recommendation": "Avoid combination"
+        },
+        {
+          "drug": "amitriptyline",
+          "severity": "major",
+          "mechanism": "Additive anticholinergic effects",
+          "recommendation": "Avoid combination"
+        }
+      ],
+      "contraindications": ["narrow_angle_glaucoma", "urinary_retention", "severe_constipation"],
+      "common_conditions": ["allergies", "insomnia", "nausea"]
+    },
+    {
+      "id": "drug_donepezil",
+      "drug_name": "Donepezil",
+      "generic_name": "donepezil",
+      "drug_class": "cholinesterase_inhibitor",
+      "acb_score": 1,
+      "fall_risk": "moderate",
+      "beers_criteria": false,
+      "beers_recommendation": "ACCEPTABLE with monitoring",
+      "interactions": [
+        {
+          "drug": "anticholinergics",
+          "severity": "moderate",
+          "mechanism": "Pharmacological opposition",
+          "recommendation": "Avoid anticholinergics (reduce donepezil efficacy)"
+        },
+        {
+          "drug": "nsaids",
+          "severity": "moderate",
+          "mechanism": "Increased GI bleed risk",
+          "recommendation": "Monitor for GI symptoms"
+        }
+      ],
+      "contraindications": ["hypersensitivity"],
+      "common_conditions": ["alzheimers_disease", "dementia", "mild_cognitive_impairment"]
+    },
+    {
+      "id": "drug_metformin",
+      "drug_name": "Metformin",
+      "generic_name": "metformin",
+      "drug_class": "biguanide",
+      "acb_score": 0,
+      "fall_risk": "low",
+      "beers_criteria": false,
+      "beers_recommendation": "FIRST-LINE for diabetes in elderly",
+      "interactions": [
+        {
+          "drug": "contrast_dye",
+          "severity": "major",
+          "mechanism": "Lactic acidosis risk",
+          "recommendation": "Hold 48 hours before/after contrast"
+        },
+        {
+          "drug": "furosemide",
+          "severity": "moderate",
+          "mechanism": "Increased risk of kidney dysfunction",
+          "recommendation": "Monitor renal function"
+        }
+      ],
+      "contraindications": ["severe_renal_impairment", "metabolic_acidosis", "severe_infection"],
+      "common_conditions": ["diabetes_type_2", "prediabetes"]
+    },
+    {
+      "id": "drug_glyburide",
+      "drug_name": "Glyburide",
+      "generic_name": "glyburide",
+      "drug_class": "sulfonylurea",
+      "acb_score": 0,
+      "fall_risk": "high",
+      "beers_criteria": true,
+      "beers_recommendation": "AVOID - Long-acting, causes prolonged hypoglycemia",
+      "interactions": [
+        {
+          "drug": "fluconazole",
+          "severity": "major",
+          "mechanism": "Inhibits metabolism, increases hypoglycemia risk",
+          "recommendation": "Avoid combination or monitor glucose closely"
+        },
+        {
+          "drug": "warfarin",
+          "severity": "moderate",
+          "mechanism": "May potentiate hypoglycemia",
+          "recommendation": "Monitor glucose and INR"
+        }
+      ],
+      "contraindications": ["diabetic_ketoacidosis", "severe_renal_impairment"],
+      "common_conditions": ["diabetes_type_2"]
+    },
+    {
+      "id": "drug_amlodipine",
+      "drug_name": "Amlodipine",
+      "generic_name": "amlodipine",
+      "drug_class": "calcium_channel_blocker",
+      "acb_score": 0,
+      "fall_risk": "low",
+      "beers_criteria": false,
+      "beers_recommendation": "ACCEPTABLE",
+      "interactions": [
+        {
+          "drug": "simvastatin",
+          "severity": "moderate",
+          "mechanism": "Inhibits simvastatin metabolism",
+          "recommendation": "Limit simvastatin to 20mg daily"
+        },
+        {
+          "drug": "grapefruit",
+          "severity": "moderate",
+          "mechanism": "Increases amlodipine levels",
+          "recommendation": "Avoid grapefruit juice"
+        }
+      ],
+      "contraindications": ["severe_aortic_stenosis", "cardiogenic_shock"],
+      "common_conditions": ["hypertension", "angina"]
+    },
+    {
+      "id": "drug_furosemide",
+      "drug_name": "Furosemide",
+      "generic_name": "furosemide",
+      "drug_class": "loop_diuretic",
+      "acb_score": 0,
+      "fall_risk": "moderate",
+      "beers_criteria": false,
+      "beers_recommendation": "ACCEPTABLE with monitoring",
+      "interactions": [
+        {
+          "drug": "gentamicin",
+          "severity": "major",
+          "mechanism": "Additive ototoxicity and nephrotoxicity",
+          "recommendation": "Avoid if possible, monitor closely"
+        },
+        {
+          "drug": "lithium",
+          "severity": "major",
+          "mechanism": "Reduces lithium excretion",
+          "recommendation": "Monitor lithium levels"
+        }
+      ],
+      "contraindications": ["anuria", "severe_electrolyte_depletion"],
+      "common_conditions": ["heart_failure", "edema", "hypertension"]
+    },
+    {
+      "id": "drug_warfarin",
+      "drug_name": "Warfarin",
+      "generic_name": "warfarin",
+      "drug_class": "anticoagulant",
+      "acb_score": 0,
+      "fall_risk": "high",
+      "beers_criteria": false,
+      "beers_recommendation": "ACCEPTABLE with close monitoring",
+      "interactions": [
+        {
+          "drug": "aspirin",
+          "severity": "major",
+          "mechanism": "Increased bleeding risk",
+          "recommendation": "Use only if clearly indicated, monitor for bleeding"
+        },
+        {
+          "drug": "amiodarone",
+          "severity": "major",
+          "mechanism": "Inhibits warfarin metabolism",
+          "recommendation": "Reduce warfarin dose by 30-50%"
+        },
+        {
+          "drug": "vitamin_k",
+          "severity": "moderate",
+          "mechanism": "Reduces warfarin efficacy",
+          "recommendation": "Maintain consistent vitamin K intake"
+        }
+      ],
+      "contraindications": ["active_bleeding", "severe_thrombocytopenia", "recent_surgery"],
+      "common_conditions": ["atrial_fibrillation", "dvt", "pe", "mechanical_valve"]
+    },
+    {
+      "id": "drug_zolpidem",
+      "drug_name": "Zolpidem",
+      "generic_name": "zolpidem",
+      "drug_class": "non_benzodiazepine_hypnotic",
+      "acb_score": 0,
+      "fall_risk": "high",
+      "beers_criteria": true,
+      "beers_recommendation": "AVOID - Increases fall and fracture risk, cognitive impairment",
+      "interactions": [
+        {
+          "drug": "opioids",
+          "severity": "major",
+          "mechanism": "Additive CNS depression",
+          "recommendation": "Avoid combination"
+        },
+        {
+          "drug": "alcohol",
+          "severity": "severe",
+          "mechanism": "Enhanced sedation",
+          "recommendation": "Avoid alcohol"
+        }
+      ],
+      "contraindications": ["sleep_apnea", "severe_respiratory_insufficiency"],
+      "common_conditions": ["insomnia"]
+    },
+    {
+      "id": "drug_paroxetine",
+      "drug_name": "Paroxetine",
+      "generic_name": "paroxetine",
+      "drug_class": "ssri",
+      "acb_score": 3,
+      "fall_risk": "high",
+      "beers_criteria": true,
+      "beers_recommendation": "AVOID - Highly anticholinergic; prefer other SSRI/SNRI",
+      "interactions": [
+        {
+          "drug": "tamoxifen",
+          "severity": "major",
+          "mechanism": "Inhibits tamoxifen metabolism",
+          "recommendation": "Avoid combination"
+        },
+        {
+          "drug": "tramadol",
+          "severity": "major",
+          "mechanism": "Serotonin syndrome risk",
+          "recommendation": "Use with caution, monitor for serotonin syndrome"
+        }
+      ],
+      "contraindications": ["maoi_use_within_14_days", "pimozide_use"],
+      "common_conditions": ["depression", "anxiety", "panic_disorder"]
+    }
+  ]
+}

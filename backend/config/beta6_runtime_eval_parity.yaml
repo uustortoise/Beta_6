@@ -1,0 +1,17 @@
+version: v1
+
+label_map:
+  occupied: occupied
+  present: occupied
+  room_occupied: occupied
+  unoccupied: unoccupied
+  vacant: unoccupied
+  room_unoccupied: unoccupied
+
+decoder_policy:
+  spike_suppression: true
+
+required_parity_fields:
+  - decoded_label
+  - source_label
+  - uncertainty_state

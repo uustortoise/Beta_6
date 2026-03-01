@@ -1,0 +1,8 @@
+version: v1
+
+pretrain:
+  embedding_dim: 16
+  mask_ratio: 0.15
+  epochs: 1
+  random_seed: 42
+  min_total_rows: 16

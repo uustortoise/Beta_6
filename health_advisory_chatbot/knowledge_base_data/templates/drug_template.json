@@ -1,0 +1,30 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "last_updated": "2026-02-08",
+    "total_entries": 0,
+    "source": "AGS_Beers_Criteria_2023"
+  },
+  "drugs": [
+    {
+      "id": "drug_unique_id",
+      "drug_name": "Drug Name",
+      "generic_name": "generic_name",
+      "drug_class": "drug_class",
+      "acb_score": 0,
+      "fall_risk": "low",
+      "beers_criteria": false,
+      "beers_recommendation": "Recommendation text",
+      "interactions": [
+        {
+          "drug": "interacting_drug",
+          "severity": "moderate",
+          "mechanism": "Interaction mechanism",
+          "recommendation": "Clinical recommendation"
+        }
+      ],
+      "contraindications": ["contraindication_1", "contraindication_2"],
+      "common_conditions": ["condition_1", "condition_2"]
+    }
+  ]
+}

@@ -1,0 +1,321 @@
+# PR-4: CI Release Gate Hardening
+#
+# This workflow ensures ML gates cannot be bypassed in CI/CD.
+# It runs on every PR and push to main, failing the build if:
+# - Gates are explicitly bypassed via environment variables (SKIP_GATES, BYPASS_GATES, etc.)
+# - Gate configuration files/modules are missing or invalid
+# - Gate integration modules are not importable
+# - Pilot profile is active in CI environment
+#
+# Note: This validates bypass MECHANISMS are not present. Actual gate execution
+# during training is validated by the gate-integration-tests job.
+#
+# This is a REQUIRED check - PRs cannot be merged without passing.
+
+name: CI Gate Hardening
+
+on:
+  push:
+    branches: [ main, master, "beta-*" ]
+  pull_request:
+    branches: [ main, master, "beta-*" ]
+
+jobs:
+  # Job 0: Beta 6 contract freeze + leakage guard checks (Step 1.1 + Step 1.3)
+  beta6-contract-and-leakage:
+    name: Beta6 Contract and Leakage Guards
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest numpy pandas scikit-learn pyyaml
+
+    - name: Run Beta6 contract + gate tests
+      run: |
+        cd backend
+        python -m pytest \
+          tests/test_beta6_contracts.py \
+          tests/test_beta6_uncertainty_contract.py \
+          tests/test_beta6_capability_profiles.py \
+          tests/test_beta6_timeline_hard_gates.py \
+          tests/test_beta6_runtime_eval_parity.py \
+          tests/test_beta6_slo_observability.py \
+          tests/test_beta6_leakage_guards.py \
+          tests/test_beta6_gate_engine.py \
+          tests/test_beta6_registry_v2.py \
+          tests/test_beta6_intake_gate.py \
+          tests/test_beta6_intake_precheck.py \
+          tests/test_beta6_trainer_intake_gate.py \
+          tests/test_run_beta6_label_pack_intake.py \
+          tests/test_beta6_orchestrator.py \
+          tests/test_beta6_data_manifest.py \
+          tests/test_beta6_self_supervised_pretrain.py \
+          tests/test_beta6_representation_eval.py \
+          tests/test_beta6_fine_tune_safe_classes.py \
+          tests/test_beta6_adapter_lifecycle.py \
+          tests/test_beta6_crf_decoder.py \
+          tests/test_beta6_active_learning.py \
+          tests/test_beta6_label_policy_consistency.py \
+          tests/test_beta6_config_schema.py \
+          tests/test_beta6_policy_config_schemas.py \
+          tests/test_check_beta6_training_lineage.py \
+          tests/test_beta6_shim_import_guard.py \
+          tests/test_prediction_beta6_runtime_hook_parity.py \
+          tests/test_build_pretrain_corpus_manifest_script.py \
+          tests/test_run_active_learning_triage_script.py \
+          tests/test_run_daily_analysis_beta6_authority.py \
+          tests/test_t80_rollout.py \
+          -v --tb=short
+
+    - name: Enforce pilot retrain mode contract
+      run: |
+        cd backend
+        python -m pytest tests/test_run_daily_analysis_thresholds.py -k "requires_incoming_only_for_pilot_profile" -v --tb=short
+
+    - name: Validate all Beta6 config schemas
+      run: |
+        cd backend
+        python scripts/check_beta6_config_schema.py
+
+    - name: Validate Beta6 label policy consistency
+      run: |
+        cd backend
+        python scripts/check_beta6_label_policy_consistency.py
+
+    - name: Validate Beta6 training lineage consistency
+      run: |
+        cd backend
+        python scripts/check_beta6_training_lineage.py
+
+    - name: Run Beta6 intake artifact precheck
+      run: |
+        cd backend
+        python scripts/check_beta6_intake_gate.py \
+          --artifact tests/fixtures/beta6/intake_approved_v1.json
+
+  # Job 1: Validate gates are not bypassed
+  gate-validation:
+    name: Gate Bypass Validation
+    runs-on: ubuntu-latest
+    needs: beta6-contract-and-leakage
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        # Install minimal dependencies for gate validation
+        pip install pandas numpy
+        
+    - name: Run gate bypass validation
+      run: |
+        cd backend
+        python -m ml.ci_gate_validator --strict
+      
+    - name: Upload validation report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: gate-validation-report
+        path: backend/ci_gate_validation_report.json
+        retention-days: 30
+
+  # Job 2: Verify gate integration tests pass
+  gate-integration-tests:
+    name: Gate Integration Tests
+    runs-on: ubuntu-latest
+    needs: gate-validation
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pytest pandas numpy scikit-learn tensorflow pyyaml schedule python-dotenv
+        # Add any other required dependencies
+
+    - name: Run Beta6 import smoke
+      run: |
+        cd backend
+        python scripts/check_beta6_import_smoke.py
+
+    - name: Run gate-related tests
+      run: |
+        cd backend
+        python -m pytest \
+          tests/test_pr3_correctness_fixes.py \
+          tests/test_gate_integration.py \
+          tests/test_unified_training_path.py \
+          tests/test_ci_gate_validator.py \
+          tests/test_validation_run.py \
+          -v --tb=short
+      
+    - name: Run training pipeline tests
+      run: |
+        cd backend
+        python -m pytest tests/test_training.py -v --tb=short
+
+  # Job 3: Check for gate bypass patterns in code
+  code-scan:
+    name: Gate Bypass Code Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Scan for gate bypass patterns
+      run: |
+        echo "Scanning for potential gate bypass patterns..."
+        
+        # Check for hardcoded gate bypasses
+        BYPASS_PATTERNS=(
+          "SKIP_GATES"
+          "BYPASS_GATES"
+          "FORCE_PROMOTE"
+          "DISABLE_GATE_CHECK"
+          "skip_gate"
+          "bypass_gate"
+          "force_promote"
+        )
+        
+        FOUND_BYPASS=0
+        for pattern in "${BYPASS_PATTERNS[@]}"; do
+          # Search in Python files, excluding test files that may legitimately test bypasses
+          matches=$(grep -r "$pattern" --include="*.py" backend/ml/ 2>/dev/null | grep -v "test_" | grep -v "ci_gate_validator" || true)
+          if [ -n "$matches" ]; then
+            echo "⚠️  Found potential gate bypass pattern '$pattern':"
+            echo "$matches"
+            FOUND_BYPASS=1
+          fi
+        done
+        
+        if [ $FOUND_BYPASS -eq 1 ]; then
+          echo ""
+          echo "❌ Gate bypass patterns detected in code"
+          exit 1
+        else
+          echo "✅ No gate bypass patterns found"
+        fi
+      shell: bash
+
+  # Job 4: Verify production profile is default
+  profile-check:
+    name: Production Profile Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Check default training profile
+      run: |
+        cd backend
+        python -c "
+import os
+import sys
+
+# Check if TRAINING_PROFILE is set to something other than production in CI
+profile = os.environ.get('TRAINING_PROFILE', 'production')
+if profile != 'production':
+    print(f'❌ TRAINING_PROFILE is set to {profile}, expected production')
+    sys.exit(1)
+else:
+    print(f'✅ TRAINING_PROFILE is correctly set to {profile}')
+"
+      env:
+        # Ensure we're checking the default
+        TRAINING_PROFILE: production
+
+  # Job 5: PR-A2 - ADL Registry validation
+  adl-registry-validation:
+    name: ADL Registry CI Validation
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Required for reliable baseline selection across PR and push workflows
+      
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyyaml jsonschema pytest
+        
+    - name: Validate ADL registry changes
+      run: |
+        cd backend
+
+        # Resolve baseline from target branch for PRs, or previous commit for pushes.
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          base_ref="${{ github.base_ref }}"
+          if [ -z "$base_ref" ]; then
+            echo "❌ Missing github.base_ref for pull_request event"
+            exit 1
+          fi
+          git fetch --no-tags origin "$base_ref"
+          if ! git show "origin/${base_ref}:backend/config/adl_event_registry.v1.yaml" > /tmp/baseline_registry.yaml 2>/dev/null; then
+            echo "❌ Failed to load baseline registry from origin/${base_ref}"
+            exit 1
+          fi
+        else
+          if ! git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+            echo "❌ Unable to determine baseline commit (HEAD^) for push event"
+            exit 1
+          fi
+          if ! git show HEAD^:backend/config/adl_event_registry.v1.yaml > /tmp/baseline_registry.yaml 2>/dev/null; then
+            echo "❌ Failed to load baseline registry from previous commit"
+            exit 1
+          fi
+        fi
+
+        if [ ! -s /tmp/baseline_registry.yaml ]; then
+          echo "❌ Baseline registry is empty or missing"
+          exit 1
+        fi
+
+        # Run validation
+        python -m ml.ci_adl_registry_validator \
+          --baseline /tmp/baseline_registry.yaml \
+          --current config/adl_event_registry.v1.yaml \
+          --strict
+      
+    - name: Run ADL registry tests
+      run: |
+        cd backend
+        python -m pytest \
+          tests/test_adl_event_registry_schema.py \
+          tests/test_adl_registry_loader.py \
+          tests/test_adl_registry_migrations.py \
+          tests/test_ci_gate_validator.py \
+          -v --tb=short

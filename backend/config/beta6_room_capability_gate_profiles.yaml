@@ -1,0 +1,44 @@
+version: v1
+default_room_type: generic
+
+profiles:
+  bedroom:
+    profile_id: cap_profile_bedroom_v1
+    room_type: bedroom
+    min_expected_signal_auc: 0.67
+    min_f1: 0.62
+    max_timeline_mae_minutes: 10
+    max_fragmentation_rate: 0.22
+    rationale: "Bedroom generally has stronger motion/light separability around sleep blocks."
+
+  livingroom:
+    profile_id: cap_profile_livingroom_v1
+    room_type: livingroom
+    min_expected_signal_auc: 0.60
+    min_f1: 0.56
+    max_timeline_mae_minutes: 13
+    max_fragmentation_rate: 0.27
+    rationale: "Living room has weaker separability and more transition-heavy behavior."
+
+  bathroom:
+    profile_id: cap_profile_bathroom_v1
+    room_type: bathroom
+    min_expected_signal_auc: 0.63
+    min_f1: 0.58
+    max_timeline_mae_minutes: 11
+    max_fragmentation_rate: 0.25
+    rationale: "Bathroom occupancy windows are shorter but sensor context is constrained."
+
+  generic:
+    profile_id: cap_profile_generic_v1
+    room_type: generic
+    min_expected_signal_auc: 0.58
+    min_f1: 0.55
+    max_timeline_mae_minutes: 14
+    max_fragmentation_rate: 0.28
+    rationale: "Fallback profile for unknown room names/types."
+
+room_type_hints:
+  bedroom: ["bedroom", "master_bed", "guest_room"]
+  livingroom: ["livingroom", "living_room", "lounge", "family_room"]
+  bathroom: ["bathroom", "toilet", "washroom", "restroom"]

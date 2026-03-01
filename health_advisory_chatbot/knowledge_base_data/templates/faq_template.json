@@ -1,0 +1,20 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "last_updated": "2026-02-08",
+    "total_entries": 0,
+    "categories": ["sleep", "falls", "medication", "cognitive", "nutrition", "exercise", "general"]
+  },
+  "faqs": [
+    {
+      "id": "faq_001",
+      "question_pattern": "Common question text?",
+      "keywords": ["keyword1", "keyword2", "keyword3"],
+      "category": "general",
+      "response": "Detailed, helpful response to the question with evidence-based information.",
+      "related_recommendations": ["recommendation_1", "recommendation_2"],
+      "citations": ["Source_1", "Source_2"],
+      "evidence_level": "clinical_guideline"
+    }
+  ]
+}

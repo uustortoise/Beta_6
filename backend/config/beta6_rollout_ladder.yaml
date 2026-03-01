@@ -1,0 +1,37 @@
+version: v1
+ladder:
+  rungs:
+    - rung: 1
+      users: 3
+      min_days: 7
+      requires_phase5_acceptance: false
+    - rung: 2
+      users: 20
+      min_days: 7
+      requires_phase5_acceptance: true
+    - rung: 3
+      users: 50
+      min_days: 7
+      requires_phase5_acceptance: true
+    - rung: 4
+      users: 100
+      min_days: 14
+      requires_phase5_acceptance: true
+progression_criteria:
+  all_mandatory_metric_floors_pass: true
+  block_on_open_p0_incidents: true
+  min_nightly_pipeline_success_rate: 0.99
+  require_drift_alerts_within_budget: true
+  require_timeline_hard_gates_all_rooms: true
+auto_rollback_triggers:
+  consecutive_nights: 2
+  mae_regression_pct_gt: 0.10
+  alert_precision_below_threshold: true
+  worst_room_f1_below_floor: true
+  pipeline_success_rate_lt: 0.97
+fallback:
+  baseline_profile: production
+  serving_mode: rule_hmm_baseline
+  require_registry_event: true
+  require_ops_alert: true
+  recovery_consecutive_pass_nights: 2

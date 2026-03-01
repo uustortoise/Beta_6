@@ -1,0 +1,2459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Knowledge Base Admin | Health Advisory Chatbot</title>
+    <style>
+        /* CSS Reset and Base */
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        :root {
+            --primary: #2563EB;
+            --primary-dark: #1D4ED8;
+            --success: #10B981;
+            --warning: #F59E0B;
+            --error: #EF4444;
+            --bg: #F9FAFB;
+            --card: #FFFFFF;
+            --text-primary: #1F2937;
+            --text-secondary: #6B7280;
+            --border: #E5E7EB;
+            --shadow: 0 1px 3px rgba(0,0,0,0.1);
+            --radius: 8px;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text-primary);
+            line-height: 1.5;
+        }
+        
+        /* Layout */
+        .app {
+            display: flex;
+            min-height: 100vh;
+        }
+        
+        .sidebar {
+            width: 260px;
+            background: var(--card);
+            border-right: 1px solid var(--border);
+            padding: 24px 0;
+        }
+        
+        .logo {
+            padding: 0 24px 24px;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 16px;
+        }
+        
+        .logo h1 {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--primary);
+        }
+        
+        .logo p {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        
+        .nav {
+            list-style: none;
+        }
+        
+        .nav-item {
+            padding: 12px 24px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            transition: all 0.2s;
+        }
+        
+        .nav-item:hover {
+            background: var(--bg);
+        }
+        
+        .nav-item.active {
+            background: #EFF6FF;
+            color: var(--primary);
+            border-right: 3px solid var(--primary);
+        }
+        
+        .nav-icon {
+            width: 20px;
+            height: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .main {
+            flex: 1;
+            padding: 32px;
+            overflow-y: auto;
+        }
+        
+        .header {
+            margin-bottom: 32px;
+        }
+        
+        .header h2 {
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+        
+        .header p {
+            color: var(--text-secondary);
+        }
+        
+        /* Cards */
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 24px;
+            margin-bottom: 32px;
+        }
+        
+        .stat-card {
+            background: var(--card);
+            border-radius: var(--radius);
+            padding: 24px;
+            box-shadow: var(--shadow);
+            border: 1px solid var(--border);
+        }
+        
+        .stat-card h3 {
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+        
+        .stat-value {
+            font-size: 36px;
+            font-weight: 700;
+            color: var(--primary);
+        }
+        
+        .card {
+            background: var(--card);
+            border-radius: var(--radius);
+            padding: 24px;
+            box-shadow: var(--shadow);
+            border: 1px solid var(--border);
+            margin-bottom: 24px;
+        }
+        
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+        
+        .card-title {
+            font-size: 18px;
+            font-weight: 600;
+        }
+        
+        /* Buttons */
+        .btn {
+            padding: 10px 16px;
+            border-radius: var(--radius);
+            border: none;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            transition: all 0.2s;
+        }
+        
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: var(--primary-dark);
+        }
+        
+        .btn-secondary {
+            background: var(--bg);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+        }
+        
+        .btn-secondary:hover {
+            background: var(--border);
+        }
+        
+        .btn-success {
+            background: var(--success);
+            color: white;
+        }
+        
+        .btn-warning {
+            background: var(--warning);
+            color: white;
+        }
+        
+        .btn-danger {
+            background: var(--error);
+            color: white;
+        }
+        
+        .btn-sm {
+            padding: 6px 12px;
+            font-size: 12px;
+        }
+        
+        /* Upload Area */
+        .upload-zone {
+            border: 2px dashed var(--border);
+            border-radius: var(--radius);
+            padding: 48px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            background: var(--bg);
+        }
+        
+        .upload-zone:hover {
+            border-color: var(--primary);
+            background: #EFF6FF;
+        }
+        
+        .upload-zone.dragover {
+            border-color: var(--primary);
+            background: #DBEAFE;
+        }
+        
+        .upload-icon {
+            font-size: 48px;
+            margin-bottom: 16px;
+        }
+        
+        .upload-text {
+            font-size: 16px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+        
+        .upload-hint {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        
+        /* Forms */
+        .form-group {
+            margin-bottom: 16px;
+        }
+        
+        .form-label {
+            display: block;
+            font-size: 14px;
+            font-weight: 500;
+            margin-bottom: 6px;
+        }
+        
+        .form-select, .form-input {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            font-size: 14px;
+        }
+        
+        .form-select:focus, .form-input:focus {
+            outline: none;
+            border-color: var(--primary);
+        }
+        
+        /* Tables */
+        .table-container {
+            overflow-x: auto;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        th, td {
+            text-align: left;
+            padding: 12px;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        th {
+            font-weight: 600;
+            font-size: 12px;
+            text-transform: uppercase;
+            color: var(--text-secondary);
+            background: var(--bg);
+        }
+        
+        tr:hover {
+            background: var(--bg);
+        }
+        
+        /* Status badges */
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        
+        .badge-success {
+            background: #D1FAE5;
+            color: #065F46;
+        }
+        
+        .badge-warning {
+            background: #FEF3C7;
+            color: #92400E;
+        }
+        
+        .badge-error {
+            background: #FEE2E2;
+            color: #991B1B;
+        }
+        
+        .badge-info {
+            background: #DBEAFE;
+            color: #1E40AF;
+        }
+        
+        /* Alerts */
+        .alert {
+            padding: 16px;
+            border-radius: var(--radius);
+            margin-bottom: 16px;
+        }
+        
+        .alert-success {
+            background: #D1FAE5;
+            border: 1px solid var(--success);
+            color: #065F46;
+        }
+        
+        .alert-warning {
+            background: #FEF3C7;
+            border: 1px solid var(--warning);
+            color: #92400E;
+        }
+        
+        .alert-error {
+            background: #FEE2E2;
+            border: 1px solid var(--error);
+            color: #991B1B;
+        }
+        
+        /* Validation Results */
+        .validation-result {
+            background: var(--bg);
+            border-radius: var(--radius);
+            padding: 16px;
+            margin-top: 16px;
+        }
+        
+        .validation-errors {
+            color: var(--error);
+        }
+        
+        .validation-warnings {
+            color: var(--warning);
+        }
+        
+        .error-list, .warning-list {
+            margin: 8px 0;
+            padding-left: 20px;
+        }
+        
+        .error-list li, .warning-list li {
+            margin: 4px 0;
+        }
+        
+        /* Activity Log */
+        .activity-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 0;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        .activity-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+        }
+        
+        .activity-icon.success {
+            background: #D1FAE5;
+        }
+        
+        .activity-icon.warning {
+            background: #FEF3C7;
+        }
+        
+        .activity-icon.error {
+            background: #FEE2E2;
+        }
+        
+        .activity-content {
+            flex: 1;
+        }
+        
+        .activity-title {
+            font-weight: 500;
+        }
+        
+        .activity-meta {
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        
+        /* Loading */
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 48px;
+        }
+        
+        .spinner {
+            width: 32px;
+            height: 32px;
+            border: 3px solid var(--border);
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Hidden sections */
+        .section {
+            display: none;
+        }
+        
+        .section.active {
+            display: block;
+        }
+        
+        /* Empty state */
+        .empty-state {
+            text-align: center;
+            padding: 64px 24px;
+            color: var(--text-secondary);
+        }
+        
+        .empty-state-icon {
+            font-size: 64px;
+            margin-bottom: 16px;
+        }
+        
+        /* Modal / Detail Panel */
+        .modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .modal-content {
+            background: var(--card);
+            border-radius: var(--radius);
+            width: 90%;
+            max-width: 800px;
+            max-height: 90vh;
+            overflow-y: auto;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
+        }
+        
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        .modal-header h3 {
+            font-size: 18px;
+            font-weight: 600;
+        }
+        
+        .modal-body {
+            padding: 24px;
+        }
+        
+        .detail-section {
+            margin-bottom: 24px;
+        }
+        
+        .detail-section h4 {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            margin-bottom: 8px;
+        }
+        
+        .detail-content {
+            background: var(--bg);
+            padding: 16px;
+            border-radius: var(--radius);
+            line-height: 1.6;
+        }
+        
+        .detail-list {
+            list-style: none;
+            padding: 0;
+        }
+        
+        .detail-list li {
+            padding: 8px 0;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        .detail-list li:last-child {
+            border-bottom: none;
+        }
+        
+        .detail-list li:before {
+            content: "•";
+            color: var(--primary);
+            font-weight: bold;
+            margin-right: 8px;
+        }
+        
+        .detail-meta {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+            margin-top: 16px;
+        }
+        
+        .detail-meta-item {
+            background: var(--bg);
+            padding: 12px;
+            border-radius: var(--radius);
+        }
+        
+        .detail-meta-label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+        }
+        
+        .detail-meta-value {
+            font-weight: 500;
+        }
+        
+        /* Editor Form Styles */
+        .form-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 16px;
+            margin-bottom: 16px;
+        }
+        
+        @media (max-width: 768px) {
+            .form-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        .editor-form .form-group {
+            margin-bottom: 16px;
+        }
+        
+        .editor-form .form-label {
+            display: block;
+            font-size: 14px;
+            font-weight: 500;
+            margin-bottom: 6px;
+            color: var(--text-primary);
+        }
+        
+        .editor-form .form-input,
+        .editor-form .form-select {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            font-size: 14px;
+            font-family: inherit;
+        }
+        
+        .editor-form .form-input:focus,
+        .editor-form .form-select:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+        }
+        
+        .editor-form textarea.form-input {
+            resize: vertical;
+            min-height: 80px;
+        }
+        
+        .btn-success {
+            background: var(--success);
+            color: white;
+        }
+        
+        .btn-success:hover {
+            background: #059669;
+        }
+        
+        .btn-danger {
+            background: var(--error);
+            color: white;
+        }
+        
+        .btn-danger:hover {
+            background: #dc2626;
+        }
+        
+        /* Responsive */
+        @media (max-width: 768px) {
+            .sidebar {
+                display: none;
+            }
+            
+            .main {
+                padding: 16px;
+            }
+            
+            .card-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .modal-content {
+                width: 95%;
+                max-height: 95vh;
+            }
+            
+            .detail-meta {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="logo">
+                <h1>🏥 Health Advisory</h1>
+                <p>Knowledge Base Admin</p>
+            </div>
+            <ul class="nav">
+                <li class="nav-item active" data-section="dashboard">
+                    <span class="nav-icon">📊</span>
+                    <span>Dashboard</span>
+                </li>
+                <li class="nav-item" data-section="upload">
+                    <span class="nav-icon">📤</span>
+                    <span>Upload Data</span>
+                </li>
+                <li class="nav-item" data-section="guidelines">
+                    <span class="nav-icon">📋</span>
+                    <span>Guidelines</span>
+                </li>
+                <li class="nav-item" data-section="drugs">
+                    <span class="nav-icon">💊</span>
+                    <span>Drugs</span>
+                </li>
+                <li class="nav-item" data-section="research">
+                    <span class="nav-icon">📚</span>
+                    <span>Research</span>
+                </li>
+                <li class="nav-item" data-section="faq">
+                    <span class="nav-icon">❓</span>
+                    <span>FAQ</span>
+                </li>
+                <li class="nav-item" data-section="editor">
+                    <span class="nav-icon">✏️</span>
+                    <span>Editor</span>
+                </li>
+                <li class="nav-item" data-section="activity">
+                    <span class="nav-icon">📜</span>
+                    <span>Activity Log</span>
+                </li>
+            </ul>
+        </aside>
+        
+        <!-- Main Content -->
+        <main class="main">
+            <!-- Dashboard Section -->
+            <section id="dashboard" class="section active">
+                <div class="header">
+                    <h2>Dashboard</h2>
+                    <p>Overview of knowledge base content and recent activity</p>
+                </div>
+                
+                <div class="card-grid">
+                    <div class="stat-card">
+                        <h3>Clinical Guidelines</h3>
+                        <div class="stat-value" id="stat-guidelines">--</div>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Drug Entries</h3>
+                        <div class="stat-value" id="stat-drugs">--</div>
+                    </div>
+                    <div class="stat-card">
+                        <h3>FAQ Entries</h3>
+                        <div class="stat-value" id="stat-faq">--</div>
+                    </div>
+                    <div class="stat-card">
+                        <h3>Research Papers</h3>
+                        <div class="stat-value" id="stat-research">--</div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">Recent Activity</h3>
+                        <button class="btn btn-secondary btn-sm" onclick="loadActivity()">Refresh</button>
+                    </div>
+                    <div id="activity-list">
+                        <div class="loading"><div class="spinner"></div></div>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Upload Section -->
+            <section id="upload" class="section">
+                <div class="header">
+                    <h2>Upload Knowledge Base Data</h2>
+                    <p>Upload JSON files to update guidelines, drugs, or FAQ</p>
+                </div>
+                
+                <div class="card">
+                    <div class="form-group">
+                        <label class="form-label">Data Type</label>
+                        <select class="form-select" id="upload-type">
+                            <option value="">Select type...</option>
+                            <option value="guidelines">📋 Clinical Guidelines</option>
+                            <option value="drugs">💊 Drug Database</option>
+                            <option value="faq">❓ FAQ / Common Questions</option>
+                        </select>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label class="form-label">Template</label>
+                        <div>
+                            <button class="btn btn-secondary btn-sm" onclick="downloadTemplate('guidelines')">
+                                📥 Guidelines Template
+                            </button>
+                            <button class="btn btn-secondary btn-sm" onclick="downloadTemplate('drugs')">
+                                📥 Drugs Template
+                            </button>
+                            <button class="btn btn-secondary btn-sm" onclick="downloadTemplate('faq')">
+                                📥 FAQ Template
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="upload-zone" id="upload-zone">
+                        <div class="upload-icon">📁</div>
+                        <div class="upload-text">Drag & drop files here or click to browse</div>
+                        <div class="upload-hint">Supported: .json files (max 10MB)</div>
+                        <input type="file" id="file-input" accept=".json" style="display: none;">
+                    </div>
+                    
+                    <div class="form-group" style="margin-top: 16px;">
+                        <label>
+                            <input type="checkbox" id="validate-only"> Validate only (don't save)
+                        </label>
+                    </div>
+                    
+                    <button class="btn btn-primary" onclick="uploadFile()" id="upload-btn" disabled>
+                        Upload & Validate
+                    </button>
+                    
+                    <div id="upload-result"></div>
+                </div>
+            </section>
+            
+            <!-- Guidelines Section -->
+            <section id="guidelines" class="section">
+                <div class="header">
+                    <h2>Clinical Guidelines</h2>
+                    <p>Browse and manage clinical guidelines</p>
+                </div>
+                
+                <div class="card">
+                    <div class="card-header">
+                        <div style="display: flex; gap: 12px;">
+                            <select class="form-select" id="guideline-category" style="width: 180px;" onchange="loadGuidelines()">
+                                <option value="">All Categories</option>
+                            </select>
+                            <select class="form-select" id="guideline-source" style="width: 180px;" onchange="loadGuidelines()">
+                                <option value="">All Sources</option>
+                            </select>
+                            <input type="text" class="form-input" id="guideline-search" placeholder="Search..." style="width: 240px;" onkeyup="loadGuidelines()">
+                        </div>
+                        <button class="btn btn-primary btn-sm" onclick="document.querySelector('[data-section=upload]').click()">
+                            + Upload New
+                        </button>
+                    </div>
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>ID</th>
+                                    <th>Title</th>
+                                    <th>Category</th>
+                                    <th>Source</th>
+                                    <th>Evidence</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="guidelines-table">
+                                <tr>
+                                    <td colspan="6" class="empty-state">Select filters to load guidelines</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Drugs Section -->
+            <section id="drugs" class="section">
+                <div class="header">
+                    <h2>Drug Database</h2>
+                    <p>Browse medications and interactions</p>
+                </div>
+                
+                <div class="card">
+                    <div class="card-header">
+                        <div style="display: flex; gap: 12px;">
+                            <select class="form-select" id="drug-class" style="width: 180px;" onchange="loadDrugs()">
+                                <option value="">All Classes</option>
+                                <option value="benzodiazepine">Benzodiazepine</option>
+                                <option value="antihistamine">Antihistamine</option>
+                                <option value="ssri">SSRI</option>
+                                <option value="nsaid">NSAID</option>
+                                <option value="biguanide">Biguanide</option>
+                                <option value="sulfonylurea">Sulfonylurea</option>
+                                <option value="cholinesterase_inhibitor">Cholinesterase Inhibitor</option>
+                            </select>
+                            <label style="display: flex; align-items: center; gap: 8px;">
+                                <input type="checkbox" id="drug-beers-only" onchange="loadDrugs()">
+                                <span>Beers Criteria Only</span>
+                            </label>
+                            <input type="text" class="form-input" id="drug-search" placeholder="Search drugs..." style="width: 240px;" onkeyup="loadDrugs()">
+                        </div>
+                        <span id="drug-count" class="badge badge-info">0 drugs</span>
+                    </div>
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Drug Name</th>
+                                    <th>Generic Name</th>
+                                    <th>Class</th>
+                                    <th>ACB Score</th>
+                                    <th>Fall Risk</th>
+                                    <th>Beers Criteria</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="drugs-table">
+                                <tr>
+                                    <td colspan="7" class="empty-state">Click to load drug database</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Research Section -->
+            <section id="research" class="section">
+                <div class="header">
+                    <h2>Research Papers</h2>
+                    <p>Browse research papers and evidence linked to chatbot responses</p>
+                </div>
+                
+                <div class="card">
+                    <div class="card-header">
+                        <div style="display: flex; gap: 12px;">
+                            <select class="form-select" id="research-tag" style="width: 180px;" onchange="loadResearch()">
+                                <option value="">All Topics</option>
+                                <option value="sleep">Sleep</option>
+                                <option value="falls">Falls</option>
+                                <option value="cognitive_decline">Cognitive Decline</option>
+                                <option value="medication">Medication</option>
+                                <option value="frailty">Frailty</option>
+                                <option value="nutrition">Nutrition</option>
+                            </select>
+                            <input type="text" class="form-input" id="research-search" placeholder="Search titles..." style="width: 300px;" onkeyup="loadResearch()">
+                        </div>
+                        <span id="research-count" class="badge badge-info">0 papers</span>
+                    </div>
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>PMID</th>
+                                    <th>Title</th>
+                                    <th>Journal</th>
+                                    <th>Year</th>
+                                    <th>Evidence Level</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="research-table">
+                                <tr>
+                                    <td colspan="6" class="empty-state">Click to load research papers</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Detail Panel Modal -->
+            <div id="detail-modal" class="modal" style="display: none;">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3 id="modal-title">Knowledge Detail</h3>
+                        <button class="btn btn-sm" onclick="closeModal()">&times;</button>
+                    </div>
+                    <div class="modal-body" id="modal-body">
+                        <!-- Content loaded dynamically -->
+                    </div>
+                </div>
+            </div>
+            
+            <!-- FAQ Section -->
+            <section id="faq" class="section">
+                <div class="header">
+                    <h2>FAQ / Common Questions</h2>
+                    <p>Manage frequently asked questions and responses</p>
+                </div>
+                
+                <div class="card">
+                    <div class="card-header">
+                        <div style="display: flex; gap: 12px;">
+                            <select class="form-select" id="faq-category" style="width: 180px;" onchange="loadFAQ()">
+                                <option value="">All Categories</option>
+                                <option value="sleep">Sleep</option>
+                                <option value="falls">Falls</option>
+                                <option value="medication">Medication</option>
+                                <option value="cognitive">Cognitive</option>
+                                <option value="nutrition">Nutrition</option>
+                                <option value="exercise">Exercise</option>
+                                <option value="general">General</option>
+                            </select>
+                            <input type="text" class="form-input" id="faq-search" placeholder="Search questions..." style="width: 300px;" onkeyup="loadFAQ()">
+                        </div>
+                        <span id="faq-count" class="badge badge-info">0 FAQs</span>
+                    </div>
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Question</th>
+                                    <th>Category</th>
+                                    <th>Keywords</th>
+                                    <th>Evidence Level</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="faq-table">
+                                <tr>
+                                    <td colspan="5" class="empty-state">Click to load FAQ entries</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Editor Section -->
+            <section id="editor" class="section">
+                <div class="header">
+                    <h2>Knowledge Base Editor</h2>
+                    <p>Add new entries or edit existing knowledge base items</p>
+                </div>
+                
+                <!-- Editor Type Selector -->
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">Select Entry Type</h3>
+                    </div>
+                    <div style="display: flex; gap: 12px; margin-bottom: 20px;">
+                        <button class="btn btn-primary" onclick="showEditor('guideline')">📋 New Guideline</button>
+                        <button class="btn btn-primary" onclick="showEditor('drug')">💊 New Drug</button>
+                        <button class="btn btn-primary" onclick="showEditor('research')">📚 New Research</button>
+                        <button class="btn btn-primary" onclick="showEditor('faq')">❓ New FAQ</button>
+                    </div>
+                    <p style="color: var(--text-secondary); font-size: 14px;">
+                        Or click "Edit" from any detail view to modify existing entries.
+                    </p>
+                </div>
+                
+                <!-- Editor Form Container -->
+                <div id="editor-form-container" style="display: none;">
+                    <!-- Guideline Editor -->
+                    <div id="guideline-editor" class="editor-form" style="display: none;">
+                        <div class="card">
+                            <div class="card-header">
+                                <h3 class="card-title" id="guideline-editor-title">Add Clinical Guideline</h3>
+                                <button class="btn btn-secondary btn-sm" onclick="hideEditor()">Cancel</button>
+                            </div>
+                            <form id="guideline-form" onsubmit="saveEntry('guideline', event)">
+                                <input type="hidden" id="guideline-edit-id" value="">
+                                <div class="form-grid">
+                                    <div class="form-group">
+                                        <label class="form-label">ID *</label>
+                                        <input type="text" class="form-input" id="guideline-id" placeholder="e.g., beers_2023_anticholinergic" required>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Title *</label>
+                                        <input type="text" class="form-input" id="guideline-title" placeholder="Guideline title" required>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Category *</label>
+                                        <select class="form-select" id="guideline-category-input" required>
+                                            <option value="">Select category...</option>
+                                            <option value="medication_safety">Medication Safety</option>
+                                            <option value="fall_prevention">Fall Prevention</option>
+                                            <option value="cognitive_health">Cognitive Health</option>
+                                            <option value="sleep">Sleep</option>
+                                            <option value="nutrition">Nutrition</option>
+                                            <option value="mobility">Mobility</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Source *</label>
+                                        <select class="form-select" id="guideline-source-input" required>
+                                            <option value="">Select source...</option>
+                                            <option value="AGS_BEERS">AGS Beers</option>
+                                            <option value="AGS_FALLS">AGS Falls</option>
+                                            <option value="WHO_ICOPE">WHO ICOPE</option>
+                                            <option value="NICE">NICE</option>
+                                            <option value="AASM">AASM</option>
+                                            <option value="ADA">ADA</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Evidence Grade</label>
+                                        <select class="form-select" id="guideline-evidence-grade">
+                                            <option value="A">A - Strong</option>
+                                            <option value="B">B - Moderate</option>
+                                            <option value="C">C - Weak</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Version/Year</label>
+                                        <input type="text" class="form-input" id="guideline-version" placeholder="2023">
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Description *</label>
+                                    <textarea class="form-input" id="guideline-description" rows="3" placeholder="Detailed description of the guideline" required></textarea>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Evidence Summary</label>
+                                    <textarea class="form-input" id="guideline-evidence-summary" rows="2" placeholder="Summary of supporting evidence"></textarea>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Examples (comma-separated)</label>
+                                    <input type="text" class="form-input" id="guideline-examples" placeholder="e.g., Diphenhydramine, Oxybutynin, Amitriptyline">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Action Steps (one per line)</label>
+                                    <textarea class="form-input" id="guideline-action-steps" rows="3" placeholder="- Review medications&#10;- Consider alternatives&#10;- Monitor patient"></textarea>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Applicable Conditions (comma-separated)</label>
+                                    <input type="text" class="form-input" id="guideline-conditions" placeholder="e.g., polypharmacy, cognitive_impairment">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Contraindications (comma-separated)</label>
+                                    <input type="text" class="form-input" id="guideline-contraindications" placeholder="e.g., severe_renal_impairment">
+                                </div>
+                                <div style="display: flex; gap: 12px; margin-top: 20px;">
+                                    <button type="submit" class="btn btn-success">Save Guideline</button>
+                                    <button type="button" class="btn btn-danger" id="guideline-delete-btn" style="display: none;" onclick="deleteEntry('guideline')">Delete</button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                    
+                    <!-- Drug Editor -->
+                    <div id="drug-editor" class="editor-form" style="display: none;">
+                        <div class="card">
+                            <div class="card-header">
+                                <h3 class="card-title" id="drug-editor-title">Add Drug Entry</h3>
+                                <button class="btn btn-secondary btn-sm" onclick="hideEditor()">Cancel</button>
+                            </div>
+                            <form id="drug-form" onsubmit="saveEntry('drug', event)">
+                                <input type="hidden" id="drug-edit-id" value="">
+                                <div class="form-grid">
+                                    <div class="form-group">
+                                        <label class="form-label">ID *</label>
+                                        <input type="text" class="form-input" id="drug-id" placeholder="e.g., drug_lorazepam" required>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Drug Name *</label>
+                                        <input type="text" class="form-input" id="drug-name" placeholder="e.g., Lorazepam" required>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Generic Name</label>
+                                        <input type="text" class="form-input" id="drug-generic" placeholder="e.g., lorazepam">
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Drug Class</label>
+                                        <select class="form-select" id="drug-class-input">
+                                            <option value="">Select class...</option>
+                                            <option value="benzodiazepine">Benzodiazepine</option>
+                                            <option value="antihistamine">Antihistamine</option>
+                                            <option value="ssri">SSRI</option>
+                                            <option value="nsaid">NSAID</option>
+                                            <option value="biguanide">Biguanide</option>
+                                            <option value="sulfonylurea">Sulfonylurea</option>
+                                            <option value="cholinesterase_inhibitor">Cholinesterase Inhibitor</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">ACB Score</label>
+                                        <input type="number" class="form-input" id="drug-acb" min="0" max="3" placeholder="0-3">
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Fall Risk</label>
+                                        <select class="form-select" id="drug-fall-risk">
+                                            <option value="none">None</option>
+                                            <option value="low">Low</option>
+                                            <option value="moderate">Moderate</option>
+                                            <option value="high">High</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">
+                                        <input type="checkbox" id="drug-beers"> Beers Criteria Listed
+                                    </label>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Beers Recommendation</label>
+                                    <textarea class="form-input" id="drug-beers-rec" rows="2" placeholder="Recommendation text for Beers Criteria"></textarea>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Common Conditions (comma-separated)</label>
+                                    <input type="text" class="form-input" id="drug-conditions" placeholder="e.g., anxiety, insomnia">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Contraindications (comma-separated)</label>
+                                    <input type="text" class="form-input" id="drug-contraindications" placeholder="e.g., sleep_apnea, severe_respiratory_insufficiency">
+                                </div>
+                                <div style="display: flex; gap: 12px; margin-top: 20px;">
+                                    <button type="submit" class="btn btn-success">Save Drug</button>
+                                    <button type="button" class="btn btn-danger" id="drug-delete-btn" style="display: none;" onclick="deleteEntry('drug')">Delete</button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                    
+                    <!-- Research Editor -->
+                    <div id="research-editor" class="editor-form" style="display: none;">
+                        <div class="card">
+                            <div class="card-header">
+                                <h3 class="card-title" id="research-editor-title">Add Research Paper</h3>
+                                <button class="btn btn-secondary btn-sm" onclick="hideEditor()">Cancel</button>
+                            </div>
+                            <form id="research-form" onsubmit="saveEntry('research', event)">
+                                <input type="hidden" id="research-edit-id" value="">
+                                <div class="form-grid">
+                                    <div class="form-group">
+                                        <label class="form-label">ID *</label>
+                                        <input type="text" class="form-input" id="research-id" placeholder="e.g., pmid_36801234" required>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">PMID</label>
+                                        <input type="text" class="form-input" id="research-pmid" placeholder="PubMed ID">
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Title *</label>
+                                        <input type="text" class="form-input" id="research-title" placeholder="Paper title" required>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Journal</label>
+                                        <input type="text" class="form-input" id="research-journal" placeholder="Journal name">
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Year</label>
+                                        <input type="number" class="form-input" id="research-year" placeholder="2024">
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">DOI</label>
+                                        <input type="text" class="form-input" id="research-doi" placeholder="10.xxxx/xxxxx">
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Authors (comma-separated)</label>
+                                    <input type="text" class="form-input" id="research-authors" placeholder="Smith J, Johnson A, Williams R">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Abstract Summary *</label>
+                                    <textarea class="form-input" id="research-abstract" rows="4" placeholder="Brief summary of the research" required></textarea>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Key Findings (one per line)</label>
+                                    <textarea class="form-input" id="research-findings" rows="3" placeholder="- Finding 1&#10;- Finding 2&#10;- Finding 3"></textarea>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Evidence Level</label>
+                                    <select class="form-select" id="research-evidence-level">
+                                        <option value="systematic_review">Systematic Review</option>
+                                        <option value="rct">Randomized Controlled Trial</option>
+                                        <option value="cohort_study">Cohort Study</option>
+                                        <option value="case_control">Case Control</option>
+                                        <option value="expert_opinion">Expert Opinion</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Sample Size</label>
+                                    <input type="number" class="form-input" id="research-sample-size" placeholder="e.g., 2400">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Study Duration</label>
+                                    <input type="text" class="form-input" id="research-duration" placeholder="e.g., 5 years">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Population</label>
+                                    <input type="text" class="form-input" id="research-population" placeholder="e.g., adults aged 65+">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Tags (comma-separated)</label>
+                                    <input type="text" class="form-input" id="research-tags" placeholder="sleep, cognitive_decline, elderly">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Clinical Applications (one per line)</label>
+                                    <textarea class="form-input" id="research-applications" rows="3" placeholder="- Application 1&#10;- Application 2"></textarea>
+                                </div>
+                                <div style="display: flex; gap: 12px; margin-top: 20px;">
+                                    <button type="submit" class="btn btn-success">Save Research</button>
+                                    <button type="button" class="btn btn-danger" id="research-delete-btn" style="display: none;" onclick="deleteEntry('research')">Delete</button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                    
+                    <!-- FAQ Editor -->
+                    <div id="faq-editor" class="editor-form" style="display: none;">
+                        <div class="card">
+                            <div class="card-header">
+                                <h3 class="card-title" id="faq-editor-title">Add FAQ Entry</h3>
+                                <button class="btn btn-secondary btn-sm" onclick="hideEditor()">Cancel</button>
+                            </div>
+                            <form id="faq-form" onsubmit="saveEntry('faq', event)">
+                                <input type="hidden" id="faq-edit-id" value="">
+                                <div class="form-grid">
+                                    <div class="form-group">
+                                        <label class="form-label">ID *</label>
+                                        <input type="text" class="form-input" id="faq-id" placeholder="e.g., faq_001" required>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Category *</label>
+                                        <select class="form-select" id="faq-category-input" required>
+                                            <option value="">Select category...</option>
+                                            <option value="sleep">Sleep</option>
+                                            <option value="falls">Falls</option>
+                                            <option value="medication">Medication</option>
+                                            <option value="cognitive">Cognitive</option>
+                                            <option value="nutrition">Nutrition</option>
+                                            <option value="exercise">Exercise</option>
+                                            <option value="general">General</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label class="form-label">Evidence Level</label>
+                                        <select class="form-select" id="faq-evidence-level">
+                                            <option value="clinical_guideline">Clinical Guideline</option>
+                                            <option value="expert_consensus">Expert Consensus</option>
+                                            <option value="expert_opinion">Expert Opinion</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Question Pattern *</label>
+                                    <input type="text" class="form-input" id="faq-question" placeholder="e.g., Why do I wake up multiple times at night?" required>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Keywords (comma-separated)</label>
+                                    <input type="text" class="form-input" id="faq-keywords" placeholder="nighttime, wake, bathroom, sleep">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Response *</label>
+                                    <textarea class="form-input" id="faq-response" rows="6" placeholder="Detailed response to the question..." required></textarea>
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Related Recommendations (comma-separated)</label>
+                                    <input type="text" class="form-input" id="faq-recommendations" placeholder="sleep_hygiene, fluid_management">
+                                </div>
+                                <div class="form-group">
+                                    <label class="form-label">Citations (comma-separated)</label>
+                                    <input type="text" class="form-input" id="faq-citations" placeholder="AASM_2023_Sleep_Guidelines">
+                                </div>
+                                <div style="display: flex; gap: 12px; margin-top: 20px;">
+                                    <button type="submit" class="btn btn-success">Save FAQ</button>
+                                    <button type="button" class="btn btn-danger" id="faq-delete-btn" style="display: none;" onclick="deleteEntry('faq')">Delete</button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Activity Log Section -->
+        </main>
+    </div>
+    
+    <script>
+        // API Base URL - change this to match your backend
+        const API_BASE = '/api/admin';
+        
+        // State
+        let currentFile = null;
+        
+        // Navigation
+        document.querySelectorAll('.nav-item').forEach(item => {
+            item.addEventListener('click', () => {
+                const section = item.dataset.section;
+                
+                // Update nav
+                document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+                item.classList.add('active');
+                
+                // Update section
+                document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+                document.getElementById(section).classList.add('active');
+                
+                // Load data if needed
+                if (section === 'dashboard') loadStats();
+                if (section === 'activity') loadActivity();
+                if (section === 'guidelines') loadGuidelines();
+                if (section === 'research') loadResearch();
+                if (section === 'drugs') loadDrugs();
+                if (section === 'faq') loadFAQ();
+                if (section === 'editor') hideEditor();
+            });
+        });
+        
+        // Load statistics
+        async function loadStats() {
+            try {
+                const response = await fetch(`${API_BASE}/stats`);
+                const data = await response.json();
+                
+                document.getElementById('stat-guidelines').textContent = data.guidelines_count || 0;
+                document.getElementById('stat-drugs').textContent = data.drugs_count || 0;
+                document.getElementById('stat-faq').textContent = data.faq_count || 0;
+                document.getElementById('stat-research').textContent = data.research_count || 0;
+            } catch (error) {
+                console.error('Failed to load stats:', error);
+            }
+        }
+        
+        // Load activity
+        async function loadActivity() {
+            const container = document.getElementById('activity-list');
+            container.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+            
+            try {
+                const response = await fetch(`${API_BASE}/activity`);
+                const entries = await response.json();
+                
+                if (entries.length === 0) {
+                    container.innerHTML = '<p class="empty-state">No recent activity</p>';
+                    return;
+                }
+                
+                container.innerHTML = entries.map(entry => {
+                    const icon = entry.status === 'SUCCESS' ? '✓' : 
+                                entry.status === 'FAILED' ? '✗' : '⚠';
+                    const iconClass = entry.status === 'SUCCESS' ? 'success' : 
+                                     entry.status === 'FAILED' ? 'error' : 'warning';
+                    
+                    return `
+                        <div class="activity-item">
+                            <div class="activity-icon ${iconClass}">${icon}</div>
+                            <div class="activity-content">
+                                <div class="activity-title">${entry.action} - ${entry.file_type}</div>
+                                <div class="activity-meta">
+                                    ${entry.filename} • ${new Date(entry.timestamp).toLocaleString()}
+                                    ${entry.message ? `• ${entry.message}` : ''}
+                                </div>
+                            </div>
+                            <span class="badge badge-${iconClass}">${entry.status}</span>
+                        </div>
+                    `;
+                }).join('');
+            } catch (error) {
+                container.innerHTML = '<p class="empty-state">Failed to load activity</p>';
+            }
+        }
+        
+        // Load guidelines
+        async function loadGuidelines() {
+            const tbody = document.getElementById('guidelines-table');
+            tbody.innerHTML = '<tr><td colspan="6" class="loading"><div class="spinner"></div></td></tr>';
+            
+            try {
+                const params = new URLSearchParams();
+                const category = document.getElementById('guideline-category').value;
+                const source = document.getElementById('guideline-source').value;
+                const search = document.getElementById('guideline-search').value;
+                
+                if (category) params.append('category', category);
+                if (source) params.append('source', source);
+                if (search) params.append('search', search);
+                
+                const response = await fetch(`${API_BASE}/guidelines?${params}`);
+                const guidelines = await response.json();
+                
+                if (guidelines.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No guidelines found</td></tr>';
+                    return;
+                }
+                
+                tbody.innerHTML = guidelines.map(g => `
+                    <tr>
+                        <td><code>${g.id}</code></td>
+                        <td>${g.title}</td>
+                        <td><span class="badge badge-info">${g.category}</span></td>
+                        <td>${g.source}</td>
+                        <td><span class="badge badge-${g.evidence_grade === 'A' ? 'success' : 'warning'}">${g.evidence_grade}</span></td>
+                        <td>
+                            <button class="btn btn-primary btn-sm" onclick='showGuidelineDetail(${JSON.stringify(g).replace(/'/g, "&#39;")})'>
+                                View Details
+                            </button>
+                        </td>
+                    </tr>
+                `).join('');
+            } catch (error) {
+                tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Failed to load guidelines</td></tr>';
+            }
+        }
+        
+        // Show guideline detail modal
+        function showGuidelineDetail(guideline) {
+            const modal = document.getElementById('detail-modal');
+            const title = document.getElementById('modal-title');
+            const body = document.getElementById('modal-body');
+            
+            title.textContent = guideline.title;
+            
+            // Fetch full guideline details
+            fetch(`${API_BASE}/guideline-detail?id=${guideline.id}`)
+                .then(r => r.json())
+                .then(data => renderGuidelineDetail(data))
+                .catch(() => renderGuidelineDetail(guideline));
+            
+            modal.style.display = 'flex';
+        }
+        
+        // Render guideline details
+        function renderGuidelineDetail(g) {
+            const body = document.getElementById('modal-body');
+            
+            // Store data in a data attribute for the edit button
+            body.innerHTML = `
+                <div style="display: flex; justify-content: flex-end; margin-bottom: 16px;">
+                    <button class="btn btn-warning btn-sm" id="edit-guideline-btn" data-id="${g.id}">Edit Guideline</button>
+                </div>
+                
+                <div class="detail-section">
+                    <h4>Description</h4>
+                    <div class="detail-content">${g.description || 'No description available'}</div>
+                </div>
+                
+                ${g.evidence_summary ? `
+                <div class="detail-section">
+                    <h4>Evidence Summary</h4>
+                    <div class="detail-content">${g.evidence_summary}</div>
+                </div>
+                ` : ''}
+                
+                ${g.examples ? `
+                <div class="detail-section">
+                    <h4>Examples</h4>
+                    <ul class="detail-list">
+                        ${g.examples.map(e => `<li>${e}</li>`).join('')}
+                    </ul>
+                </div>
+                ` : ''}
+                
+                ${g.action_steps ? `
+                <div class="detail-section">
+                    <h4>Action Steps</h4>
+                    <ul class="detail-list">
+                        ${g.action_steps.map(step => `<li>${step}</li>`).join('')}
+                    </ul>
+                </div>
+                ` : ''}
+                
+                ${g.applicable_conditions ? `
+                <div class="detail-section">
+                    <h4>Applicable Conditions</h4>
+                    <div class="detail-content">
+                        ${g.applicable_conditions.map(c => `<span class="badge badge-info" style="margin-right: 4px;">${c}</span>`).join('')}
+                    </div>
+                </div>
+                ` : ''}
+                
+                ${g.contraindications && g.contraindications.length > 0 ? `
+                <div class="detail-section">
+                    <h4>Contraindications</h4>
+                    <ul class="detail-list">
+                        ${g.contraindications.map(c => `<li>${c}</li>`).join('')}
+                    </ul>
+                </div>
+                ` : ''}
+                
+                <div class="detail-meta">
+                    <div class="detail-meta-item">
+                        <div class="detail-meta-label">Source</div>
+                        <div class="detail-meta-value">${g.source || 'N/A'}</div>
+                    </div>
+                    <div class="detail-meta-item">
+                        <div class="detail-meta-label">Version</div>
+                        <div class="detail-meta-value">${g.version || 'N/A'}</div>
+                    </div>
+                    <div class="detail-meta-item">
+                        <div class="detail-meta-label">Publication Year</div>
+                        <div class="detail-meta-value">${g.publication_year || 'N/A'}</div>
+                    </div>
+                    <div class="detail-meta-item">
+                        <div class="detail-meta-label">Evidence Grade</div>
+                        <div class="detail-meta-value"><span class="badge badge-${g.evidence_grade === 'A' ? 'success' : 'warning'}">${g.evidence_grade || 'N/A'}</span></div>
+                    </div>
+                    <div class="detail-meta-item">
+                        <div class="detail-meta-label">Category</div>
+                        <div class="detail-meta-value">${g.category || 'N/A'}</div>
+                    </div>
+                </div>
+            `;
+            
+            // Add event listener for edit button
+            setTimeout(() => {
+                const editBtn = document.getElementById('edit-guideline-btn');
+                if (editBtn) {
+                    editBtn.addEventListener('click', () => {
+                        closeModal();
+                        // Navigate to editor section
+                        document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+                        document.querySelector('[data-section="editor"]').classList.add('active');
+                        document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+                        document.getElementById('editor').classList.add('active');
+                        showEditor('guideline', g);
+                    });
+                }
+            }, 0);
+        }
+        
+        // File upload handling
+        const uploadZone = document.getElementById('upload-zone');
+        const fileInput = document.getElementById('file-input');
+        const uploadBtn = document.getElementById('upload-btn');
+        
+        uploadZone.addEventListener('click', () => fileInput.click());
+        
+        uploadZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadZone.classList.add('dragover');
+        });
+        
+        uploadZone.addEventListener('dragleave', () => {
+            uploadZone.classList.remove('dragover');
+        });
+        
+        uploadZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadZone.classList.remove('dragover');
+            
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        });
+        
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFile(e.target.files[0]);
+            }
+        });
+        
+        function handleFile(file) {
+            if (!file.name.endsWith('.json')) {
+                alert('Please select a JSON file');
+                return;
+            }
+            
+            currentFile = file;
+            uploadZone.innerHTML = `
+                <div class="upload-icon">📄</div>
+                <div class="upload-text">${file.name}</div>
+                <div class="upload-hint">${(file.size / 1024).toFixed(1)} KB</div>
+            `;
+            uploadBtn.disabled = false;
+        }
+        
+        async function uploadFile() {
+            if (!currentFile) return;
+            
+            const fileType = document.getElementById('upload-type').value;
+            if (!fileType) {
+                alert('Please select a data type');
+                return;
+            }
+            
+            const validateOnly = document.getElementById('validate-only').checked;
+            
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = 'Uploading...';
+            
+            const formData = new FormData();
+            formData.append('file', currentFile);
+            formData.append('file_type', fileType);
+            formData.append('validate_only', validateOnly);
+            
+            try {
+                const response = await fetch(`${API_BASE}/upload`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                displayUploadResult(result);
+                
+                if (result.success && !validateOnly) {
+                    loadStats();
+                }
+            } catch (error) {
+                displayUploadResult({
+                    success: false,
+                    message: 'Upload failed: ' + error.message
+                });
+            } finally {
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = 'Upload & Validate';
+            }
+        }
+        
+        function displayUploadResult(result) {
+            const container = document.getElementById('upload-result');
+            
+            let html = `<div class="alert alert-${result.success ? 'success' : 'error'}">`;
+            html += `<strong>${result.success ? '✓' : '✗'}</strong> ${result.message}`;
+            html += '</div>';
+            
+            if (result.validation_errors && result.validation_errors.length > 0) {
+                html += '<div class="validation-result validation-errors">';
+                html += '<strong>Errors:</strong>';
+                html += '<ul class="error-list">';
+                result.validation_errors.forEach(err => {
+                    html += `<li>• ${err}</li>`;
+                });
+                html += '</ul></div>';
+            }
+            
+            if (result.warnings && result.warnings.length > 0) {
+                html += '<div class="validation-result validation-warnings">';
+                html += '<strong>Warnings:</strong>';
+                html += '<ul class="warning-list">';
+                result.warnings.forEach(warn => {
+                    html += `<li>• ${warn}</li>`;
+                });
+                html += '</ul></div>';
+            }
+            
+            if (result.stats) {
+                html += '<div class="validation-result">';
+                html += '<strong>Stats:</strong> ';
+                html += `${result.stats.entries_found || 0} entries found`;
+                if (result.stats.filename) {
+                    html += `<br>Saved as: ${result.stats.filename}`;
+                }
+                html += '</div>';
+            }
+            
+            container.innerHTML = html;
+        }
+        
+        // Download template
+        async function downloadTemplate(type) {
+            window.open(`${API_BASE}/templates/${type}`, '_blank');
+        }
+        
+        // Load categories
+        async function loadCategories() {
+            try {
+                const response = await fetch(`${API_BASE}/categories`);
+                const data = await response.json();
+                
+                // Populate guideline categories
+                const categorySelect = document.getElementById('guideline-category');
+                categorySelect.innerHTML = '<option value="">All Categories</option>';
+                data.guideline_categories.forEach(cat => {
+                    categorySelect.innerHTML += `<option value="${cat}">${cat}</option>`;
+                });
+                
+            } catch (error) {
+                console.error('Failed to load categories:', error);
+            }
+        }
+        
+        // Load research papers
+        async function loadResearch() {
+            const tbody = document.getElementById('research-table');
+            const countBadge = document.getElementById('research-count');
+            tbody.innerHTML = '<tr><td colspan="6" class="loading"><div class="spinner"></div></td></tr>';
+            
+            try {
+                const params = new URLSearchParams();
+                const tag = document.getElementById('research-tag').value;
+                const search = document.getElementById('research-search').value;
+                
+                if (tag) params.append('tag', tag);
+                if (search) params.append('search', search);
+                
+                const response = await fetch(`${API_BASE}/research?${params}`);
+                const papers = await response.json();
+                
+                countBadge.textContent = `${papers.length} papers`;
+                
+                if (papers.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">No research papers found</td></tr>';
+                    return;
+                }
+                
+                tbody.innerHTML = papers.map(p => `
+                    <tr>
+                        <td><code>${p.pmid || 'N/A'}</code></td>
+                        <td>${p.title}</td>
+                        <td>${p.journal || 'N/A'}</td>
+                        <td>${p.year || 'N/A'}</td>
+                        <td><span class="badge badge-${p.evidence_level === 'systematic_review' ? 'success' : p.evidence_level === 'rct' ? 'info' : 'warning'}">${p.evidence_level || 'N/A'}</span></td>
+                        <td>
+                            <button class="btn btn-primary btn-sm" onclick='showResearchDetail(${JSON.stringify(p).replace(/'/g, "&#39;")})'>
+                                View Details
+                            </button>
+                        </td>
+                    </tr>
+                `).join('');
+            } catch (error) {
+                tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Failed to load research papers</td></tr>';
+                console.error('Failed to load research:', error);
+            }
+        }
+        
+        // Show research detail modal
+        function showResearchDetail(paper) {
+            const modal = document.getElementById('detail-modal');
+            const title = document.getElementById('modal-title');
+            const body = document.getElementById('modal-body');
+            
+            title.textContent = paper.title;
+            
+            // Fetch full paper details from API
+            fetch(`${API_BASE}/research?search=${encodeURIComponent(paper.title)}`)
+                .then(r => r.json())
+                .then(papers => {
+                    const fullPaper = papers.find(p => p.id === paper.id) || paper;
+                    renderResearchDetail(fullPaper);
+                })
+                .catch(() => renderResearchDetail(paper));
+            
+            modal.style.display = 'flex';
+        }
+        
+        // Render research paper details
+        async function renderResearchDetail(paper) {
+            const body = document.getElementById('modal-body');
+            
+            // Fetch the full paper data to get key_findings and other details
+            try {
+                const response = await fetch(`${API_BASE}/research-detail?id=${paper.id}`);
+                const fullData = await response.json();
+                
+                body.innerHTML = `
+                    <div style="display: flex; justify-content: flex-end; margin-bottom: 16px;">
+                        <button class="btn btn-warning btn-sm" id="edit-research-btn">Edit Research</button>
+                    </div>
+                    
+                    <div class="detail-section">
+                        <h4>Authors</h4>
+                        <div class="detail-content">${fullData.authors ? fullData.authors.join(', ') : 'N/A'}</div>
+                    </div>
+                    
+                    <div class="detail-section">
+                        <h4>Abstract Summary</h4>
+                        <div class="detail-content">${fullData.abstract_summary || fullData.abstract || 'No abstract available'}</div>
+                    </div>
+                    
+                    ${fullData.key_findings ? `
+                    <div class="detail-section">
+                        <h4>Key Findings</h4>
+                        <ul class="detail-list">
+                            ${fullData.key_findings.map(f => `<li>${f}</li>`).join('')}
+                        </ul>
+                    </div>
+                    ` : ''}
+                    
+                    ${fullData.clinical_applications ? `
+                    <div class="detail-section">
+                        <h4>Clinical Applications</h4>
+                        <ul class="detail-list">
+                            ${fullData.clinical_applications.map(app => `<li>${app}</li>`).join('')}
+                        </ul>
+                    </div>
+                    ` : ''}
+                    
+                    <div class="detail-meta">
+                        <div class="detail-meta-item">
+                            <div class="detail-meta-label">Evidence Level</div>
+                            <div class="detail-meta-value">${fullData.evidence_level || 'N/A'}</div>
+                        </div>
+                        <div class="detail-meta-item">
+                            <div class="detail-meta-label">Sample Size</div>
+                            <div class="detail-meta-value">${fullData.sample_size ? fullData.sample_size.toLocaleString() : 'N/A'}</div>
+                        </div>
+                        <div class="detail-meta-item">
+                            <div class="detail-meta-label">Study Duration</div>
+                            <div class="detail-meta-value">${fullData.study_duration || 'N/A'}</div>
+                        </div>
+                        <div class="detail-meta-item">
+                            <div class="detail-meta-label">Population</div>
+                            <div class="detail-meta-value">${fullData.population || 'N/A'}</div>
+                        </div>
+                        <div class="detail-meta-item">
+                            <div class="detail-meta-label">DOI</div>
+                            <div class="detail-meta-value">${fullData.doi ? `<a href="https://doi.org/${fullData.doi}" target="_blank">${fullData.doi}</a>` : 'N/A'}</div>
+                        </div>
+                        <div class="detail-meta-item">
+                            <div class="detail-meta-label">Tags</div>
+                            <div class="detail-meta-value">${fullData.tags ? fullData.tags.map(t => `<span class="badge badge-info" style="margin-right: 4px;">${t}</span>`).join('') : 'N/A'}</div>
+                        </div>
+                    </div>
+                `;
+                
+                // Add event listener for edit button
+                setTimeout(() => {
+                    const editBtn = document.getElementById('edit-research-btn');
+                    if (editBtn) {
+                        editBtn.addEventListener('click', () => {
+                            closeModal();
+                            document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+                            document.querySelector('[data-section="editor"]').classList.add('active');
+                            document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+                            document.getElementById('editor').classList.add('active');
+                            showEditor('research', fullData);
+                        });
+                    }
+                }, 0);
+            } catch (e) {
+                body.innerHTML = '<p class="empty-state">Failed to load full details</p>';
+            }
+        }
+        
+        // Load drugs
+        async function loadDrugs() {
+            const tbody = document.getElementById('drugs-table');
+            const countBadge = document.getElementById('drug-count');
+            tbody.innerHTML = '<tr><td colspan="7" class="loading"><div class="spinner"></div></td></tr>';
+            
+            try {
+                const params = new URLSearchParams();
+                const drugClass = document.getElementById('drug-class').value;
+                const beersOnly = document.getElementById('drug-beers-only').checked;
+                const search = document.getElementById('drug-search').value;
+                
+                if (drugClass) params.append('class', drugClass);
+                if (beersOnly) params.append('beers_only', 'true');
+                if (search) params.append('search', search);
+                
+                const response = await fetch(`${API_BASE}/drugs?${params}`);
+                const drugs = await response.json();
+                
+                countBadge.textContent = `${drugs.length} drugs`;
+                
+                if (drugs.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" class="empty-state">No drugs found</td></tr>';
+                    return;
+                }
+                
+                tbody.innerHTML = drugs.map(d => `
+                    <tr>
+                        <td><strong>${d.drug_name}</strong></td>
+                        <td>${d.generic_name || 'N/A'}</td>
+                        <td><span class="badge badge-info">${d.drug_class || 'N/A'}</span></td>
+                        <td>${d.acb_score !== undefined ? d.acb_score : 'N/A'}</td>
+                        <td><span class="badge badge-${d.fall_risk === 'high' ? 'error' : d.fall_risk === 'moderate' ? 'warning' : 'success'}">${d.fall_risk || 'N/A'}</span></td>
+                        <td>${d.beers_criteria ? '<span class="badge badge-error">Yes</span>' : '<span class="badge badge-success">No</span>'}</td>
+                        <td>
+                            <button class="btn btn-primary btn-sm" onclick='showDrugDetail(${JSON.stringify(d).replace(/'/g, "&#39;")})'>
+                                View Details
+                            </button>
+                        </td>
+                    </tr>
+                `).join('');
+            } catch (error) {
+                tbody.innerHTML = '<tr><td colspan="7" class="empty-state">Failed to load drugs</td></tr>';
+                console.error('Failed to load drugs:', error);
+            }
+        }
+        
+        // Show drug detail modal
+        function showDrugDetail(drug) {
+            const modal = document.getElementById('detail-modal');
+            const title = document.getElementById('modal-title');
+            const body = document.getElementById('modal-body');
+            
+            title.textContent = drug.drug_name;
+            
+            // Fetch full drug details
+            fetch(`${API_BASE}/drug-detail?id=${drug.id}`)
+                .then(r => r.json())
+                .then(data => renderDrugDetail(data))
+                .catch(() => renderDrugDetail(drug));
+            
+            modal.style.display = 'flex';
+        }
+        
+        // Render drug details
+        function renderDrugDetail(d) {
+            const body = document.getElementById('modal-body');
+            
+            body.innerHTML = `
+                <div style="display: flex; justify-content: flex-end; margin-bottom: 16px;">
+                    <button class="btn btn-warning btn-sm" id="edit-drug-btn">Edit Drug</button>
+                </div>
+                
+                ${d.beers_recommendation ? `
+                <div class="detail-section">
+                    <h4>Beers Criteria Recommendation</h4>
+                    <div class="detail-content" style="background: ${d.beers_criteria ? '#FEE2E2' : '#D1FAE5'};">${d.beers_recommendation}</div>
+                </div>
+                ` : ''}
+                
+                ${d.interactions && d.interactions.length > 0 ? `
+                <div class="detail-section">
+                    <h4>Drug Interactions</h4>
+                    <div class="detail-content">
+                        ${d.interactions.map(i => `
+                            <div style="margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid var(--border);">
+                                <strong>${i.drug}</strong> 
+                                <span class="badge badge-${i.severity === 'severe' ? 'error' : i.severity === 'major' ? 'warning' : 'info'}">${i.severity}</span>
+                                <div style="margin-top: 4px; color: var(--text-secondary);">${i.mechanism}</div>
+                                <div style="margin-top: 4px;"><strong>Recommendation:</strong> ${i.recommendation}</div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+                ` : ''}
+                
+                ${d.contraindications && d.contraindications.length > 0 ? `
+                <div class="detail-section">
+                    <h4>Contraindications</h4>
+                    <ul class="detail-list">
+                        ${d.contraindications.map(c => `<li>${c}</li>`).join('')}
+                    </ul>
+                </div>
+                ` : ''}
+                
+                ${d.common_conditions ? `
+                <div class="detail-section">
+                    <h4>Common Conditions Treated</h4>
+                    <div class="detail-content">
+                        ${d.common_conditions.map(c => `<span class="badge badge-info" style="margin-right: 4px;">${c}</span>`).join('')}
+                    </div>
+                </div>
+                ` : ''}
+                
+                <div class="detail-meta">
+                    <div class="detail-meta-item">
+                        <div class="detail-meta-label">Generic Name</div>
+                        <div class="detail-meta-value">${d.generic_name || 'N/A'}</div>
+                    </div>
+                    <div class="detail-meta-item">
+                        <div class="detail-meta-label">Drug Class</div>
+                        <div class="detail-meta-value">${d.drug_class || 'N/A'}</div>
+                    </div>
+                    <div class="detail-meta-item">
+                        <div class="detail-meta-label">ACB Score</div>
+                        <div class="detail-meta-value">${d.acb_score !== undefined ? d.acb_score : 'N/A'}</div>
+                    </div>
+                    <div class="detail-meta-item">
+                        <div class="detail-meta-label">Fall Risk</div>
+                        <div class="detail-meta-value"><span class="badge badge-${d.fall_risk === 'high' ? 'error' : d.fall_risk === 'moderate' ? 'warning' : 'success'}">${d.fall_risk || 'N/A'}</span></div>
+                    </div>
+                    <div class="detail-meta-item">
+                        <div class="detail-meta-label">Beers Criteria</div>
+                        <div class="detail-meta-value">${d.beers_criteria ? '<span class="badge badge-error">Listed</span>' : '<span class="badge badge-success">Not Listed</span>'}</div>
+                    </div>
+                </div>
+            `;
+            
+            // Add event listener for edit button
+            setTimeout(() => {
+                const editBtn = document.getElementById('edit-drug-btn');
+                if (editBtn) {
+                    editBtn.addEventListener('click', () => {
+                        closeModal();
+                        document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+                        document.querySelector('[data-section="editor"]').classList.add('active');
+                        document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+                        document.getElementById('editor').classList.add('active');
+                        showEditor('drug', d);
+                    });
+                }
+            }, 0);
+        }
+        
+        // Load FAQ
+        async function loadFAQ() {
+            const tbody = document.getElementById('faq-table');
+            const countBadge = document.getElementById('faq-count');
+            tbody.innerHTML = '<tr><td colspan="5" class="loading"><div class="spinner"></div></td></tr>';
+            
+            try {
+                const params = new URLSearchParams();
+                const category = document.getElementById('faq-category').value;
+                const search = document.getElementById('faq-search').value;
+                
+                if (category) params.append('category', category);
+                if (search) params.append('search', search);
+                
+                const response = await fetch(`${API_BASE}/faq?${params}`);
+                const faqs = await response.json();
+                
+                countBadge.textContent = `${faqs.length} FAQs`;
+                
+                if (faqs.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No FAQs found</td></tr>';
+                    return;
+                }
+                
+                tbody.innerHTML = faqs.map(f => `
+                    <tr>
+                        <td>${f.question_pattern}</td>
+                        <td><span class="badge badge-info">${f.category || 'N/A'}</span></td>
+                        <td>${f.keywords ? f.keywords.slice(0, 3).join(', ') + (f.keywords.length > 3 ? '...' : '') : 'N/A'}</td>
+                        <td><span class="badge badge-${f.evidence_level === 'clinical_guideline' ? 'success' : 'info'}">${f.evidence_level || 'N/A'}</span></td>
+                        <td>
+                            <button class="btn btn-primary btn-sm" onclick='showFAQDetail(${JSON.stringify(f).replace(/'/g, "&#39;")})'>
+                                View Details
+                            </button>
+                        </td>
+                    </tr>
+                `).join('');
+            } catch (error) {
+                tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Failed to load FAQs</td></tr>';
+                console.error('Failed to load FAQ:', error);
+            }
+        }
+        
+        // Show FAQ detail modal
+        function showFAQDetail(faq) {
+            const modal = document.getElementById('detail-modal');
+            const title = document.getElementById('modal-title');
+            const body = document.getElementById('modal-body');
+            
+            title.textContent = 'FAQ Details';
+            
+            // Fetch full FAQ details
+            fetch(`${API_BASE}/faq-detail?id=${faq.id}`)
+                .then(r => r.json())
+                .then(data => renderFAQDetail(data))
+                .catch(() => renderFAQDetail(faq));
+            
+            modal.style.display = 'flex';
+        }
+        
+        // Render FAQ details
+        function renderFAQDetail(f) {
+            const body = document.getElementById('modal-body');
+            
+            body.innerHTML = `
+                <div style="display: flex; justify-content: flex-end; margin-bottom: 16px;">
+                    <button class="btn btn-warning btn-sm" id="edit-faq-btn">Edit FAQ</button>
+                </div>
+                
+                <div class="detail-section">
+                    <h4>Question Pattern</h4>
+                    <div class="detail-content" style="font-size: 16px; font-weight: 500;">${f.question_pattern || 'N/A'}</div>
+                </div>
+                
+                <div class="detail-section">
+                    <h4>Response</h4>
+                    <div class="detail-content">${f.response || 'No response available'}</div>
+                </div>
+                
+                ${f.keywords ? `
+                <div class="detail-section">
+                    <h4>Keywords</h4>
+                    <div class="detail-content">
+                        ${f.keywords.map(k => `<span class="badge badge-info" style="margin-right: 4px;">${k}</span>`).join('')}
+                    </div>
+                </div>
+                ` : ''}
+                
+                ${f.related_recommendations ? `
+                <div class="detail-section">
+                    <h4>Related Recommendations</h4>
+                    <ul class="detail-list">
+                        ${f.related_recommendations.map(r => `<li>${r}</li>`).join('')}
+                    </ul>
+                </div>
+                ` : ''}
+                
+                ${f.citations && f.citations.length > 0 ? `
+                <div class="detail-section">
+                    <h4>Citations</h4>
+                    <ul class="detail-list">
+                        ${f.citations.map(c => `<li>${c}</li>`).join('')}
+                    </ul>
+                </div>
+                ` : ''}
+                
+                <div class="detail-meta">
+                    <div class="detail-meta-item">
+                        <div class="detail-meta-label">Category</div>
+                        <div class="detail-meta-value"><span class="badge badge-info">${f.category || 'N/A'}</span></div>
+                    </div>
+                    <div class="detail-meta-item">
+                        <div class="detail-meta-label">Evidence Level</div>
+                        <div class="detail-meta-value"><span class="badge badge-${f.evidence_level === 'clinical_guideline' ? 'success' : 'info'}">${f.evidence_level || 'N/A'}</span></div>
+                    </div>
+                </div>
+            `;
+            
+            // Add event listener for edit button
+            setTimeout(() => {
+                const editBtn = document.getElementById('edit-faq-btn');
+                if (editBtn) {
+                    editBtn.addEventListener('click', () => {
+                        closeModal();
+                        document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+                        document.querySelector('[data-section="editor"]').classList.add('active');
+                        document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+                        document.getElementById('editor').classList.add('active');
+                        showEditor('faq', f);
+                    });
+                }
+            }, 0);
+        }
+        
+        // Close modal
+        function closeModal() {
+            document.getElementById('detail-modal').style.display = 'none';
+        }
+        
+        // Close modal when clicking outside
+        document.addEventListener('click', (e) => {
+            const modal = document.getElementById('detail-modal');
+            if (e.target === modal) {
+                closeModal();
+            }
+        });
+        
+        // ==================== EDITOR FUNCTIONS ====================
+        
+        // Show editor form
+        function showEditor(type, editData = null) {
+            // Hide all editor forms
+            document.querySelectorAll('.editor-form').forEach(form => {
+                form.style.display = 'none';
+            });
+            
+            // Show editor container
+            document.getElementById('editor-form-container').style.display = 'block';
+            
+            // Show specific form
+            const formId = `${type}-editor`;
+            document.getElementById(formId).style.display = 'block';
+            
+            // Reset form
+            document.getElementById(`${type}-form`).reset();
+            document.getElementById(`${type}-edit-id`).value = '';
+            
+            // Update title
+            const titleEl = document.getElementById(`${type}-editor-title`);
+            titleEl.textContent = editData ? `Edit ${type.charAt(0).toUpperCase() + type.slice(1)}` : `Add New ${type.charAt(0).toUpperCase() + type.slice(1)}`;
+            
+            // Show/hide delete button
+            const deleteBtn = document.getElementById(`${type}-delete-btn`);
+            if (deleteBtn) {
+                deleteBtn.style.display = editData ? 'inline-block' : 'none';
+            }
+            
+            // Populate form if editing
+            if (editData) {
+                populateEditorForm(type, editData);
+            }
+            
+            // Scroll to editor
+            document.getElementById('editor-form-container').scrollIntoView({ behavior: 'smooth' });
+        }
+        
+        // Hide editor
+        function hideEditor() {
+            document.getElementById('editor-form-container').style.display = 'none';
+            document.querySelectorAll('.editor-form').forEach(form => {
+                form.style.display = 'none';
+            });
+        }
+        
+        // Populate editor form with data
+        function populateEditorForm(type, data) {
+            document.getElementById(`${type}-edit-id`).value = data.id || '';
+            
+            switch(type) {
+                case 'guideline':
+                    document.getElementById('guideline-id').value = data.id || '';
+                    document.getElementById('guideline-title').value = data.title || '';
+                    document.getElementById('guideline-category-input').value = data.category || '';
+                    document.getElementById('guideline-source-input').value = data.source || '';
+                    document.getElementById('guideline-evidence-grade').value = data.evidence_grade || 'A';
+                    document.getElementById('guideline-version').value = data.version || '';
+                    document.getElementById('guideline-description').value = data.description || '';
+                    document.getElementById('guideline-evidence-summary').value = data.evidence_summary || '';
+                    document.getElementById('guideline-examples').value = data.examples ? data.examples.join(', ') : '';
+                    document.getElementById('guideline-action-steps').value = data.action_steps ? data.action_steps.join('\n') : '';
+                    document.getElementById('guideline-conditions').value = data.applicable_conditions ? data.applicable_conditions.join(', ') : '';
+                    document.getElementById('guideline-contraindications').value = data.contraindications ? data.contraindications.join(', ') : '';
+                    break;
+                    
+                case 'drug':
+                    document.getElementById('drug-id').value = data.id || '';
+                    document.getElementById('drug-name').value = data.drug_name || '';
+                    document.getElementById('drug-generic').value = data.generic_name || '';
+                    document.getElementById('drug-class-input').value = data.drug_class || '';
+                    document.getElementById('drug-acb').value = data.acb_score || '';
+                    document.getElementById('drug-fall-risk').value = data.fall_risk || 'none';
+                    document.getElementById('drug-beers').checked = data.beers_criteria || false;
+                    document.getElementById('drug-beers-rec').value = data.beers_recommendation || '';
+                    document.getElementById('drug-conditions').value = data.common_conditions ? data.common_conditions.join(', ') : '';
+                    document.getElementById('drug-contraindications').value = data.contraindications ? data.contraindications.join(', ') : '';
+                    break;
+                    
+                case 'research':
+                    document.getElementById('research-id').value = data.id || '';
+                    document.getElementById('research-pmid').value = data.pmid || '';
+                    document.getElementById('research-title').value = data.title || '';
+                    document.getElementById('research-journal').value = data.journal || '';
+                    document.getElementById('research-year').value = data.year || '';
+                    document.getElementById('research-doi').value = data.doi || '';
+                    document.getElementById('research-authors').value = data.authors ? data.authors.join(', ') : '';
+                    document.getElementById('research-abstract').value = data.abstract_summary || '';
+                    document.getElementById('research-findings').value = data.key_findings ? data.key_findings.join('\n') : '';
+                    document.getElementById('research-evidence-level').value = data.evidence_level || 'cohort_study';
+                    document.getElementById('research-sample-size').value = data.sample_size || '';
+                    document.getElementById('research-duration').value = data.study_duration || '';
+                    document.getElementById('research-population').value = data.population || '';
+                    document.getElementById('research-tags').value = data.tags ? data.tags.join(', ') : '';
+                    document.getElementById('research-applications').value = data.clinical_applications ? data.clinical_applications.join('\n') : '';
+                    break;
+                    
+                case 'faq':
+                    document.getElementById('faq-id').value = data.id || '';
+                    document.getElementById('faq-question').value = data.question_pattern || '';
+                    document.getElementById('faq-category-input').value = data.category || '';
+                    document.getElementById('faq-evidence-level').value = data.evidence_level || 'clinical_guideline';
+                    document.getElementById('faq-keywords').value = data.keywords ? data.keywords.join(', ') : '';
+                    document.getElementById('faq-response').value = data.response || '';
+                    document.getElementById('faq-recommendations').value = data.related_recommendations ? data.related_recommendations.join(', ') : '';
+                    document.getElementById('faq-citations').value = data.citations ? data.citations.join(', ') : '';
+                    break;
+            }
+        }
+        
+        // Save entry (create or update)
+        async function saveEntry(type, event) {
+            event.preventDefault();
+            
+            const editId = document.getElementById(`${type}-edit-id`).value;
+            const isUpdate = !!editId;
+            
+            // Build data object based on type
+            let data = {};
+            
+            switch(type) {
+                case 'guideline':
+                    data = {
+                        id: document.getElementById('guideline-id').value,
+                        title: document.getElementById('guideline-title').value,
+                        category: document.getElementById('guideline-category-input').value,
+                        source: document.getElementById('guideline-source-input').value,
+                        evidence_grade: document.getElementById('guideline-evidence-grade').value,
+                        version: document.getElementById('guideline-version').value,
+                        publication_year: parseInt(document.getElementById('guideline-version').value) || new Date().getFullYear(),
+                        description: document.getElementById('guideline-description').value,
+                        evidence_summary: document.getElementById('guideline-evidence-summary').value,
+                        examples: document.getElementById('guideline-examples').value.split(',').map(s => s.trim()).filter(s => s),
+                        action_steps: document.getElementById('guideline-action-steps').value.split('\n').map(s => s.trim()).filter(s => s),
+                        applicable_conditions: document.getElementById('guideline-conditions').value.split(',').map(s => s.trim()).filter(s => s),
+                        contraindications: document.getElementById('guideline-contraindications').value.split(',').map(s => s.trim()).filter(s => s)
+                    };
+                    break;
+                    
+                case 'drug':
+                    data = {
+                        id: document.getElementById('drug-id').value,
+                        drug_name: document.getElementById('drug-name').value,
+                        generic_name: document.getElementById('drug-generic').value,
+                        drug_class: document.getElementById('drug-class-input').value,
+                        acb_score: parseInt(document.getElementById('drug-acb').value) || 0,
+                        fall_risk: document.getElementById('drug-fall-risk').value,
+                        beers_criteria: document.getElementById('drug-beers').checked,
+                        beers_recommendation: document.getElementById('drug-beers-rec').value,
+                        common_conditions: document.getElementById('drug-conditions').value.split(',').map(s => s.trim()).filter(s => s),
+                        contraindications: document.getElementById('drug-contraindications').value.split(',').map(s => s.trim()).filter(s => s),
+                        interactions: [] // Would need separate UI for complex interactions
+                    };
+                    break;
+                    
+                case 'research':
+                    data = {
+                        id: document.getElementById('research-id').value,
+                        pmid: document.getElementById('research-pmid').value,
+                        title: document.getElementById('research-title').value,
+                        journal: document.getElementById('research-journal').value,
+                        year: parseInt(document.getElementById('research-year').value) || new Date().getFullYear(),
+                        doi: document.getElementById('research-doi').value,
+                        authors: document.getElementById('research-authors').value.split(',').map(s => s.trim()).filter(s => s),
+                        abstract_summary: document.getElementById('research-abstract').value,
+                        key_findings: document.getElementById('research-findings').value.split('\n').map(s => s.trim()).filter(s => s),
+                        evidence_level: document.getElementById('research-evidence-level').value,
+                        sample_size: parseInt(document.getElementById('research-sample-size').value) || 0,
+                        study_duration: document.getElementById('research-duration').value,
+                        population: document.getElementById('research-population').value,
+                        tags: document.getElementById('research-tags').value.split(',').map(s => s.trim()).filter(s => s),
+                        clinical_applications: document.getElementById('research-applications').value.split('\n').map(s => s.trim()).filter(s => s)
+                    };
+                    break;
+                    
+                case 'faq':
+                    data = {
+                        id: document.getElementById('faq-id').value,
+                        question_pattern: document.getElementById('faq-question').value,
+                        category: document.getElementById('faq-category-input').value,
+                        evidence_level: document.getElementById('faq-evidence-level').value,
+                        keywords: document.getElementById('faq-keywords').value.split(',').map(s => s.trim()).filter(s => s),
+                        response: document.getElementById('faq-response').value,
+                        related_recommendations: document.getElementById('faq-recommendations').value.split(',').map(s => s.trim()).filter(s => s),
+                        citations: document.getElementById('faq-citations').value.split(',').map(s => s.trim()).filter(s => s)
+                    };
+                    break;
+            }
+            
+            try {
+                const response = await fetch(`${API_BASE}/${type}${isUpdate ? '?id=' + editId : ''}`, {
+                    method: isUpdate ? 'PUT' : 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(data)
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    alert(isUpdate ? 'Entry updated successfully!' : 'Entry created successfully!');
+                    hideEditor();
+                    loadStats();
+                    // Reload the appropriate list
+                    if (type === 'guideline') loadGuidelines();
+                    else if (type === 'drug') loadDrugs();
+                    else if (type === 'research') loadResearch();
+                    else if (type === 'faq') loadFAQ();
+                } else {
+                    alert('Error: ' + (result.error || 'Unknown error'));
+                }
+            } catch (error) {
+                alert('Error saving entry: ' + error.message);
+            }
+        }
+        
+        // Delete entry
+        async function deleteEntry(type) {
+            const id = document.getElementById(`${type}-edit-id`).value;
+            if (!id) return;
+            
+            if (!confirm(`Are you sure you want to delete this ${type}? This action cannot be undone.`)) {
+                return;
+            }
+            
+            try {
+                const response = await fetch(`${API_BASE}/${type}?id=${id}`, {
+                    method: 'DELETE'
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    alert('Entry deleted successfully!');
+                    hideEditor();
+                    loadStats();
+                    // Reload the appropriate list
+                    if (type === 'guideline') loadGuidelines();
+                    else if (type === 'drug') loadDrugs();
+                    else if (type === 'research') loadResearch();
+                    else if (type === 'faq') loadFAQ();
+                } else {
+                    alert('Error: ' + (result.error || 'Unknown error'));
+                }
+            } catch (error) {
+                alert('Error deleting entry: ' + error.message);
+            }
+        }
+        
+        // Add edit buttons to detail views
+        function addEditButton(type, data) {
+            return `<button class="btn btn-warning btn-sm" onclick='showEditor("${type}", ${JSON.stringify(data).replace(/'/g, "&#39;")})' style="margin-left: 8px;">Edit</button>`;
+        }
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            loadStats();
+            loadCategories();
+        });
+    </script>
+</body>
+</html>

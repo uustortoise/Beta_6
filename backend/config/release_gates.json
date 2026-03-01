@@ -1,0 +1,175 @@
+{
+  "version": "2026-02-13.v1",
+  "effective_date": "2026-02-13",
+  "room_tiers": {
+    "clinical": ["bedroom", "kitchen"],
+    "standard": ["livingroom", "entrance"],
+    "under_investigation": ["bathroom"]
+  },
+  "auto_aggregate": {
+    "enabled": true,
+    "train_on": "all_archived_files_plus_incoming",
+    "group_by": "elder_id",
+    "required_before_strict_gating": true
+  },
+  "release_gates": {
+    "global": {
+      "metric": "macro_f1",
+      "schedule": [
+        {"min_days": 2, "max_days": 9, "min_value": 0.55},
+        {"min_days": 10, "max_days": 21, "min_value": 0.65},
+        {"min_days": 22, "max_days": null, "min_value": 0.75}
+      ]
+    },
+    "rooms": {
+      "bedroom": {
+        "metric": "f1",
+        "tier": "clinical",
+        "blocking": true,
+        "schedule": [
+          {"min_days": 2, "max_days": 9, "min_value": 0.60},
+          {"min_days": 10, "max_days": 21, "min_value": 0.70},
+          {"min_days": 22, "max_days": null, "min_value": 0.80}
+        ]
+      },
+      "kitchen": {
+        "metric": "f1",
+        "tier": "clinical",
+        "blocking": true,
+        "schedule": [
+          {"min_days": 2, "max_days": 9, "min_value": 0.55},
+          {"min_days": 10, "max_days": 21, "min_value": 0.55},
+          {"min_days": 22, "max_days": null, "min_value": 0.55}
+        ]
+      },
+      "livingroom": {
+        "metric": "f1",
+        "tier": "standard",
+        "blocking": true,
+        "schedule": [
+          {"min_days": 2, "max_days": 9, "min_value": 0.50},
+          {"min_days": 10, "max_days": 21, "min_value": 0.50},
+          {"min_days": 22, "max_days": null, "min_value": 0.50}
+        ]
+      },
+      "entrance": {
+        "metric": "f1",
+        "tier": "standard",
+        "blocking": true,
+        "schedule": [
+          {"min_days": 2, "max_days": 9, "min_value": 0.65},
+          {"min_days": 10, "max_days": 21, "min_value": 0.65},
+          {"min_days": 22, "max_days": null, "min_value": 0.65}
+        ]
+      },
+      "bathroom": {
+        "metric": "f1",
+        "tier": "under_investigation",
+        "blocking": false,
+        "schedule": [
+          {"min_days": 2, "max_days": null, "min_value": 0.30}
+        ]
+      }
+    },
+    "no_regress": {
+      "metric": "room_f1",
+      "max_drop_from_champion": 0.05,
+      "blocking": true,
+      "exempt_rooms": ["bathroom"]
+    }
+  },
+  "event_first": {
+    "event_first_shadow": false,
+    "event_first_enabled": false,
+    "event_registry_path": "backend/config/adl_event_registry.v1.yaml",
+    "event_unknown_enabled": true,
+    "event_decoder_on_threshold": 0.6,
+    "event_decoder_off_threshold": 0.4,
+    "event_decoder_min_on_steps": 3,
+    "event_probability_calibration": "isotonic",
+    "event_calibration_min_samples": 500,
+    "home_empty_enabled": true,
+    "home_empty_min_empty_minutes": 15.0,
+    "home_empty_empty_score_threshold": 0.75,
+    "home_empty_occupancy_threshold": 0.55,
+    "home_empty_entrance_penalty": 0.35,
+    "unknown_rate_global_cap": 0.15,
+    "unknown_rate_room_cap": 0.2
+  },
+  "corrected_window_policy": {
+    "local_metric": "f1",
+    "global_metric": "macro_f1",
+    "local_gain_min": 0.10,
+    "global_drop_max": 0.02,
+    "outcomes": {
+      "pass": "local_gain_gte_min_and_global_drop_lte_max",
+      "pass_with_flag": "local_gain_lt_min_and_global_drop_lte_max",
+      "fail": "global_drop_gt_max"
+    },
+    "notes": [
+      "If correction improves local but global drop exceeds threshold, reject candidate.",
+      "If correction has zero measurable local effect and no global harm, keep candidate and flag low-impact correction."
+    ]
+  },
+  "training_cadence": {
+    "new_file_uploaded": {
+      "action": "auto_aggregate_retrain",
+      "mode": "all_archived_files",
+      "trigger": "immediate",
+      "automatic": true
+    },
+    "manual_correction_applied": {
+      "action": "fine_tune_from_champion",
+      "trigger": "immediate",
+      "automatic": true
+    },
+    "scheduled_full_retrain": {
+      "action": "full_retrain_from_scratch",
+      "trigger": "weekly",
+      "schedule": "sunday_night",
+      "automatic": true,
+      "deploy_mode": "challenger_only"
+    },
+    "major_label_or_schema_change": {
+      "action": "full_retrain_plus_walk_forward_validation",
+      "trigger": "manual_approval_required",
+      "automatic": false
+    }
+  },
+  "fine_tuning": {
+    "warm_start_from_champion": true,
+    "learning_rate": "low",
+    "epochs": "few",
+    "replay_buffer": {
+      "enabled": true,
+      "uncorrected_to_corrected_ratio": 10,
+      "sampling": "random_stratified"
+    }
+  },
+  "retrospective_mode": {
+    "if_auto_aggregate_enabled": "diagnostic_only",
+    "if_auto_aggregate_disabled": "primary_training_trigger"
+  },
+  "baseline_check": {
+    "run_at_day": 22,
+    "baseline_model": "xgboost",
+    "metric": "macro_f1",
+    "required_transformer_advantage": 0.05,
+    "on_fail": "investigate_transformer_complexity_vs_value"
+  },
+  "ingestion_protocol": {
+    "before_auto_aggregate": "batch_upload_then_single_retrain",
+    "after_auto_aggregate": "order_independent_but_batch_upload_recommended"
+  },
+  "ownership": {
+    "data_qa": "domain_expert_or_care_staff",
+    "training": "automated_pipeline",
+    "evaluation": "automated_gates",
+    "deployment_approval": "senior_engineer",
+    "rollback": "automated"
+  },
+  "deployment_flow": {
+    "on_pass": "auto_deploy_and_log",
+    "on_fail": "keep_champion_discard_candidate_alert_senior_engineer"
+  }
+}

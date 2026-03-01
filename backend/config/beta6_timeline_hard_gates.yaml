@@ -1,0 +1,24 @@
+version: v1
+hard_gate_priority: primary
+description: >
+  Timeline reliability gates are primary promotion blockers.
+  Candidate F1 can remain acceptable while timeline quality regresses;
+  therefore MAE and fragmentation are evaluated as hard gates.
+
+metrics:
+  duration_mae_minutes:
+    required: true
+    missing_reason_code: fail_timeline_metrics_missing
+  fragmentation_rate:
+    required: true
+    missing_reason_code: fail_timeline_metrics_missing
+
+reason_code_precedence:
+  - fail_timeline_mae
+  - fail_timeline_fragmentation
+
+threshold_source:
+  policy: backend/config/beta6_room_capability_gate_profiles.yaml
+  field_mapping:
+    duration_mae_minutes: max_timeline_mae_minutes
+    fragmentation_rate: max_fragmentation_rate

@@ -1,0 +1,11 @@
+version: v1
+adapter:
+  rank: 4
+  alpha: 8.0
+  l2_reg: 0.001
+  random_seed: 42
+  min_rows: 32
+  max_versions_per_resident: 14
+  min_warmup_accuracy: 0.55
+  retirement_inactive_days: 30
+  enable_auto_retire: true

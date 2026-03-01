@@ -1,0 +1,358 @@
+{
+  "profile": "pre_arrival_quick",
+  "data_dir": "/Users/dicksonng/DT/Development/New training files",
+  "elder_id": "HK0011_jessica",
+  "seeds": [
+    11
+  ],
+  "variants": [
+    "anchor_top2_frag_v3",
+    "learned_segment_classifier_off"
+  ],
+  "cleanup_resource_trackers": {
+    "status": "failed",
+    "returncode": 1,
+    "stdout": "",
+    "stderr": "",
+    "elapsed_seconds": 0.015535831451416016,
+    "command": [
+      "pkill",
+      "-f",
+      "resource_tracker"
+    ],
+    "timed_out": false
+  },
+  "matrix_exec": {
+    "status": "failed",
+    "returncode": -15,
+    "stdout": "",
+    "stderr": "",
+    "elapsed_seconds": 38.74532890319824,
+    "command": [
+      "python3",
+      "backend/scripts/run_event_first_matrix.py",
+      "--profiles-yaml",
+      "/Users/dicksonng/DT/Development/Beta_5.5/backend/config/event_first_matrix_profiles.yaml",
+      "--profile",
+      "pre_arrival_quick",
+      "--data-dir",
+      "/Users/dicksonng/DT/Development/New training files",
+      "--elder-id",
+      "HK0011_jessica",
+      "--output-dir",
+      "/tmp/beta55_clean_bundle_quick_20260224",
+      "--max-workers",
+      "1",
+      "--go-no-go-config",
+      "/Users/dicksonng/DT/Development/Beta_5.5/backend/config/event_first_go_no_go.yaml",
+      "--seed-timeout-seconds",
+      "240",
+      "--seed-retries",
+      "1"
+    ],
+    "timed_out": false
+  },
+  "fallback_runs": [
+    {
+      "variant": "anchor_top2_frag_v3",
+      "seed": 11,
+      "output": "/tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/anchor_top2_frag_v3/seed_11.json",
+      "attempts": [
+        {
+          "attempt": 1,
+          "result": {
+            "status": "timeout",
+            "returncode": 124,
+            "stdout": "",
+            "stderr": "",
+            "elapsed_seconds": 240.01992011070251,
+            "command": [
+              "python3",
+              "backend/scripts/run_event_first_variant_backtest.py",
+              "--profiles-yaml",
+              "/Users/dicksonng/DT/Development/Beta_5.5/backend/config/event_first_matrix_profiles.yaml",
+              "--variant",
+              "anchor_top2_frag_v3",
+              "--data-dir",
+              "/Users/dicksonng/DT/Development/New training files",
+              "--elder-id",
+              "HK0011_jessica",
+              "--seed",
+              "11",
+              "--output",
+              "/tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/anchor_top2_frag_v3/seed_11.json"
+            ],
+            "timed_out": true
+          }
+        },
+        {
+          "attempt": 2,
+          "result": {
+            "status": "ok_recovered_output",
+            "returncode": 0,
+            "stdout": "",
+            "stderr": "",
+            "elapsed_seconds": 86.77179598808289,
+            "command": [
+              "python3",
+              "backend/scripts/run_event_first_variant_backtest.py",
+              "--profiles-yaml",
+              "/Users/dicksonng/DT/Development/Beta_5.5/backend/config/event_first_matrix_profiles.yaml",
+              "--variant",
+              "anchor_top2_frag_v3",
+              "--data-dir",
+              "/Users/dicksonng/DT/Development/New training files",
+              "--elder-id",
+              "HK0011_jessica",
+              "--seed",
+              "11",
+              "--output",
+              "/tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/anchor_top2_frag_v3/seed_11.json"
+            ],
+            "timed_out": false
+          }
+        }
+      ]
+    },
+    {
+      "variant": "learned_segment_classifier_off",
+      "seed": 11,
+      "output": "/tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/learned_segment_classifier_off/seed_11.json",
+      "attempts": [
+        {
+          "attempt": 1,
+          "result": {
+            "status": "ok",
+            "returncode": 0,
+            "stdout": "Wrote event-first backtest report: /tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/learned_segment_classifier_off/seed_11.json\n",
+            "stderr": "",
+            "elapsed_seconds": 207.1876151561737,
+            "command": [
+              "python3",
+              "backend/scripts/run_event_first_variant_backtest.py",
+              "--profiles-yaml",
+              "/Users/dicksonng/DT/Development/Beta_5.5/backend/config/event_first_matrix_profiles.yaml",
+              "--variant",
+              "learned_segment_classifier_off",
+              "--data-dir",
+              "/Users/dicksonng/DT/Development/New training files",
+              "--elder-id",
+              "HK0011_jessica",
+              "--seed",
+              "11",
+              "--output",
+              "/tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/learned_segment_classifier_off/seed_11.json"
+            ],
+            "timed_out": false
+          }
+        }
+      ]
+    }
+  ],
+  "variant_summaries": {
+    "anchor_top2_frag_v3": {
+      "seed_reports": [
+        "/tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/anchor_top2_frag_v3/seed_11.json"
+      ],
+      "valid_seed_reports": [
+        "/tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/anchor_top2_frag_v3/seed_11.json"
+      ],
+      "missing_seed_reports": [],
+      "aggregate": {
+        "status": "ok",
+        "returncode": 0,
+        "stdout": "Wrote rolling summary: /tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/anchor_top2_frag_v3/rolling.json\nWrote signoff summary: /tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/anchor_top2_frag_v3/signoff.json\n",
+        "stderr": "",
+        "elapsed_seconds": 0.16371393203735352,
+        "command": [
+          "python3",
+          "backend/scripts/aggregate_event_first_backtest.py",
+          "--seed-reports",
+          "/tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/anchor_top2_frag_v3/seed_11.json",
+          "--rolling-output",
+          "/tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/anchor_top2_frag_v3/rolling.json",
+          "--signoff-output",
+          "/tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/anchor_top2_frag_v3/signoff.json",
+          "--comparison-window",
+          "dec4_to_dec10",
+          "--required-split-pass-ratio",
+          "1.0",
+          "--require-baseline-for-promotion",
+          "false",
+          "--require-leakage-artifact",
+          "false",
+          "--baseline-version",
+          "top2_frag_v3"
+        ],
+        "timed_out": false
+      },
+      "go_no_go": {
+        "status": "fail",
+        "checks": [
+          {
+            "name": "overall_eligible_pass_count_min",
+            "pass": false,
+            "actual": 16,
+            "required": 24
+          },
+          {
+            "name": "livingroom_eligible_pass_count_min",
+            "pass": false,
+            "actual": 0,
+            "required": 3
+          },
+          {
+            "name": "bedroom_max_regression_splits",
+            "pass": true,
+            "actual": 0,
+            "required_max": 1
+          },
+          {
+            "name": "day7_livingroom_recall_min",
+            "pass": true,
+            "actual_min": 0.696969696969697,
+            "required_min": 0.45
+          },
+          {
+            "name": "day8_bedroom_sleep_recall_min",
+            "pass": true,
+            "actual_min": 0.9904284412032817,
+            "required_min": 0.4
+          },
+          {
+            "name": "day8_livingroom_fragmentation_min",
+            "pass": true,
+            "actual_min": 0.9642857142857143,
+            "required_min": 0.45
+          }
+        ],
+        "blocking_reasons": [
+          "overall_eligible_pass_count_min",
+          "livingroom_eligible_pass_count_min"
+        ],
+        "counters": {
+          "total_eligible": 20,
+          "passed_eligible": 16,
+          "room_eligible_total": {
+            "bedroom": 4,
+            "livingroom": 4,
+            "kitchen": 4,
+            "bathroom": 4,
+            "entrance": 4
+          },
+          "room_eligible_passed": {
+            "bedroom": 4,
+            "kitchen": 4,
+            "bathroom": 4,
+            "entrance": 4
+          }
+        }
+      }
+    },
+    "learned_segment_classifier_off": {
+      "seed_reports": [
+        "/tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/learned_segment_classifier_off/seed_11.json"
+      ],
+      "valid_seed_reports": [
+        "/tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/learned_segment_classifier_off/seed_11.json"
+      ],
+      "missing_seed_reports": [],
+      "aggregate": {
+        "status": "ok",
+        "returncode": 0,
+        "stdout": "Wrote rolling summary: /tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/learned_segment_classifier_off/rolling.json\nWrote signoff summary: /tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/learned_segment_classifier_off/signoff.json\n",
+        "stderr": "",
+        "elapsed_seconds": 0.08970117568969727,
+        "command": [
+          "python3",
+          "backend/scripts/aggregate_event_first_backtest.py",
+          "--seed-reports",
+          "/tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/learned_segment_classifier_off/seed_11.json",
+          "--rolling-output",
+          "/tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/learned_segment_classifier_off/rolling.json",
+          "--signoff-output",
+          "/tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/learned_segment_classifier_off/signoff.json",
+          "--comparison-window",
+          "dec4_to_dec10",
+          "--required-split-pass-ratio",
+          "1.0",
+          "--require-baseline-for-promotion",
+          "false",
+          "--require-leakage-artifact",
+          "false",
+          "--baseline-version",
+          "top2_frag_v3"
+        ],
+        "timed_out": false
+      },
+      "go_no_go": {
+        "status": "fail",
+        "checks": [
+          {
+            "name": "overall_eligible_pass_count_min",
+            "pass": false,
+            "actual": 15,
+            "required": 24
+          },
+          {
+            "name": "livingroom_eligible_pass_count_min",
+            "pass": false,
+            "actual": 0,
+            "required": 3
+          },
+          {
+            "name": "bedroom_max_regression_splits",
+            "pass": true,
+            "actual": 1,
+            "required_max": 1
+          },
+          {
+            "name": "day7_livingroom_recall_min",
+            "pass": false,
+            "actual_min": 0.10416666666666667,
+            "required_min": 0.45
+          },
+          {
+            "name": "day8_bedroom_sleep_recall_min",
+            "pass": true,
+            "actual_min": 0.731084776663628,
+            "required_min": 0.4
+          },
+          {
+            "name": "day8_livingroom_fragmentation_min",
+            "pass": false,
+            "actual_min": 0.1071428571428571,
+            "required_min": 0.45
+          }
+        ],
+        "blocking_reasons": [
+          "overall_eligible_pass_count_min",
+          "livingroom_eligible_pass_count_min",
+          "day7_livingroom_recall_min",
+          "day8_livingroom_fragmentation_min"
+        ],
+        "counters": {
+          "total_eligible": 20,
+          "passed_eligible": 15,
+          "room_eligible_total": {
+            "bedroom": 4,
+            "livingroom": 4,
+            "kitchen": 4,
+            "bathroom": 4,
+            "entrance": 4
+          },
+          "room_eligible_passed": {
+            "bedroom": 3,
+            "kitchen": 4,
+            "bathroom": 4,
+            "entrance": 4
+          }
+        }
+      }
+    }
+  },
+  "artifacts": {
+    "ranking_csv": "/tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/ranking.csv",
+    "ranking_md": "/tmp/beta55_clean_bundle_quick_20260224/pre_arrival_quick/ranking.md"
+  }
+}

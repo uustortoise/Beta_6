@@ -1,0 +1,31 @@
+version: v1
+state_file: fallback_state.json
+
+defaults:
+  operator_safe_mode: true
+  serving_mode: rule_hmm_baseline
+  restore_previous_pointer_on_clear: true
+
+event_contract:
+  activate_event_type: fallback_mode_activated
+  clear_event_type: fallback_mode_cleared
+  activate_reason_code: fallback_activated
+  clear_reason_code: fallback_cleared
+  already_active_reason_code: fallback_already_active
+  not_active_reason_code: fallback_not_active
+  missing_target_reason_code: fallback_missing_target
+
+required_payload_fields:
+  activate:
+    - trigger_reason_code
+    - switched_pointer
+    - from_pointer
+    - to_pointer
+    - fallback_flags
+    - fallback_state_path
+  clear:
+    - restore_previous_pointer
+    - restored_previous_pointer
+    - from_pointer
+    - to_pointer
+    - fallback_state_path

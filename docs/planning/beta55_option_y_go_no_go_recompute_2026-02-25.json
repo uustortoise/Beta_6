@@ -1,0 +1,120 @@
+{
+  "status": "fail",
+  "checks": [
+    {
+      "name": "overall_eligible_pass_count_min",
+      "pass": true,
+      "actual": 46,
+      "required": 24,
+      "severity": "blocking"
+    },
+    {
+      "name": "livingroom_eligible_pass_count_min",
+      "pass": true,
+      "actual": 8,
+      "required": 3,
+      "severity": "blocking"
+    },
+    {
+      "name": "bedroom_max_regression_splits",
+      "pass": false,
+      "actual": 10,
+      "required_max": 1,
+      "severity": "blocking"
+    },
+    {
+      "name": "day7_livingroom_recall_min",
+      "pass": true,
+      "actual_min": 0.8901734104046243,
+      "required_min": 0.45,
+      "severity": "blocking"
+    },
+    {
+      "name": "day8_bedroom_sleep_recall_min",
+      "pass": true,
+      "actual_min": null,
+      "required_min": 0.4,
+      "min_support": 100,
+      "eligible_count": 0,
+      "low_support_skip": true,
+      "severity": "blocking"
+    },
+    {
+      "name": "day8_livingroom_fragmentation_min",
+      "pass": false,
+      "actual_min": 0.19999999999999996,
+      "required_min": 0.45,
+      "severity": "blocking"
+    },
+    {
+      "name": "livingroom_episode_recall_min",
+      "pass": false,
+      "actual_min": 0.16666666666666666,
+      "required_min": 0.4,
+      "severity": "informational"
+    },
+    {
+      "name": "livingroom_episode_f1_min",
+      "pass": false,
+      "actual_min": 0.23529411764705882,
+      "required_min": 0.35,
+      "severity": "informational"
+    },
+    {
+      "name": "day7_livingroom_episode_recall_min",
+      "pass": false,
+      "actual_min": 0.4,
+      "required_min": 0.45,
+      "severity": "informational"
+    },
+    {
+      "name": "livingroom_active_mae_max_regression_pct",
+      "pass": true,
+      "actual_mean": 131.1345929997233,
+      "baseline_minutes": 131.13459299972334,
+      "allowed_max_minutes": 144.24805229969567,
+      "actual_regression_pct": -2.1673693249243523e-14,
+      "required_max_regression_pct": 10.0,
+      "missing_metric": false,
+      "severity": "blocking"
+    },
+    {
+      "name": "bedroom_sleep_mae_max_regression_pct",
+      "pass": true,
+      "actual_mean": 142.71331501609868,
+      "baseline_minutes": 130.1962363951708,
+      "allowed_max_minutes": 143.21586003468792,
+      "actual_regression_pct": 9.614009565480911,
+      "required_max_regression_pct": 10.0,
+      "missing_metric": false,
+      "severity": "blocking"
+    }
+  ],
+  "blocking_reasons": [
+    "bedroom_max_regression_splits",
+    "day8_livingroom_fragmentation_min"
+  ],
+  "informational_failures": [
+    "livingroom_episode_recall_min",
+    "livingroom_episode_f1_min",
+    "day7_livingroom_episode_recall_min"
+  ],
+  "counters": {
+    "total_eligible": 60,
+    "passed_eligible": 46,
+    "room_eligible_total": {
+      "bedroom": 12,
+      "livingroom": 12,
+      "kitchen": 12,
+      "bathroom": 12,
+      "entrance": 12
+    },
+    "room_eligible_passed": {
+      "bedroom": 2,
+      "livingroom": 8,
+      "kitchen": 12,
+      "bathroom": 12,
+      "entrance": 12
+    }
+  }
+}

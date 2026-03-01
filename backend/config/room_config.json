@@ -1,0 +1,29 @@
+{
+  "defaults": {
+    "sequence_time_window": 600,
+    "data_interval": 10,
+    "note": "Default: 10 min window @ 10s intervals = 60 samples"
+  },
+  "rooms": {
+    "bedroom": {
+      "sequence_time_window": 1800,
+      "note": "30 min - helps distinguish sleep from nap"
+    },
+    "bathroom": {
+      "sequence_time_window": 300,
+      "note": "5 min - short activities (shower/toilet)"
+    },
+    "kitchen": {
+      "sequence_time_window": 600,
+      "note": "10 min - cooking patterns stabilize"
+    },
+    "living_room": {
+      "sequence_time_window": 900,
+      "note": "15 min - longer sedentary activities"
+    },
+    "entrance": {
+      "sequence_time_window": 180,
+      "note": "3 min - brief entry/exit events"
+    }
+  }
+}

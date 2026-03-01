@@ -1,0 +1,120 @@
+{
+  "version": "2026.02.v2",
+  "published_date": "2026-02-09",
+  "changelog": [
+    {
+      "id": "POL-004",
+      "date": "2026-02-09",
+      "summary": "Expanded deterministic cognitive and sleep policy actions."
+    },
+    {
+      "id": "POL-005",
+      "date": "2026-02-09",
+      "summary": "Introduced versioned external policy manifest with audit metadata."
+    }
+  ],
+  "rules": [
+    {
+      "rule_id": "fall_high_risk",
+      "policy_ref": "policy.fall.high_risk.v2",
+      "description": "High fall risk requires clinician-supported safety intervention.",
+      "thresholds": {
+        "fall_risk_gte": 75
+      },
+      "changelog_ref": "POL-001"
+    },
+    {
+      "rule_id": "fall_moderate_risk",
+      "policy_ref": "policy.fall.moderate_risk.v2",
+      "description": "Moderate fall risk requires proactive prevention plan.",
+      "thresholds": {
+        "fall_risk_gte": 60
+      },
+      "changelog_ref": "POL-001"
+    },
+    {
+      "rule_id": "fall_night_safety",
+      "policy_ref": "policy.fall.night_safety.v1",
+      "description": "Frequent nighttime movement requires environmental safeguards.",
+      "thresholds": {
+        "nighttime_bathroom_visits_gte": 3
+      },
+      "changelog_ref": "POL-002"
+    },
+    {
+      "rule_id": "medication_reconciliation",
+      "policy_ref": "policy.medication.reconciliation.v2",
+      "description": "Elevated medication risk requires clinician/pharmacist reconciliation.",
+      "thresholds": {
+        "medication_risk_gte": 60
+      },
+      "changelog_ref": "POL-003"
+    },
+    {
+      "rule_id": "medication_major_interactions",
+      "policy_ref": "policy.medication.interactions.v2",
+      "description": "Major or contraindicated interactions require same-day review.",
+      "changelog_ref": "POL-003"
+    },
+    {
+      "rule_id": "medication_polypharmacy",
+      "policy_ref": "policy.medication.polypharmacy.v1",
+      "description": "Polypharmacy requires medication simplification review.",
+      "thresholds": {
+        "medication_count_gte": 5
+      },
+      "changelog_ref": "POL-003"
+    },
+    {
+      "rule_id": "medication_anticholinergic",
+      "policy_ref": "policy.medication.anticholinergic.v1",
+      "description": "Elevated anticholinergic burden requires risk mitigation.",
+      "thresholds": {
+        "acb_score_gte": 3
+      },
+      "changelog_ref": "POL-003"
+    },
+    {
+      "rule_id": "cognitive_high_risk",
+      "policy_ref": "policy.cognitive.high_risk.v2",
+      "description": "High cognitive decline risk requires clinician-guided evaluation.",
+      "thresholds": {
+        "cognitive_risk_gte": 70
+      },
+      "changelog_ref": "POL-004"
+    },
+    {
+      "rule_id": "cognitive_moderate_risk",
+      "policy_ref": "policy.cognitive.moderate_risk.v2",
+      "description": "Moderate cognitive risk requires structured monitoring.",
+      "thresholds": {
+        "cognitive_risk_gte": 50
+      },
+      "changelog_ref": "POL-004"
+    },
+    {
+      "rule_id": "sleep_high_risk",
+      "policy_ref": "policy.sleep.high_risk.v2",
+      "description": "High sleep disorder risk requires clinician review.",
+      "thresholds": {
+        "sleep_risk_gte": 70
+      },
+      "changelog_ref": "POL-004"
+    },
+    {
+      "rule_id": "sleep_moderate_risk",
+      "policy_ref": "policy.sleep.moderate_risk.v2",
+      "description": "Moderate sleep risk requires a structured sleep plan.",
+      "thresholds": {
+        "sleep_risk_gte": 50
+      },
+      "changelog_ref": "POL-004"
+    },
+    {
+      "rule_id": "general_monitoring",
+      "policy_ref": "policy.general.v1",
+      "description": "Routine monitoring for lower-risk contexts.",
+      "changelog_ref": "POL-001"
+    }
+  ]
+}

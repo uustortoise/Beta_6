@@ -1,0 +1,35 @@
+{
+  "artifact_version": "v1",
+  "generated_at": "2026-02-25T23:10:00+00:00",
+  "status": "approved",
+  "pack": {
+    "candidate_dir": "/tmp/candidate_pack",
+    "baseline_dir": "/tmp/baseline_pack",
+    "elder_id": "HK0011_jessica",
+    "min_day": 4,
+    "max_day": 10,
+    "smoke_day": 7,
+    "seed": 11
+  },
+  "steps": {
+    "validate": {
+      "status": "pass"
+    },
+    "diff": {
+      "status": "pass"
+    },
+    "smoke": {
+      "status": "pass"
+    }
+  },
+  "reports": {
+    "validate_json": "reports/validate.json",
+    "diff_json": "reports/diff.json",
+    "diff_csv": "reports/diff.csv",
+    "smoke_json": "reports/smoke.json"
+  },
+  "gate": {
+    "approved": true,
+    "blocking_reasons": []
+  }
+}

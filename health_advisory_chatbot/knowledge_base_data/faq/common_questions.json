@@ -1,0 +1,90 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "last_updated": "2026-02-08",
+    "total_entries": 8,
+    "categories": ["sleep", "falls", "medication", "cognitive", "nutrition"]
+  },
+  "faqs": [
+    {
+      "id": "faq_001",
+      "question_pattern": "Why do I wake up multiple times at night?",
+      "keywords": ["nighttime", "wake", "bathroom", "sleep", "urinate", "nocturia"],
+      "category": "sleep",
+      "response": "Nighttime awakenings are common in older adults and can have several causes: nocturia (nighttime urination), sleep apnea, pain, medication timing, or natural changes in sleep architecture. If you're waking up 3 or more times per night, or if it's affecting your daytime functioning, we should investigate further. Keeping a sleep diary and reviewing your medication timing with your doctor may help.",
+      "related_recommendations": ["sleep_hygiene", "fluid_management", "nocturia_assessment"],
+      "citations": ["AASM_2023_Sleep_Guidelines"],
+      "evidence_level": "clinical_guideline"
+    },
+    {
+      "id": "faq_002",
+      "question_pattern": "Am I at risk of falling?",
+      "keywords": ["fall", "balance", "dizzy", "trip", "risk", "prevent"],
+      "category": "falls",
+      "response": "Fall risk increases with age and certain factors: previous falls, medications (especially those causing drowsiness), balance problems, vision issues, and home hazards. Based on your profile, I can assess your specific risk factors. The good news is that falls are preventable through exercise (especially Tai Chi), home safety modifications, vision correction, and medication review.",
+      "related_recommendations": ["fall_risk_assessment", "balance_exercise", "home_safety"],
+      "citations": ["AGS_2023_Falls_Guidelines"],
+      "evidence_level": "clinical_guideline"
+    },
+    {
+      "id": "faq_003",
+      "question_pattern": "Should I stop taking my sleeping pills?",
+      "keywords": ["sleeping", "pill", "medication", "stop", "ambien", "lorazepam", "insomnia"],
+      "category": "medication",
+      "response": "Sleeping medications, especially benzodiazepines (like lorazepam) and Z-drugs (like zolpidem/Ambien), are generally not recommended for long-term use in older adults due to risks of falls, confusion, and dependence. However, stopping abruptly can cause withdrawal. It's important to work with your doctor on a gradual tapering plan while implementing non-drug sleep strategies like sleep hygiene, cognitive behavioral therapy for insomnia (CBT-I), and addressing underlying causes.",
+      "related_recommendations": ["medication_review", "sleep_hygiene", "cbt_i"],
+      "citations": ["AGS_Beers_2023"],
+      "evidence_level": "clinical_guideline"
+    },
+    {
+      "id": "faq_004",
+      "question_pattern": "Is my memory getting worse?",
+      "keywords": ["memory", "forgetful", "dementia", "alzheimer", "cognitive", "confusion"],
+      "category": "cognitive",
+      "response": "Some memory changes are normal with aging (slower recall, tip-of-tongue moments), but significant memory loss that affects daily functioning is not. Warning signs include: forgetting recent events, repeating questions, getting lost in familiar places, or difficulty managing finances/medications. If you're concerned, cognitive screening (like the Mini-Cog) can help identify if further evaluation is needed. Early intervention for cognitive decline includes physical exercise, cognitive stimulation, and managing cardiovascular risk factors.",
+      "related_recommendations": ["cognitive_screening", "memory_clinic_referral", "cognitive_stimulation"],
+      "citations": ["WHO_ICOPE_2017"],
+      "evidence_level": "clinical_guideline"
+    },
+    {
+      "id": "faq_005",
+      "question_pattern": "How much protein should I eat?",
+      "keywords": ["protein", "eat", "nutrition", "diet", "food", "muscle"],
+      "category": "nutrition",
+      "response": "Older adults need more protein than younger adults to maintain muscle mass and strength - about 1.0 to 1.2 grams per kilogram of body weight daily (e.g., 70-85g for a 70kg person). Distribute protein intake across all meals rather than just dinner. Good sources include lean meats, fish, eggs, dairy, legumes, and nuts. If you're losing weight unexpectedly or have poor appetite, please consult your doctor or a dietitian.",
+      "related_recommendations": ["nutrition_assessment", "protein_intake", "malnutrition_screening"],
+      "citations": ["WHO_ICOPE_2017", "ESPEN_Guidelines"],
+      "evidence_level": "clinical_guideline"
+    },
+    {
+      "id": "faq_006",
+      "question_pattern": "Can I take ibuprofen for my arthritis?",
+      "keywords": ["ibuprofen", "nsaid", "pain", "arthritis", "advil", "motrin"],
+      "category": "medication",
+      "response": "NSAIDs like ibuprofen can help with arthritis pain but require caution in older adults. They increase risks of stomach bleeding, kidney problems, heart failure, and high blood pressure. If used, take the lowest effective dose for the shortest time, preferably with food. Safer alternatives for many people include acetaminophen (paracetamol), topical NSAIDs, or non-drug approaches like heat, exercise, and physical therapy. Please discuss with your doctor what's safest for your specific situation.",
+      "related_recommendations": ["pain_management", "medication_review", "arthritis_exercise"],
+      "citations": ["AGS_Beers_2023"],
+      "evidence_level": "clinical_guideline"
+    },
+    {
+      "id": "faq_007",
+      "question_pattern": "Why am I always tired?",
+      "keywords": ["tired", "fatigue", "energy", "sleepy", "exhausted", "weak"],
+      "category": "general",
+      "response": "Persistent fatigue in older adults has many possible causes: poor sleep quality, medication side effects, anemia, thyroid problems, depression, dehydration, or underlying medical conditions. It's not a normal part of aging and should be evaluated. Keep a record of your sleep, activity, and energy levels to help identify patterns. Simple first steps include ensuring adequate hydration, reviewing medication timing, and gentle regular exercise.",
+      "related_recommendations": ["sleep_assessment", "medication_review", "anemia_screening"],
+      "citations": [],
+      "evidence_level": "expert_consensus"
+    },
+    {
+      "id": "faq_008",
+      "question_pattern": "Is it safe to exercise with my heart condition?",
+      "keywords": ["exercise", "heart", "cardiac", "safe", "activity", "workout"],
+      "category": "exercise",
+      "response": "In most cases, exercise is not only safe but highly beneficial for heart conditions, including after heart attacks and with heart failure. Regular physical activity strengthens the heart, improves blood pressure, and reduces cardiovascular risk. The key is getting clearance from your cardiologist and starting gradually under guidance. Cardiac rehabilitation programs are excellent for structured, safe exercise. Stop exercising and seek medical help if you experience chest pain, severe shortness of breath, or dizziness.",
+      "related_recommendations": ["cardiac_rehabilitation", "exercise_prescription"],
+      "citations": ["AHA_Guidelines"],
+      "evidence_level": "clinical_guideline"
+    }
+  ]
+}

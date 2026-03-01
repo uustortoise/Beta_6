@@ -1,0 +1,157 @@
+name: Build Android APK
+
+on:
+  # Trigger on push to main/master branch
+  push:
+    branches: [ main, master, develop ]
+    paths:
+      - 'implementation/**'
+      - '.github/workflows/**'
+  
+  # Trigger on pull requests
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'implementation/**'
+  
+  # Allow manual trigger from GitHub UI
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    
+    steps:
+      # Step 1: Checkout the code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      # Step 2: Set up JDK 17 (required for Android Gradle Plugin 8.x)
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+      
+      # Step 3: Set up Python (for Chaquopy)
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      
+      # Step 4: Cache Gradle dependencies
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+      
+      # Step 5: Make gradlew executable
+      - name: Grant execute permission for gradlew
+        working-directory: ./implementation
+        run: chmod +x gradlew
+      
+      # Step 6: Build Debug APK
+      - name: Build Debug APK
+        if: github.event.inputs.build_type != 'release'
+        working-directory: ./implementation
+        run: ./gradlew assembleDebug --stacktrace
+        env:
+          # Use GitHub's Python for Chaquopy
+          BUILD_PYTHON: python3
+        timeout-minutes: 30
+      
+      # Step 7: Build Release APK (optional)
+      - name: Build Release APK
+        if: github.event.inputs.build_type == 'release'
+        working-directory: ./implementation
+        run: ./gradlew assembleRelease --stacktrace
+        env:
+          BUILD_PYTHON: python3
+        timeout-minutes: 30
+      
+      # Step 8: Upload Debug APK as artifact
+      - name: Upload Debug APK
+        if: github.event.inputs.build_type != 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: FacePhysio-Debug-APK
+          path: implementation/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
+      
+      # Step 9: Upload Release APK as artifact
+      - name: Upload Release APK
+        if: github.event.inputs.build_type == 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: FacePhysio-Release-APK
+          path: implementation/app/build/outputs/apk/release/app-release-unsigned.apk
+          retention-days: 30
+      
+      # Step 10: Upload build reports (for debugging)
+      - name: Upload Build Reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-reports
+          path: implementation/app/build/reports/
+          retention-days: 7
+
+  # Optional: Create GitHub Release with APK
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    
+    steps:
+      - name: Download Debug APK
+        uses: actions/download-artifact@v4
+        with:
+          name: FacePhysio-Debug-APK
+          path: ./apk
+      
+      - name: Get current date
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.date.outputs.date }}-${{ github.run_number }}
+          name: FacePhysio Build ${{ steps.date.outputs.date }}
+          body: |
+            Automated build of FacePhysio Vital Signs Monitor
+            
+            **Features:**
+            - ❤️ Heart Rate (BPM)
+            - 🫁 Blood Oxygen (SpO2)
+            - 🌬️ Respiration Rate (RPM)
+            - 📊 Heart Rate Variability (HRV)
+            
+            **Installation:**
+            1. Download `app-debug.apk`
+            2. Enable "Install from Unknown Sources" on your Android device
+            3. Install and grant camera permission
+            
+            **Note:** This is a debug build for testing purposes.
+          files: ./apk/app-debug.apk
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

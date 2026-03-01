@@ -1,0 +1,9 @@
+room,label,start_time,end_time,day,duration_minutes,mean_motion,mean_light,mean_sound,mean_co2,mean_humidity,confidence
+bedroom,bedroom_normal_use,2025-12-08T19:05:30,2025-12-08T19:14:11,8,8.85,0.579,127.0,4.541,3062.01,38.8,low
+bedroom,bedroom_normal_use,2025-12-08T00:26:00,2025-12-08T05:56:47,8,330.95,0.517,0.0,4.394,3152.62,39.21,medium
+bedroom,bedroom_normal_use,2025-12-08T11:00:03,2025-12-08T15:58:15,8,298.37,2.616,1513.45,4.533,4037.64,30.46,medium
+bedroom,bedroom_normal_use,2025-12-08T06:46:50,2025-12-08T10:57:56,8,251.27,1.243,696.91,4.553,3342.1,33.76,medium
+bedroom,bedroom_normal_use,2025-12-08T16:53:34,2025-12-08T18:31:07,8,97.72,1.534,110.41,4.57,3703.03,36.3,medium
+bedroom,bedroom_normal_use,2025-12-08T16:04:12,2025-12-08T16:47:59,8,43.95,0.057,581.53,4.593,4004.56,33.24,medium
+bedroom,bedroom_normal_use,2025-12-08T21:09:47,2025-12-08T21:29:14,8,19.62,0.189,111.99,4.577,3708.72,35.36,medium
+bedroom,bedroom_normal_use,2025-12-08T20:17:52,2025-12-08T20:34:33,8,16.85,0.746,123.03,4.611,3545.76,36.95,medium

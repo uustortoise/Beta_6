@@ -1,0 +1,254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://elderlycare.ai/schemas/adl_event_registry.v1.json",
+  "title": "ADL Event Registry Schema v1",
+  "description": "Schema for Activity of Daily Living (ADL) event taxonomy registry. Defines canonical events, aliases, room scope, KPI groups, and criticality levels.",
+  "type": "object",
+  "required": ["version", "registry", "metadata"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Registry version in semver format",
+      "pattern": "^v\\d+\\.\\d+$"
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["created_at", "author", "description"],
+      "properties": {
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "author": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "last_modified": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "changelog": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["version", "date", "changes"],
+            "properties": {
+              "version": {"type": "string"},
+              "date": {"type": "string", "format": "date"},
+              "changes": {
+                "type": "array",
+                "items": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "registry": {
+      "type": "object",
+      "description": "Map of canonical event IDs to event definitions",
+      "additionalProperties": {
+        "$ref": "#/$defs/eventDefinition"
+      }
+    },
+    "room_scopes": {
+      "type": "object",
+      "description": "Room-specific event availability and constraints",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "valid_events": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "List of valid event IDs for this room"
+          },
+          "kpi_groups": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "KPI groups applicable to this room"
+          },
+          "entrance_room": {
+            "type": "boolean",
+            "default": false,
+            "description": "Whether this room is an entrance (affects home-empty fusion)"
+          },
+          "sleep_room": {
+            "type": "boolean",
+            "default": false,
+            "description": "Whether this room is used for sleep tracking"
+          }
+        }
+      }
+    },
+    "kpi_groups": {
+      "type": "object",
+      "description": "KPI group definitions with metrics and thresholds",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["metrics"],
+        "properties": {
+          "description": {"type": "string"},
+          "metrics": {
+            "type": "array",
+            "items": {"$ref": "#/$defs/kpiMetric"}
+          },
+          "care_outcomes": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Care outcomes this KPI group tracks"
+          }
+        }
+      }
+    },
+    "unknown_label_policy": {
+      "type": "object",
+      "description": "Policy for handling unknown/unrecognized labels",
+      "required": ["enabled", "fallback_mapping"],
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "fallback_mapping": {
+          "type": "object",
+          "properties": {
+            "occupied_unknown": {
+              "type": "object",
+              "properties": {
+                "event_id": {"type": "string"},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+              }
+            },
+            "unoccupied_unknown": {
+              "type": "object",
+              "properties": {
+                "event_id": {"type": "string"},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+              }
+            }
+          }
+        }
+      }
+    },
+    "global_constraints": {
+      "type": "object",
+      "properties": {
+        "max_event_duration_minutes": {
+          "type": "number",
+          "minimum": 0,
+          "default": 1440
+        },
+        "min_event_duration_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "default": 30
+        },
+        "episode_merge_gap_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "default": 60
+        }
+      }
+    }
+  },
+  "$defs": {
+    "eventDefinition": {
+      "type": "object",
+      "required": ["event_id", "display_name", "room_scope", "criticality", "enabled"],
+      "properties": {
+        "event_id": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "description": "Canonical event identifier (snake_case)"
+        },
+        "display_name": {
+          "type": "string",
+          "description": "Human-readable event name"
+        },
+        "description": {
+          "type": "string"
+        },
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "description": "Alternative names for this event (no duplicates allowed across events)"
+        },
+        "room_scope": {
+          "type": "array",
+          "items": {"type": "string"},
+          "minItems": 1,
+          "description": "Rooms where this event can occur"
+        },
+        "kpi_groups": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "KPI groups this event contributes to"
+        },
+        "criticality": {
+          "type": "string",
+          "enum": ["critical", "high", "medium", "low"],
+          "description": "Event criticality for care outcomes"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "parent_event": {
+          "type": "string",
+          "description": "Parent event ID for hierarchical events"
+        },
+        "derivation_rules": {
+          "type": "object",
+          "properties": {
+            "from_occupancy": {
+              "type": "boolean",
+              "default": false
+            },
+            "min_duration_seconds": {
+              "type": "number",
+              "minimum": 0
+            },
+            "requires_sustained": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "metrics": {
+          "type": "object",
+          "properties": {
+            "track_duration": {"type": "boolean", "default": true},
+            "track_frequency": {"type": "boolean", "default": false},
+            "track_time_of_day": {"type": "boolean", "default": false}
+          }
+        }
+      }
+    },
+    "kpiMetric": {
+      "type": "object",
+      "required": ["name", "type"],
+      "properties": {
+        "name": {"type": "string"},
+        "type": {
+          "type": "string",
+          "enum": ["duration", "count", "recall", "precision", "mae", "custom"]
+        },
+        "unit": {"type": "string"},
+        "description": {"type": "string"},
+        "thresholds": {
+          "type": "object",
+          "properties": {
+            "target": {"type": "number"},
+            "minimum": {"type": "number"},
+            "maximum": {"type": "number"}
+          }
+        }
+      }
+    }
+  }
+}

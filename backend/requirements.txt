@@ -1,0 +1,19 @@
+pandas>=2.0.0
+numpy<2.0
+openpyxl
+scikit-learn
+# TensorFlow optimized for macOS (Pin to 2.16.2 as earliest Python 3.12 supported)
+tensorflow-macos==2.16.2
+tensorflow-metal==1.2.0
+plotly
+streamlit
+watchdog
+schedule
+python-dotenv
+pytest
+pytest-asyncio
+httpx
+pydantic
+PyYAML>=6.0
+psycopg2-binary
+fastparquet

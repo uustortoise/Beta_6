@@ -1,0 +1,549 @@
+# ADL Event Registry v1.0
+# Canonical taxonomy for Activity of Daily Living events
+
+version: v1.0
+
+metadata:
+  created_at: "2026-02-16T00:00:00Z"
+  author: "ML Platform Team"
+  description: "Initial ADL event taxonomy for CNN+Transformer event-first pipeline"
+  last_modified: "2026-02-16T00:00:00Z"
+  changelog:
+    - version: v1.0
+      date: "2026-02-16"
+      changes:
+        - "Initial registry with bedroom, living room, kitchen, bathroom events"
+        - "Home-empty fusion support with entrance room designation"
+        - "Critical care events: sleep, shower, bathroom_use"
+
+# Canonical event definitions
+registry:
+  # Occupancy states
+  occupied:
+    event_id: occupied
+    display_name: "Occupied"
+    description: "Room is occupied by resident"
+    aliases: [active, present]
+    room_scope: [bedroom, livingroom, kitchen, bathroom, entrance]
+    kpi_groups: [occupancy_base]
+    criticality: medium
+    enabled: true
+    derivation_rules:
+      from_occupancy: true
+      min_duration_seconds: 30
+      requires_sustained: false
+    metrics:
+      track_duration: true
+      track_frequency: true
+      track_time_of_day: false
+
+  unoccupied:
+    event_id: unoccupied
+    display_name: "Unoccupied"
+    description: "Room is empty"
+    aliases: [empty, vacant]
+    room_scope: [bedroom, livingroom, kitchen, bathroom, entrance]
+    kpi_groups: [occupancy_base]
+    criticality: low
+    enabled: true
+    derivation_rules:
+      from_occupancy: true
+      min_duration_seconds: 30
+      requires_sustained: false
+    metrics:
+      track_duration: true
+      track_frequency: false
+      track_time_of_day: false
+
+  # Bedroom events
+  sleeping:
+    event_id: sleeping
+    display_name: "Sleeping"
+    description: "Resident is sleeping in bedroom"
+    aliases: [asleep, rest, in_bed]
+    room_scope: [bedroom]
+    kpi_groups: [sleep_quality, care_critical]
+    criticality: critical
+    enabled: true
+    parent_event: occupied
+    derivation_rules:
+      from_occupancy: false
+      min_duration_seconds: 300
+      requires_sustained: true
+    metrics:
+      track_duration: true
+      track_frequency: true
+      track_time_of_day: true
+
+  awake_in_bed:
+    event_id: awake_in_bed
+    display_name: "Awake in Bed"
+    description: "Resident is awake but still in bed"
+    aliases: [resting, lying_awake]
+    room_scope: [bedroom]
+    kpi_groups: [sleep_quality]
+    criticality: medium
+    enabled: true
+    parent_event: occupied
+    derivation_rules:
+      from_occupancy: false
+      min_duration_seconds: 60
+      requires_sustained: true
+    metrics:
+      track_duration: true
+      track_frequency: false
+      track_time_of_day: true
+
+  # Living room events
+  relaxing:
+    event_id: relaxing
+    display_name: "Relaxing"
+    description: "Resident is relaxing in living room"
+    aliases: [sitting, resting_on_sofa, tv, reading]
+    room_scope: [livingroom]
+    kpi_groups: [activity_level, social_engagement]
+    criticality: low
+    enabled: true
+    parent_event: occupied
+    derivation_rules:
+      from_occupancy: false
+      min_duration_seconds: 60
+      requires_sustained: true
+    metrics:
+      track_duration: true
+      track_frequency: true
+      track_time_of_day: true
+
+  active_living:
+    event_id: active_living
+    display_name: "Active Living"
+    description: "Resident is actively engaged in living room"
+    aliases: [moving, exercising, standing]
+    room_scope: [livingroom]
+    kpi_groups: [activity_level]
+    criticality: medium
+    enabled: true
+    parent_event: occupied
+    derivation_rules:
+      from_occupancy: false
+      min_duration_seconds: 30
+      requires_sustained: false
+    metrics:
+      track_duration: true
+      track_frequency: true
+      track_time_of_day: false
+
+  # Kitchen events
+  cooking:
+    event_id: cooking
+    display_name: "Cooking"
+    description: "Resident is preparing food in kitchen"
+    aliases: [preparing_food, meal_prep, kitchen_active]
+    room_scope: [kitchen]
+    kpi_groups: [nutrition, activity_level, care_critical]
+    criticality: high
+    enabled: true
+    parent_event: occupied
+    derivation_rules:
+      from_occupancy: false
+      min_duration_seconds: 120
+      requires_sustained: true
+    metrics:
+      track_duration: true
+      track_frequency: true
+      track_time_of_day: true
+
+  eating:
+    event_id: eating
+    display_name: "Eating"
+    description: "Resident is eating in kitchen"
+    aliases: [meal, dining, having_food]
+    room_scope: [kitchen]
+    kpi_groups: [nutrition, care_critical]
+    criticality: critical
+    enabled: true
+    parent_event: occupied
+    derivation_rules:
+      from_occupancy: false
+      min_duration_seconds: 180
+      requires_sustained: true
+    metrics:
+      track_duration: true
+      track_frequency: true
+      track_time_of_day: true
+
+  kitchen_use:
+    event_id: kitchen_use
+    display_name: "Kitchen Use"
+    description: "General kitchen activity"
+    aliases: [in_kitchen, kitchen_present]
+    room_scope: [kitchen]
+    kpi_groups: [nutrition, activity_level]
+    criticality: medium
+    enabled: true
+    parent_event: occupied
+    derivation_rules:
+      from_occupancy: true
+      min_duration_seconds: 30
+      requires_sustained: false
+    metrics:
+      track_duration: true
+      track_frequency: true
+      track_time_of_day: false
+
+  # Bathroom events
+  showering:
+    event_id: showering
+    display_name: "Showering"
+    description: "Resident is taking a shower or bath"
+    aliases: [bathing, washing, shower, bath]
+    room_scope: [bathroom]
+    kpi_groups: [hygiene, care_critical, shower_day]
+    criticality: critical
+    enabled: true
+    parent_event: occupied
+    derivation_rules:
+      from_occupancy: false
+      min_duration_seconds: 300
+      requires_sustained: true
+    metrics:
+      track_duration: true
+      track_frequency: true
+      track_time_of_day: true
+
+  bathroom_use:
+    event_id: bathroom_use
+    display_name: "Bathroom Use"
+    description: "General bathroom activity"
+    aliases: [toilet, restroom, washing_hands]
+    room_scope: [bathroom]
+    kpi_groups: [hygiene, activity_level]
+    criticality: medium
+    enabled: true
+    parent_event: occupied
+    derivation_rules:
+      from_occupancy: true
+      min_duration_seconds: 60
+      requires_sustained: false
+    metrics:
+      track_duration: true
+      track_frequency: true
+      track_time_of_day: false
+
+  # Entrance events
+  entering_home:
+    event_id: entering_home
+    display_name: "Entering Home"
+    description: "Resident is entering through entrance"
+    aliases: [arriving, coming_in, entry]
+    room_scope: [entrance]
+    kpi_groups: [home_presence, out_time]
+    criticality: high
+    enabled: true
+    parent_event: occupied
+    derivation_rules:
+      from_occupancy: false
+      min_duration_seconds: 10
+      requires_sustained: false
+    metrics:
+      track_duration: false
+      track_frequency: true
+      track_time_of_day: true
+
+  leaving_home:
+    event_id: leaving_home
+    display_name: "Leaving Home"
+    description: "Resident is leaving through entrance"
+    aliases: [exiting, going_out, departure]
+    room_scope: [entrance]
+    kpi_groups: [home_presence, out_time]
+    criticality: high
+    enabled: true
+    parent_event: occupied
+    derivation_rules:
+      from_occupancy: false
+      min_duration_seconds: 10
+      requires_sustained: false
+    metrics:
+      track_duration: false
+      track_frequency: true
+      track_time_of_day: true
+
+  # Unknown states (fallback)
+  occupied_unknown:
+    event_id: occupied_unknown
+    display_name: "Occupied (Unknown Activity)"
+    description: "Room is occupied but activity is unknown"
+    aliases: [unknown_activity, unclear_occupied]
+    room_scope: [bedroom, livingroom, kitchen, bathroom, entrance]
+    kpi_groups: [occupancy_base]
+    criticality: medium
+    enabled: true
+    parent_event: occupied
+    derivation_rules:
+      from_occupancy: true
+      min_duration_seconds: 30
+      requires_sustained: false
+    metrics:
+      track_duration: true
+      track_frequency: false
+      track_time_of_day: false
+
+  unoccupied_unknown:
+    event_id: unoccupied_unknown
+    display_name: "Unoccupied (Unknown)"
+    description: "Room state is unknown/unclassified"
+    aliases: [unknown_empty, unclear_unoccupied]
+    room_scope: [bedroom, livingroom, kitchen, bathroom, entrance]
+    kpi_groups: [occupancy_base]
+    criticality: low
+    enabled: true
+    parent_event: unoccupied
+    derivation_rules:
+      from_occupancy: true
+      min_duration_seconds: 30
+      requires_sustained: false
+    metrics:
+      track_duration: true
+      track_frequency: false
+      track_time_of_day: false
+
+# Room scope definitions
+room_scopes:
+  bedroom:
+    valid_events: [occupied, unoccupied, sleeping, awake_in_bed, occupied_unknown, unoccupied_unknown]
+    kpi_groups: [sleep_quality, care_critical, occupancy_base]
+    entrance_room: false
+    sleep_room: true
+
+  livingroom:
+    valid_events: [occupied, unoccupied, relaxing, active_living, occupied_unknown, unoccupied_unknown]
+    kpi_groups: [activity_level, social_engagement, occupancy_base]
+    entrance_room: false
+    sleep_room: false
+
+  kitchen:
+    valid_events: [occupied, unoccupied, cooking, eating, kitchen_use, occupied_unknown, unoccupied_unknown]
+    kpi_groups: [nutrition, activity_level, care_critical, occupancy_base]
+    entrance_room: false
+    sleep_room: false
+
+  bathroom:
+    valid_events: [occupied, unoccupied, showering, bathroom_use, occupied_unknown, unoccupied_unknown]
+    kpi_groups: [hygiene, care_critical, shower_day, occupancy_base]
+    entrance_room: false
+    sleep_room: false
+
+  entrance:
+    valid_events: [occupied, unoccupied, entering_home, leaving_home, occupied_unknown, unoccupied_unknown]
+    kpi_groups: [home_presence, out_time, occupancy_base]
+    entrance_room: true
+    sleep_room: false
+
+# KPI group definitions
+kpi_groups:
+  care_critical:
+    description: "Critical care outcomes requiring immediate attention if missed"
+    metrics:
+      - name: sleep_duration
+        type: duration
+        unit: minutes
+        description: "Total sleep duration"
+        thresholds:
+          target: 420
+          minimum: 240
+          maximum: 600
+      - name: shower_day
+        type: recall
+        description: "Whether resident showered today"
+        thresholds:
+          target: 1.0
+          minimum: 0.8
+      - name: meal_count
+        type: count
+        description: "Number of meals consumed"
+        thresholds:
+          target: 3
+          minimum: 2
+    care_outcomes: [health_monitoring, safety_assurance]
+
+  sleep_quality:
+    description: "Sleep-related metrics and quality indicators"
+    metrics:
+      - name: sleep_duration
+        type: duration
+        unit: minutes
+        description: "Total time asleep"
+        thresholds:
+          target: 420
+          minimum: 300
+      - name: sleep_efficiency
+        type: custom
+        unit: percent
+        description: "Time asleep / time in bed"
+        thresholds:
+          target: 0.85
+          minimum: 0.70
+    care_outcomes: [sleep_health, circadian_rhythm]
+
+  nutrition:
+    description: "Food preparation and consumption patterns"
+    metrics:
+      - name: kitchen_duration
+        type: duration
+        unit: minutes
+        description: "Time spent in kitchen"
+        thresholds:
+          target: 90
+          minimum: 30
+      - name: meal_count
+        type: count
+        description: "Number of eating events"
+        thresholds:
+          target: 3
+          minimum: 2
+      - name: cooking_events
+        type: count
+        description: "Number of cooking sessions"
+        thresholds:
+          target: 2
+          minimum: 1
+    care_outcomes: [nutritional_health, independence]
+
+  hygiene:
+    description: "Personal hygiene and bathroom usage"
+    metrics:
+      - name: shower_duration
+        type: duration
+        unit: minutes
+        description: "Duration of shower/bath"
+        thresholds:
+          target: 15
+          minimum: 5
+          maximum: 45
+      - name: bathroom_visits
+        type: count
+        description: "Number of bathroom visits"
+        thresholds:
+          target: 6
+          minimum: 3
+          maximum: 15
+    care_outcomes: [hygiene_maintenance, health_monitoring]
+
+  activity_level:
+    description: "General activity and mobility indicators"
+    metrics:
+      - name: active_duration
+        type: duration
+        unit: minutes
+        description: "Total active time across all rooms"
+        thresholds:
+          target: 180
+          minimum: 60
+      - name: room_transitions
+        type: count
+        description: "Number of room changes"
+        thresholds:
+          target: 20
+          minimum: 5
+    care_outcomes: [mobility, cognitive_engagement]
+
+  social_engagement:
+    description: "Social and leisure activity indicators"
+    metrics:
+      - name: living_room_duration
+        type: duration
+        unit: minutes
+        description: "Time in living room (social space)"
+        thresholds:
+          target: 120
+          minimum: 30
+    care_outcomes: [social_wellbeing, quality_of_life]
+
+  occupancy_base:
+    description: "Basic occupancy tracking"
+    metrics:
+      - name: occupancy_rate
+        type: custom
+        unit: percent
+        description: "Percentage of time room is occupied"
+        thresholds:
+          target: 0.5
+          minimum: 0.1
+          maximum: 0.9
+    care_outcomes: [space_utilization]
+
+  home_presence:
+    description: "Home/away status tracking"
+    metrics:
+      - name: home_empty_rate
+        type: custom
+        unit: percent
+        description: "Percentage of time home is empty"
+        thresholds:
+          target: 0.2
+          minimum: 0.0
+          maximum: 0.5
+      - name: out_time_duration
+        type: duration
+        unit: minutes
+        description: "Total time away from home"
+        thresholds:
+          target: 120
+          minimum: 0
+          maximum: 480
+    care_outcomes: [safety_monitoring, activity_tracking]
+
+  out_time:
+    description: "Time spent outside home"
+    metrics:
+      - name: out_time_duration
+        type: duration
+        unit: minutes
+        description: "Duration away from home"
+        thresholds:
+          target: 120
+          minimum: 0
+          maximum: 480
+      - name: departure_count
+        type: count
+        description: "Number of times leaving home"
+        thresholds:
+          target: 2
+          minimum: 0
+          maximum: 5
+    care_outcomes: [activity_tracking, safety_monitoring]
+
+  shower_day:
+    description: "Daily shower tracking"
+    metrics:
+      - name: shower_recall
+        type: recall
+        description: "Correctly identified shower days"
+        thresholds:
+          target: 0.95
+          minimum: 0.80
+      - name: shower_precision
+        type: precision
+        description: "Precision of shower detection"
+        thresholds:
+          target: 0.90
+          minimum: 0.70
+    care_outcomes: [hygiene_compliance, care_plan_adherence]
+
+# Unknown label fallback policy
+unknown_label_policy:
+  enabled: true
+  fallback_mapping:
+    occupied_unknown:
+      event_id: occupied_unknown
+      confidence: 0.5
+    unoccupied_unknown:
+      event_id: unoccupied_unknown
+      confidence: 0.5
+
+# Global constraints
+global_constraints:
+  max_event_duration_minutes: 1440
+  min_event_duration_seconds: 30
+  episode_merge_gap_seconds: 60

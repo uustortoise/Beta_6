@@ -1,0 +1,11 @@
+version: v1
+
+active_learning:
+  queue_size: 120
+  uncertainty_fraction: 0.5
+  disagreement_fraction: 0.3
+  diversity_fraction: 0.2
+  uncertainty_percentile: 25
+  max_share_per_room: 0.35
+  max_share_per_class: 0.35
+  random_seed: 42

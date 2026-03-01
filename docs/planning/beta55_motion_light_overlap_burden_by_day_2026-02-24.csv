@@ -1,0 +1,8 @@
+day,total_overlap_windows_across_bins,total_overlap_minutes_across_bins,max_single_bin_overlap_windows
+4,609,101.5,154
+5,525,87.5,64
+6,1743,290.49999999999994,146
+7,546,91.0,68
+8,1579,263.1666666666667,166
+9,1421,236.83333333333331,93
+10,786,131.0,95

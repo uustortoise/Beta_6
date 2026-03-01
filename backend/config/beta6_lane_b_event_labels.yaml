@@ -1,0 +1,18 @@
+version: v1
+
+lane_b_event_labels_by_room:
+  bedroom:
+    sleep_duration:
+      - sleep
+  bathroom:
+    bathroom_use:
+      - bathroom_normal_use
+  kitchen:
+    kitchen_use:
+      - kitchen_normal_use
+  livingroom:
+    livingroom_active:
+      - livingroom_normal_use
+  entrance:
+    out_time:
+      - out

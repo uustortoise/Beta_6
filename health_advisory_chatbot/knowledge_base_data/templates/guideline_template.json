@@ -1,0 +1,29 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "last_updated": "2026-02-08",
+    "total_entries": 0,
+    "sources": ["AGS_BEERS", "AGS_FALLS", "WHO_ICOPE", "NICE", "AASM"]
+  },
+  "guidelines": [
+    {
+      "id": "unique_guideline_id",
+      "source": "AGS_BEERS",
+      "version": "2023",
+      "publication_year": 2023,
+      "category": "medication_safety",
+      "title": "Guideline Title",
+      "description": "Detailed description of the guideline recommendation",
+      "evidence_grade": "A",
+      "evidence_summary": "Summary of supporting evidence",
+      "examples": ["Example 1", "Example 2"],
+      "action_steps": [
+        "Step 1: Specific action",
+        "Step 2: Another action",
+        "Step 3: Final action"
+      ],
+      "applicable_conditions": ["condition_1", "condition_2"],
+      "contraindications": ["contraindication_1"]
+    }
+  ]
+}

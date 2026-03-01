@@ -1,0 +1,1738 @@
+
+import streamlit as st
+import pandas as pd
+import sqlite3
+import os
+import sys
+import json
+import logging
+from pathlib import Path
+from datetime import datetime, timedelta
+from io import BytesIO
+from elderlycare_v1_16.preprocessing.noise import hampel_filter
+from elderlycare_v1_16.config.settings import DEFAULT_SENSOR_COLUMNS
+from ml.pipeline import UnifiedPipeline
+from ml.household_analyzer import HouseholdAnalyzer
+import altair as alt
+import glob
+from config import get_room_config
+from elderlycare_v1_16.config.settings import DATA_ROOT, DB_PATH, RAW_DATA_DIR, ARCHIVE_DATA_DIR
+
+# Ensure backend path is set
+current_dir = Path(__file__).resolve().parent
+if str(current_dir) not in sys.path:
+    sys.path.append(str(current_dir))
+
+# Config
+st.set_page_config(page_title="Beta_5 Model Studio", layout="wide")
+
+# Paths (Imported from centralized settings)
+ARCHIVE_DIR = ARCHIVE_DATA_DIR
+RAW_DIR = RAW_DATA_DIR
+
+# --- Utils ---
+@st.cache_resource
+def get_db_connection():
+    if not DB_PATH.exists():
+        return None
+    return sqlite3.connect(DB_PATH, check_same_thread=False)
+
+@st.cache_data(ttl=5)  # Short TTL for near real-time updates (cache cleared after corrections)
+def fetch_predictions(elder_id, room, record_date, _version="v3"):
+    """Cached fetching of predictions to speed up UI responsiveness."""
+    if not DB_PATH.exists():
+        return pd.DataFrame()
+    with sqlite3.connect(DB_PATH) as conn:
+        # Normalize room names: remove spaces/underscores and lowercase
+        # This handles: 'Living Room', 'living_room', 'LivingRoom', 'livingroom' all matching
+        q_pred = """
+            SELECT timestamp, activity_type as predicted_activity, confidence 
+            FROM adl_history
+            WHERE elder_id=? 
+              AND LOWER(REPLACE(REPLACE(room, ' ', ''), '_', '')) = LOWER(REPLACE(REPLACE(?, ' ', ''), '_', ''))
+              AND record_date=?
+        """
+        return pd.read_sql(q_pred, conn, params=(elder_id, room, record_date))
+
+
+# --- Activity Label Management ---
+DEFAULT_ACTIVITY_LABELS = [
+    "inactive", "low_confidence",
+    "bathroom_normal_use", "shower", "toilet",
+    "kitchen_normal_use", "cooking", "washing_dishes",
+    "living_normal_use", "watch_tv", "nap",
+    "bedroom_normal_use", "sleep", "change_clothes",
+    "out", "fall"
+]
+
+def get_activity_labels():
+    """Get activity labels from database config or return defaults."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            result = conn.execute(
+                "SELECT value FROM household_config WHERE key = 'custom_activity_labels'"
+            ).fetchone()
+            if result and result[0]:
+                return json.loads(result[0])
+    except:
+        pass
+    return DEFAULT_ACTIVITY_LABELS
+
+def save_activity_labels(labels: list):
+    """Save activity labels to database config."""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO household_config (key, value) VALUES (?, ?)",
+            ('custom_activity_labels', json.dumps(labels))
+        )
+        conn.commit()
+
+
+def get_archive_files(file_type=None, resident_id=None):
+    """
+    Get archived files.
+    Args:
+        file_type: 'input' for prediction files, 'train' for training files, None for all
+        resident_id: Filter by resident ID (optional)
+    """
+    files = []
+    if ARCHIVE_DIR.exists():
+        for date_dir in ARCHIVE_DIR.iterdir():
+            if date_dir.is_dir():
+                # Support both xlsx and parquet formats
+                for pattern in ["*.xlsx", "*.parquet"]:
+                    for f in date_dir.glob(pattern):
+                        fname_lower = f.name.lower()
+                        
+                        # Filter by file type
+                        if file_type == 'input':
+                            if '_train' in fname_lower:
+                                continue  # Skip training files
+                        elif file_type == 'train':
+                            if '_input' in fname_lower or '_train' not in fname_lower:
+                                continue  # Skip non-training files
+                        
+                        # Filter by resident
+                        if resident_id and resident_id.lower() not in fname_lower:
+                            continue
+                        
+                        files.append({
+                            "date": date_dir.name,
+                            "filename": f.name,
+                            "path": str(f)
+                        })
+    # Sort by date desc
+    files.sort(key=lambda x: x['date'], reverse=True)
+    return files
+
+def save_corrections_to_db(elder_id: str, room: str, corrections_df: pd.DataFrame):
+    """
+    Save label corrections directly to the database.
+    This updates adl_history and regenerates activity_segments.
+    
+    Args:
+        elder_id: The resident ID
+        room: The room name (e.g., 'bathroom')
+        corrections_df: DataFrame with 'timestamp' and 'activity' columns
+    
+    Returns:
+        tuple: (success: bool, message: str, count: int)
+    """
+    if not DB_PATH.exists():
+        return False, "Database not found", 0
+    
+    if 'timestamp' not in corrections_df.columns or 'activity' not in corrections_df.columns:
+        return False, "DataFrame must have 'timestamp' and 'activity' columns", 0
+    
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        updated_count = 0
+        record_dates = set()
+        
+        # Group corrections by contiguous same-activity blocks for bulk updates
+        # This ensures we update ALL DB rows in the range, not just Excel-matched ones
+        corrections_df = corrections_df.copy()
+        corrections_df['timestamp'] = pd.to_datetime(corrections_df['timestamp'])
+        corrections_df = corrections_df.sort_values('timestamp')
+        
+        # Identify contiguous blocks of same activity
+        corrections_df['activity_changed'] = corrections_df['activity'] != corrections_df['activity'].shift()
+        corrections_df['block'] = corrections_df['activity_changed'].cumsum()
+        
+        for block_id, block_df in corrections_df.groupby('block'):
+            activity = block_df['activity'].iloc[0]
+            block_start = block_df['timestamp'].min()
+            block_end = block_df['timestamp'].max()
+            
+            record_date = block_start.strftime('%Y-%m-%d')
+            record_dates.add(record_date)
+            
+            # Expand window slightly to catch edge rows
+            ts_min = (block_start - pd.Timedelta(seconds=5)).strftime('%Y-%m-%d %H:%M:%S')
+            ts_max = (block_end + pd.Timedelta(seconds=5)).strftime('%Y-%m-%d %H:%M:%S')
+            
+            # Bulk update ALL DB rows in this time range (with room normalization)
+            cursor.execute('''
+                UPDATE adl_history 
+                SET activity_type = ?, is_corrected = 1
+                WHERE elder_id = ? 
+                  AND LOWER(REPLACE(REPLACE(room, ' ', ''), '_', '')) = LOWER(REPLACE(REPLACE(?, ' ', ''), '_', ''))
+                  AND timestamp BETWEEN ? AND ?
+            ''', (activity, elder_id, room, ts_min, ts_max))
+            
+            updated_count += cursor.rowcount
+        
+        conn.commit()
+        
+        # Regenerate activity_segments for affected dates
+        for record_date in record_dates:
+            # Delete old segments for this date/room (with room normalization)
+            cursor.execute('''
+                DELETE FROM activity_segments 
+                WHERE elder_id = ? 
+                  AND LOWER(REPLACE(REPLACE(room, ' ', ''), '_', '')) = LOWER(REPLACE(REPLACE(?, ' ', ''), '_', ''))
+                  AND record_date = ?
+            ''', (elder_id, room, record_date))
+            
+            # Fetch updated events and regenerate segments (with room normalization)
+            events_df = pd.read_sql('''
+                SELECT timestamp, activity_type as predicted_activity, confidence, is_corrected
+                FROM adl_history 
+                WHERE elder_id = ? 
+                  AND LOWER(REPLACE(REPLACE(room, ' ', ''), '_', '')) = LOWER(REPLACE(REPLACE(?, ' ', ''), '_', ''))
+                  AND record_date = ?
+                ORDER BY timestamp
+            ''', conn, params=(elder_id, room, record_date))
+            
+            if not events_df.empty:
+                events_df['timestamp'] = pd.to_datetime(events_df['timestamp'])
+                events_df = events_df.sort_values('timestamp')
+                
+                # Improved grouping: break on activity change OR time gap > 5 minutes
+                events_df['time_diff'] = events_df['timestamp'].diff().dt.total_seconds().fillna(0)
+                events_df['activity_changed'] = events_df['predicted_activity'] != events_df['predicted_activity'].shift()
+                events_df['time_gap'] = events_df['time_diff'] > 300  # 5 minute gap
+                events_df['group'] = (events_df['activity_changed'] | events_df['time_gap']).cumsum()
+                
+                for group_id, group_df in events_df.groupby('group'):
+                    activity = group_df['predicted_activity'].iloc[0]
+                    
+                    # Skip NULL/empty activities
+                    if pd.isna(activity) or activity is None or str(activity).strip() == '':
+                        continue
+                    
+                    start_time = group_df['timestamp'].min()
+                    end_time = group_df['timestamp'].max() + pd.Timedelta(seconds=10)
+                    duration_minutes = (end_time - start_time).total_seconds() / 60.0
+                    
+                    # Safeguard: Skip unreasonably long segments (> 60 min) likely due to data gaps
+                    if duration_minutes > 60:
+                        continue
+
+                    avg_confidence = group_df['confidence'].mean() if 'confidence' in group_df.columns else 1.0
+                    event_count = len(group_df)
+                    
+                    # Check if this segment contains any corrected rows
+                    has_correction = group_df['is_corrected'].any() if 'is_corrected' in group_df.columns else False
+                    
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO activity_segments 
+                        (elder_id, room, activity_type, start_time, end_time, 
+                         duration_minutes, avg_confidence, event_count, record_date,
+                         is_corrected, correction_source)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ''', (
+                        elder_id, room, str(activity),
+                        start_time.strftime('%Y-%m-%d %H:%M:%S'),
+                        end_time.strftime('%Y-%m-%d %H:%M:%S'),
+                        round(duration_minutes, 2),
+                        round(avg_confidence, 3) if not pd.isna(avg_confidence) else 1.0,
+                        event_count,
+                        record_date,
+                        1 if has_correction else 0,
+                        'manual' if has_correction else None
+                    ))
+        
+        conn.commit()
+        conn.close()
+        
+        return True, f"Updated {updated_count} records and regenerated segments for {len(record_dates)} date(s)", updated_count
+        
+    except Exception as e:
+        return False, f"Database error: {str(e)}", 0
+
+# --- UI ---
+st.title("🧠 Beta_5 Model Studio & Data Center")
+
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📤 Data Export", "🏷️ Labeling Studio", "📊 Model Insights", "🏠 Household Overview", "⚙️ AI Configuration", "📝 Audit Trail"])
+
+# ==========================================
+# TAB 1: DATA EXPORT
+# ==========================================
+with tab1:
+    st.header("On-Demand Data Export")
+    
+    # Resident Selection
+    def get_residents():
+        if not DB_PATH.exists(): return []
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                try:
+                    df = pd.read_sql("SELECT elder_id FROM elders", conn)
+                    return df['elder_id'].tolist()
+                except:
+                    df = pd.read_sql("SELECT DISTINCT elder_id FROM adl_history", conn)
+                    return df['elder_id'].tolist()
+        except: return []
+
+    residents = get_residents()
+    if not residents:
+        st.warning("No residents found.")
+    else:
+        selected_resident = st.selectbox("Select Resident (Export)", residents)
+        
+        # Date Range
+        @st.cache_data(ttl=60)
+        def get_db_bounds(resident_id):
+            try:
+                with sqlite3.connect(DB_PATH) as conn:
+                    query = "SELECT min(timestamp), max(timestamp) FROM adl_history WHERE elder_id = ?"
+                    cursor = conn.cursor()
+                    cursor.execute(query, (resident_id,))
+                    result = cursor.fetchone()
+                    if result and result[0]:
+                        return pd.to_datetime(result[0]), pd.to_datetime(result[1])
+            except: pass
+            return None, None
+
+        min_date, max_date = get_db_bounds(selected_resident)
+        if min_date:
+            st.info(f"Data Available: {min_date.date()} to {max_date.date()}")
+            d_start = st.date_input("Start", min_date.date())
+            d_end = st.date_input("End", max_date.date())
+            
+            ex_type = st.radio("Type", ["Raw Activity Logs (Excel)", "Review Candidates (CSV)"], horizontal=True)
+            
+            if st.button("Generate Export", type="primary"):
+                with st.spinner("Processing..."):
+                     with sqlite3.connect(DB_PATH) as conn:
+                        start_ts = datetime.combine(d_start, datetime.min.time())
+                        end_ts = datetime.combine(d_end, datetime.max.time())
+                        
+                        if ex_type == "Raw Activity Logs (Excel)":
+                            q = "SELECT * FROM adl_history WHERE elder_id=? AND timestamp BETWEEN ? AND ? ORDER BY timestamp ASC"
+                            df = pd.read_sql(q, conn, params=(selected_resident, start_ts, end_ts))
+                            if not df.empty:
+                                buf = BytesIO()
+                                with pd.ExcelWriter(buf) as writer:
+                                    df.to_excel(writer, index=False)
+                                st.download_button("Download Excel", buf.getvalue(), f"{selected_resident}_log.xlsx")
+                                st.success(f"Generated {len(df)} records")
+                            else: st.warning("No data")
+                            
+                        else:
+                            q = "SELECT * FROM adl_history WHERE elder_id=? AND timestamp BETWEEN ? AND ? AND (activity_type='low_confidence' OR is_anomaly=1 OR confidence<0.6) ORDER BY timestamp DESC"
+                            df = pd.read_sql(q, conn, params=(selected_resident, start_ts, end_ts))
+                            if not df.empty:
+                                st.download_button("Download CSV", df.to_csv(index=False).encode(), f"{selected_resident}_review.csv")
+                                st.success(f"Found {len(df)} candidates")
+                            if not df.empty:
+                                st.download_button("Download CSV", df.to_csv(index=False).encode(), f"{selected_resident}_review.csv")
+                                st.success(f"Found {len(df)} candidates")
+                            else: st.info("No candidates found")
+                            
+        # Danger Zone
+        with st.expander("⚠️ Danger Zone: Manage Resident"):
+            st.warning(f"Actions here perform PERMANENT DELETION for {selected_resident}.")
+            
+            # Option 1: Delete Specific Date
+            st.markdown("#### 🗓️ Delete Specific Date")
+            delete_date = st.date_input("Select Date to Delete", value=max_date.date() if max_date else datetime.now().date(), key="delete_date_input")
+            
+            if st.button(f"🗑️ Delete {delete_date} Data Only", key="delete_date_btn"):
+                try:
+                    with sqlite3.connect(DB_PATH) as conn:
+                        cursor = conn.cursor()
+                        date_str = delete_date.strftime('%Y-%m-%d')
+                        
+                        # Delete from all relevant tables for this specific date
+                        tables = [
+                            ('adl_history', 'record_date'),
+                            ('activity_segments', 'record_date'),
+                            ('household_behavior', "date(timestamp)"),
+                            ('household_segments', "date(start_time)"),
+                            ('sleep_analysis', 'record_date')
+                        ]
+                        
+                        total_deleted = 0
+                        for table, date_col in tables:
+                            try:
+                                if 'date(' in date_col:
+                                    cursor.execute(f"DELETE FROM {table} WHERE elder_id = ? AND {date_col} = ?", (selected_resident, date_str))
+                                else:
+                                    cursor.execute(f"DELETE FROM {table} WHERE elder_id = ? AND {date_col} = ?", (selected_resident, date_str))
+                                total_deleted += cursor.rowcount
+                            except Exception:
+                                pass  # Table might not exist
+                        
+                        conn.commit()
+                        st.success(f"✅ Deleted {total_deleted} records for {date_str}. You can now re-upload data for this date.")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Deletion failed: {e}")
+            
+            st.divider()
+            
+            # Option 2: Delete ALL Resident Data
+            st.markdown("#### 🚨 Delete Entire Resident")
+            if st.button(f"🗑️ Delete ALL {selected_resident} Data", type="secondary", key="delete_all_btn"):
+                from elderlycare_v1_16.services.profile_service import ProfileService
+                
+                try:
+                    svc = ProfileService()
+                    if svc.delete_elder(selected_resident):
+                        st.success(f"Deleted {selected_resident}. Please refresh.")
+                        st.rerun()
+                    else:
+                        st.error("Deletion failed.")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+
+# ==========================================
+# TAB 2: LABELING STUDIO
+# ==========================================
+with tab2:
+    st.header("Correction Studio (Active Learning)")
+    st.markdown("Load **prediction files**, review model outputs, correct mistakes, and retrain. Labels are pre-populated from model predictions.")
+    
+    # 1. File Selector - ONLY show input/prediction files
+    archive_files = get_archive_files(file_type='input')
+    if not archive_files:
+        st.warning("No prediction files found in archive. Process some input files first.")
+    else:
+        file_options = [f"{f['date']} | {f['filename']}" for f in archive_files]
+        selected_file_idx = st.selectbox("Select Archived File", range(len(file_options)), format_func=lambda x: file_options[x])
+        selected_file_info = archive_files[selected_file_idx]
+        
+        st.info(f"Selected: {selected_file_info['path']}")
+        
+        # 2. Load Data Button
+        # 2. Load Data Button
+        if st.button("Load File Data"):
+            try:
+                from utils.data_loader import load_sensor_data
+                # Load all data into memory (efficient for both Excel and Parquet)
+                data_dict = load_sensor_data(selected_file_info['path'])
+                
+                st.session_state['loaded_data'] = data_dict
+                st.session_state['loaded_file'] = selected_file_info
+                st.session_state['sheet_names'] = list(data_dict.keys())
+                
+            except Exception as e:
+                st.error(f"Failed to load file: {e}")
+
+        # 3. Sheet & Data Editor
+        if 'loaded_file' in st.session_state and st.session_state['loaded_file']['path'] == selected_file_info['path']:
+            sheet = st.selectbox("Select Room/Sheet", st.session_state['sheet_names'])
+            
+            # Get dataframe from memory
+            if 'loaded_data' in st.session_state:
+                df = st.session_state['loaded_data'][sheet]
+            else:
+                # Fallback reload if session lost but 'loaded_file' persists (rare)
+                from utils.data_loader import load_sensor_data
+                data_dict = load_sensor_data(selected_file_info['path'])
+                df = data_dict[sheet]
+            
+            # Check essential columns
+            essential_cols = ['timestamp', 'activity_type'] if 'activity_type' in df.columns else []
+            # If input file, usually has 'activity' column if it was used for training previously.
+            # If it was an INPUT file, it might not have 'activity' filled (or empty).
+            # But process_data adds 'predicted_activity'? No, process_data saves to DB. 
+            # The ARCHIVE file is the ORIGINAL input.
+            # So it might NOT have predictions in it unless we enabled saving predictions back to file (we didn't).
+            # WAIT. If archive file is just raw sensor data, user needs to see PREDICTIONS to correct them.
+            # Where are the predictions? In DB!
+            
+            # MERGE STRATEGY:
+            # 1. Load Raw Data (DF)
+            # 2. Load Predictions from DB for this time range
+            # 3. Merge or Display side-by-side
+            
+            st.divider()
+            st.subheader(f"Labeling: {sheet}")
+            
+            # Ensure timestamp conversion and normalize to 10-second intervals
+            if 'timestamp' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                # Normalize timestamps to 10-second intervals (match DB structure)
+                df['timestamp'] = df['timestamp'].dt.floor('10s')
+                
+                # Extract record_date from filename (e.g. HK001_jessica_input_18dec2025.xlsx -> 2025-12-18)
+                fname = Path(selected_file_info['path']).name
+                elder_id_guess = fname.split('_')[0] + "_" + fname.split('_')[1]
+                
+                # Parse date from filename (e.g. "1jan2026", "18dec2025", "18dec 2025")
+                import re
+                date_match = re.search(r'(\d{1,2})([a-z]{3})\s?(\d{4})', fname.lower())
+                if date_match:
+                    day, mon, year = date_match.groups()
+                    month_map = {'jan':'01','feb':'02','mar':'03','apr':'04','may':'05','jun':'06',
+                                 'jul':'07','aug':'08','sep':'09','oct':'10','nov':'11','dec':'12'}
+                    record_date = f"{year}-{month_map.get(mon,'01')}-{int(day):02d}"
+                else:
+                    # Fallback to Excel timestamp range
+                    record_date = df['timestamp'].min().strftime('%Y-%m-%d')
+                
+                st.info(f"📅 Querying predictions for **{record_date}** (Elder: {elder_id_guess}, Room: {sheet.title()})")
+                
+                # Fetch Predictions using cached function
+                preds = fetch_predictions(elder_id_guess, sheet.lower(), record_date)
+
+                    
+                if not preds.empty:
+                        preds['timestamp'] = pd.to_datetime(preds['timestamp'])
+                        
+                        # *** ACTIVE LEARNING: Pre-populate 'activity' column from predictions ***
+                        # Use merge_asof for fuzzy timestamp matching (parquet and DB timestamps differ slightly)
+                        df_sorted = df.sort_values('timestamp').reset_index(drop=True)
+                        preds_sorted = preds.sort_values('timestamp').reset_index(drop=True)
+                        
+                        merged = pd.merge_asof(
+                            df_sorted,
+                            preds_sorted[['timestamp', 'predicted_activity']],
+                            on='timestamp',
+                            tolerance=pd.Timedelta('10s'),
+                            direction='nearest'
+                        )
+                        df = merged
+                        df['activity'] = df['predicted_activity'].fillna('inactive')
+                        df = df.drop(columns=['predicted_activity'], errors='ignore')
+                        
+                        match_count = (df['activity'] != 'inactive').sum()
+                        st.success(f"✅ Pre-populated {match_count} predictions into 'activity' column. Just correct any mistakes!")
+                        
+                        
+                        # Visualization
+                        st.subheader("1. Activity Timeline (Current Model Views)")
+                        st.info("This chart shows what the AI currently predicts. Use it to spot gaps or 'Low Confidence' areas.")
+                        
+                        import altair as alt
+                        
+                        # Create a unified chart
+                        # Predictions Gantt
+                        # preds['end_time'] is calculated in memory
+                        preds['end_time'] = preds['timestamp'] + pd.Timedelta(seconds=10)
+                        
+                        # Add time-only column for tooltip
+                        preds['time'] = preds['timestamp'].dt.strftime('%H:%M:%S')
+                        
+                        # Get date for title
+                        date_str = preds['timestamp'].min().strftime('%Y-%m-%d')
+                        
+                        # Filter out null/empty activities for cleaner display
+                        preds_clean = preds[preds['predicted_activity'].notna() & (preds['predicted_activity'] != '')].copy()
+                        
+                        c = alt.Chart(preds_clean).mark_bar().encode(
+                            x=alt.X('timestamp:T', axis=alt.Axis(format='%H:%M', title='Time')),
+                            x2='end_time:T',
+                            y=alt.Y('predicted_activity:N', title='Predicted Activity', sort='-x'),
+                            color=alt.Color('predicted_activity:N', scale=alt.Scale(scheme='tableau20'), legend=None),
+                            tooltip=[alt.Tooltip('time:N', title='Time'), 'predicted_activity', alt.Tooltip('confidence:Q', format='.2f')]
+                        ).properties(
+                            title=f"Activity Patterns - {date_str}",
+                            height=250,  # Increased height for better visibility
+                            width='container'
+                        ).configure_view(
+                            strokeWidth=0
+                        ).configure_axis(
+                            labelFontSize=11,
+                            titleFontSize=12
+                        ).interactive()
+                        
+                        # Add spacing before chart
+                        st.markdown('<div style="margin-top: 20px;"></div>', unsafe_allow_html=True)
+                        st.altair_chart(c, use_container_width=True)
+                        
+                        # Interactive Sensor Chart
+                        sensor_cols = [c for c in df.columns if c in ['co2', 'humidity', 'motion', 'temperature', 'sound', 'light']]
+                        if sensor_cols:
+                            st.subheader("2. Sensor Data Context (Interactive)")
+                            
+                            # 1. Select Sensors
+                            selected_sensors = st.multiselect(
+                                "Select Sensors to Visualize", 
+                                sensor_cols, 
+                                default=sensor_cols[:2] # Default to first 2 to save space/noise
+                            )
+                            
+                            # Option to Show Denoised with adjustable parameters
+                            show_denoised = st.checkbox("Apply Denoising (Preview Model Input)", value=True)
+                            
+                            if show_denoised:
+                                from elderlycare_v1_16.config.settings import DEFAULT_DENOISING_WINDOW, DEFAULT_DENOISING_THRESHOLD
+                                col_w, col_s = st.columns(2)
+                                with col_w:
+                                    preview_window = st.slider("Window", 2, 7, DEFAULT_DENOISING_WINDOW, 
+                                                               help="Samples in context window. Lower = preserves more detail.")
+                                with col_s:
+                                    preview_sigma = st.slider("Sigma", 2.0, 5.0, DEFAULT_DENOISING_THRESHOLD, step=0.5,
+                                                              help="Outlier threshold. Higher = less filtering.")
+                            
+                            if selected_sensors:
+                                plot_df = df.copy()
+                                if show_denoised:
+                                    # Apply filter to copy
+                                    try:
+                                        # Only denoise selected numeric sensors
+                                        denoise_targets = [c for c in selected_sensors if c in DEFAULT_SENSOR_COLUMNS]
+                                        if denoise_targets:
+                                            hampel_filter(plot_df, denoise_targets, window=preview_window, n_sigmas=preview_sigma, inplace=True)
+                                            st.caption(f"✅ Applied Hampel Filter (Window={preview_window}, Sigma={preview_sigma}) to preview.")
+                                    except Exception as e:
+                                        st.warning(f"Denoising preview failed: {e}")
+
+                                # Melt
+                                s_melt = plot_df.melt('timestamp', value_vars=selected_sensors, var_name='sensor', value_name='value')
+                                
+                                # Add time-only column for tooltip
+                                s_melt['time'] = s_melt['timestamp'].dt.strftime('%H:%M:%S')
+                                
+                                # Display date range header
+                                date_start = plot_df['timestamp'].min().strftime('%Y-%m-%d')
+                                date_end = plot_df['timestamp'].max().strftime('%Y-%m-%d')
+                                if date_start == date_end:
+                                    st.caption(f"📅 Date: **{date_start}**")
+                                else:
+                                    st.caption(f"📅 Date Range: **{date_start}** to **{date_end}**")
+                                
+                                # Individual chart per sensor (for proper width alignment)
+                                for sensor in selected_sensors:
+                                    sensor_data = plot_df[['timestamp', sensor]].copy()
+                                    sensor_data['time'] = sensor_data['timestamp'].dt.strftime('%H:%M:%S')
+                                    
+                                    chart = alt.Chart(sensor_data).mark_line(color='steelblue').encode(
+                                        x=alt.X('timestamp:T', axis=alt.Axis(format='%H:%M', title=None)),
+                                        y=alt.Y(f'{sensor}:Q', axis=alt.Axis(title=sensor.capitalize()), scale=alt.Scale(zero=False)),
+                                        tooltip=[alt.Tooltip('time:N', title='Time'), alt.Tooltip(f'{sensor}:Q', format='.2f')]
+                                    ).properties(
+                                        height=100
+                                    ).interactive()
+                                    
+                                    st.altair_chart(chart, use_container_width=True)
+                            else:
+                                st.info("Select sensors to view data.")
+
+                else:
+                    st.warning("No predictions found in DB for this period.")
+
+                # Editor
+                st.divider()
+                st.subheader("3. Correction Studio")
+                
+                # --- BATCH CORRECTION MODE ---
+                # Initialize correction queue in session state
+                if 'correction_queue' not in st.session_state:
+                    st.session_state.correction_queue = []
+                
+                with st.expander("⚡ Batch Labeling (Queue Multiple Corrections)", expanded=True):
+                    st.markdown("**Add corrections to queue, then apply all at once.** Training runs only once at the end.")
+                    
+                    c1, c2, c3 = st.columns([2, 2, 2])
+                    with c1:
+                        # Default to current range (1-minute step for finer control)
+                        b_start = st.time_input("Start Time", df['timestamp'].min().time(), step=60, key="batch_start")
+                    with c2:
+                        b_end = st.time_input("End Time", df['timestamp'].max().time(), step=60, key="batch_end")
+                    with c3:
+                        ACTIVITY_OPTIONS = get_activity_labels()
+                        b_label = st.selectbox("Activity to Apply", ACTIVITY_OPTIONS, index=min(3, len(ACTIVITY_OPTIONS)-1), key="batch_label")
+                    
+                    # Queue buttons
+                    col_queue, col_apply = st.columns(2)
+                    
+                    with col_queue:
+                        if st.button("➕ Add to Queue", help="Add this correction to the queue. Training will happen when you Apply All."):
+                            if b_start >= b_end:
+                                st.error("❌ Start time must be before end time!")
+                            else:
+                                # Check for duplicate/overlap
+                                new_range = (b_start, b_end, b_label)
+                                has_overlap = False
+                                overlap_msg = ""
+                                
+                                for existing in st.session_state.correction_queue:
+                                    ex_start, ex_end, ex_label = existing
+                                    # Check for overlap: two ranges overlap if start1 < end2 AND start2 < end1
+                                    if b_start < ex_end and ex_start < b_end:
+                                        has_overlap = True
+                                        overlap_msg = f"Overlaps with existing: {ex_start.strftime('%H:%M')}-{ex_end.strftime('%H:%M')} ({ex_label})"
+                                        break
+                                
+                                if has_overlap:
+                                    st.error(f"❌ {overlap_msg}. Remove the existing entry first, then add the new one.")
+                                else:
+                                    st.session_state.correction_queue.append(new_range)
+                                    st.success(f"✅ Added: {b_start.strftime('%H:%M')}-{b_end.strftime('%H:%M')} → {b_label}")
+                                    st.rerun()
+                    
+                    with col_apply:
+                        queue_count = len(st.session_state.correction_queue)
+                        if st.button(f"⚡ Apply All & Train ({queue_count})", type="primary", 
+                                    disabled=(queue_count == 0),
+                                    help="Apply all queued corrections to DB and retrain model ONCE."):
+                            st.session_state['apply_batch'] = True
+                            st.rerun()
+                    
+                    # Display queue
+                    if st.session_state.correction_queue:
+                        st.markdown("---")
+                        st.markdown("**📋 Queued Corrections:**")
+                        for i, (q_start, q_end, q_label) in enumerate(st.session_state.correction_queue):
+                            col_item, col_delete = st.columns([4, 1])
+                            with col_item:
+                                st.text(f"{i+1}. {q_start.strftime('%H:%M')} - {q_end.strftime('%H:%M')} → {q_label}")
+                            with col_delete:
+                                if st.button("🗑️", key=f"del_{i}", help="Remove from queue"):
+                                    st.session_state.correction_queue.pop(i)
+                                    st.rerun()
+                        
+                        if st.button("🗑️ Clear All", help="Remove all queued corrections"):
+                            st.session_state.correction_queue = []
+                            st.rerun()
+                    else:
+                        st.info("No corrections queued. Add time ranges above.")
+                    
+                    st.markdown("---")
+                    # Option to train on ALL history
+                    train_retro = st.checkbox("Train Retrospectively (All History)", value=True, help="If checked, model will be retrained on ALL available historical data for this resident, not just this file.")
+                    
+                # Processing Logic for Batch Apply
+                if st.session_state.get('apply_batch', False):
+                    st.session_state['apply_batch'] = False # Reset flag
+                    
+                    if not st.session_state.correction_queue:
+                        st.warning("Queue is empty!")
+                    else:
+                        try:
+                            # Setup logging
+                            logger = logging.getLogger('CorrectionStudio')
+                            logger.setLevel(logging.DEBUG)
+                            
+                            progress_bar = st.progress(0, text="Starting batch workflow...")
+                            
+                            # Ensure timestamp column
+                            if df['timestamp'].dtype == 'object':
+                                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                            
+                            # Track stats
+                            total_rows_updated = 0
+                            ranges_applied = 0
+                            
+                            # Open DB connection ONCE for all updates
+                            progress_bar.progress(10, text="Applying corrections to database...")
+                            
+                            with sqlite3.connect(DB_PATH) as conn:
+                                from utils.room_utils import normalize_timestamp, normalize_room_name
+                                import json
+                                cursor = conn.cursor()
+                                normalized_room = normalize_room_name(sheet)
+                                
+                                # Process Queue
+                                queue_len = len(st.session_state.correction_queue)
+                                for i, (q_start, q_end, q_label) in enumerate(st.session_state.correction_queue):
+                                    
+                                    # Update Progress
+                                    p = 10 + int(40 * (i / queue_len))
+                                    progress_bar.progress(p, text=f"Applying {i+1}/{queue_len}: {q_label} ({q_start.strftime('%H:%M')}-{q_end.strftime('%H:%M')})")
+                                    
+                                    # Prepare timings
+                                    base_date = df['timestamp'].iloc[0].date()
+                                    t_start = datetime.combine(base_date, q_start)
+                                    t_end = datetime.combine(base_date, q_end)
+                                    t_start_str = normalize_timestamp(t_start)
+                                    t_end_str = normalize_timestamp(t_end)
+                                    
+                                    # 1. Update In-Memory DataFrame (for file saving)
+                                    mask = (df['timestamp'] >= t_start) & (df['timestamp'] <= t_end)
+                                    if mask.any():
+                                        df.loc[mask, 'activity'] = q_label
+                                    
+                                    # 2. Capture Sensor Features (Preserve context from original rows)
+                                    sensor_cols = ['motion', 'temperature', 'light', 'sound', 'co2', 'humidity']
+                                    # We need to find sensor data for these timestamps. 
+                                    # Best source is the current dataframe 'df' filtering for these rows
+                                    # Optimization: Only update sensor features if they are empty in DB? 
+                                    # Previous logic forced update. Let's stick to previous logic for consistency.
+                                    
+                                    rows_to_update = df[mask]
+                                    for idx, row in rows_to_update.iterrows():
+                                        row_ts = normalize_timestamp(row['timestamp'])
+                                        sensor_data = {}
+                                        for col in sensor_cols:
+                                            if col in row and pd.notna(row[col]):
+                                                sensor_data[col] = float(row[col])
+                                        if sensor_data:
+                                            conn.execute('''
+                                                UPDATE adl_history 
+                                                SET sensor_features = ?
+                                                WHERE elder_id = ? AND timestamp = ? 
+                                                  AND LOWER(REPLACE(REPLACE(room, ' ', ''), '_', '')) = ?
+                                            ''', (json.dumps(sensor_data), elder_id_guess, row_ts, normalized_room))
+                                    
+                                    # 3. Update DB Activity
+                                    cursor.execute('''
+                                        UPDATE adl_history 
+                                        SET activity_type = ?, is_corrected = 1
+                                        WHERE elder_id = ? 
+                                          AND LOWER(REPLACE(REPLACE(room, ' ', ''), '_', '')) = ?
+                                          AND timestamp BETWEEN ? AND ?
+                                    ''', (q_label, elder_id_guess, normalized_room, t_start_str, t_end_str))
+                                    rows = cursor.rowcount
+                                    total_rows_updated += rows
+                                    
+                                    # 4. Audit Trail
+                                    cursor.execute('''
+                                        INSERT INTO correction_history 
+                                        (elder_id, room, timestamp_start, timestamp_end, old_activity, new_activity, rows_affected)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                                    ''', (elder_id_guess, sheet, t_start_str, t_end_str, 'batch', q_label, rows))
+                                    
+                                    ranges_applied += 1
+                                
+                                conn.commit()
+                                
+                                # Regenerate segments ONCE for this room
+                                progress_bar.progress(55, text="Regenerating segments...")
+                                from utils.segment_utils import regenerate_segments
+                                record_date = df['timestamp'].iloc[0].date().isoformat()
+                                seg_count = regenerate_segments(elder_id_guess, sheet, record_date, conn)
+                                conn.commit() # Commit segmentation
+                            
+                            # Update Buffer
+                            st.session_state['df_buffer'] = df
+                            
+                            # Save File
+                            progress_bar.progress(60, text="Saving corrected file...")
+                            new_filename = f"{elder_id_guess}_corrected_train.xlsx"
+                            save_path = RAW_DIR / new_filename
+                            save_path.parent.mkdir(parents=True, exist_ok=True)
+                            with pd.ExcelWriter(save_path) as writer:
+                                df.to_excel(writer, sheet_name=sheet, index=False)
+                            
+                            # Train
+                            progress_bar.progress(70, text="🧠 Training model on batch...")
+                            pipeline = UnifiedPipeline(enable_denoising=True)
+                            
+                            if train_retro:
+                                all_files = get_archive_files(resident_id=elder_id_guess)
+                                train_files = [f['path'] for f in all_files if '_train' in f['filename'].lower() or '_input' in f['filename'].lower()]
+                                # Add current if not present
+                                if str(save_path) not in train_files:
+                                    train_files.append(str(save_path))
+                                
+                                results, metrics = pipeline.train_from_files(train_files, elder_id_guess)
+                                pipeline.repredict_all(elder_id_guess, ARCHIVE_DIR)
+                            else:
+                                results, metrics = pipeline.train_and_predict(save_path, elder_id_guess)
+                            
+                            # Done
+                            avg_acc = 0
+                            if metrics:
+                                avg_acc = sum([m['accuracy'] for m in metrics]) / len(metrics)
+                            
+                            progress_bar.progress(100, text="✅ Batch complete!")
+                            st.balloons()
+                            st.success(f"🎉 Success! Applied {ranges_applied} corrections ({total_rows_updated} rows). Model retrained (Acc: {avg_acc:.1%}).")
+                            
+                            # Clear queue and cache
+                            st.session_state.correction_queue = []
+                            fetch_predictions.clear()
+                            st.rerun()
+
+                        except Exception as e:
+                            import traceback
+                            st.error(f"Batch failed: {e}")
+                            st.code(traceback.format_exc())
+                            fetch_predictions.clear()
+
+                # Initialize session buffer if not present
+                if 'df_buffer' not in st.session_state:
+                     st.session_state['df_buffer'] = df
+                else:
+                     # Check if we switched files/sheets, reset buffer if needed?
+                     # Simple check: timestamp match or size match
+                     if len(st.session_state['df_buffer']) != len(df):
+                          st.session_state['df_buffer'] = df
+                
+                # Use buffer for editor
+                # Capture result back to buffer? 
+                # st.data_editor returns the state WITH edits.
+                
+                edited_df = st.data_editor(
+                    st.session_state['df_buffer'], 
+                    num_rows="dynamic", 
+                    use_container_width=True,
+                    key="editor_key", # Key essential for state
+                    column_config={
+                        "activity": st.column_config.SelectboxColumn(
+                            "Activity Label",
+                            help="Select the correct activity",
+                            width="medium",
+                            options=ACTIVITY_OPTIONS,
+                            required=False
+                        )
+                    }
+                )
+                
+                # Update buffer with manual edits (so bulk apply works on top of manual, or vice versa if carefully managed)
+                # Actually, data_editor output 'edited_df' contains ALL current state.
+                # If we Bulk Apply, we modify 'df_buffer', rerun, and data_editor reloads 'df_buffer'.
+                # But manual edits in 'edited_df' might be lost if we didn't save them to buffer?
+                # Cycle:
+                # 1. Load buffer.
+                # 2. Render Editor.
+                # 3. User edits -> 'edited_df' updates.
+                # 4. We should probably sync 'edited_df' back to 'df_buffer' continuously?
+                #    No, data_editor usually handles its own state if key is constant?
+                #    If we modify 'df_buffer' programmatically (Bulk), we must update the source.
+                
+
+            else:
+                st.warning("No timestamp column found.")
+
+# ==========================================
+# TAB 3: MODEL INSIGHTS
+# ==========================================
+with tab3:
+    st.header("Model Intelligence: Learned Sensor Patterns")
+    st.markdown("Aggregated insights from **all training sessions**. This shows what patterns the deployed models have learned.")
+    
+    # Get residents with trained models
+    models_dir = current_dir / "models"
+    if not models_dir.exists():
+        st.warning("No trained models found. Train models first to see insights.")
+    else:
+        available_residents = [d.name for d in models_dir.iterdir() if d.is_dir()]
+        
+        if not available_residents:
+            st.warning("No trained models found.")
+        else:
+            selected_resident = st.selectbox("Select Resident", available_residents)
+            
+            if st.button("🔍 Show Model Insights", type="primary"):
+                with st.spinner(f"Analyzing all training data for {selected_resident}..."):
+                    try:
+                        # Find ALL training files for this resident across all dates
+                        all_training_data = {}  # {room: [dataframes]}
+                        
+                        if ARCHIVE_DIR.exists():
+                            for date_dir in ARCHIVE_DIR.iterdir():
+                                if not date_dir.is_dir():
+                                    continue
+                                    
+                                # Search for both parquet and xlsx files (support migration)
+                                found_files = list(date_dir.rglob("*train*.xlsx")) + list(date_dir.rglob("*train*.parquet"))
+                                
+                                for f in found_files:
+                                    # Check if file belongs to this resident
+                                    if selected_resident.lower() in f.name.lower():
+                                        try:
+                                            from utils.data_loader import load_sensor_data
+                                            data_dict = load_sensor_data(f)
+                                            
+                                            for room_name, df in data_dict.items():
+                                                if 'activity' not in df.columns:
+                                                    continue
+                                                
+                                                # Store for aggregation
+                                                if room_name not in all_training_data:
+                                                    all_training_data[room_name] = []
+                                                all_training_data[room_name].append(df)
+                                                
+                                        except Exception as e:
+                                            st.warning(f"Skipped {f.name}: {e}")
+                        
+                        if not all_training_data:
+                            st.error(f"No training data found for {selected_resident}. Upload training files to see insights.")
+                        else:
+                            st.success(f"📚 Aggregated {sum(len(dfs) for dfs in all_training_data.values())} training files across {len(all_training_data)} rooms")
+                            
+                            all_insights = []
+                            
+                            # Analyze each room
+                            for room, dataframes in all_training_data.items():
+                                # Concatenate all training data for this room
+                                combined_df = pd.concat(dataframes, ignore_index=True)
+                                
+                                # Define sensor columns (exclude temporal features from baseline comparison)
+                                # Temporal features (hour_sin, hour_cos, day_period) are used by model but not for pattern display
+                                sensor_cols = ['motion', 'temperature', 'light', 'sound', 'co2', 'humidity']
+                                available_sensors = [c for c in sensor_cols if c in combined_df.columns]
+                                
+                                if not available_sensors:
+                                    continue
+                                
+                                # Group by activity and compute AGGREGATED statistics
+                                activity_stats = combined_df.groupby('activity')[available_sensors].agg(['mean', 'std']).round(2)
+                                
+                                # Get overall baseline (inactive mean)
+                                if 'inactive' in combined_df['activity'].values:
+                                    baseline = combined_df[combined_df['activity'] == 'inactive'][available_sensors].mean()
+                                else:
+                                    baseline = combined_df[available_sensors].mean()
+                                
+                                # For each activity, determine which sensors are elevated
+                                for activity in activity_stats.index:
+                                    if activity == 'inactive':
+                                        continue  # Skip inactive baseline
+                                    
+                                    activity_row = {
+                                        'Room': room.title(),
+                                        'Activity': activity,
+                                        'Total Samples': len(combined_df[combined_df['activity'] == activity])
+                                    }
+                                    
+                                    # Analyze each sensor
+                                    elevated_sensors = []
+                                    for sensor in available_sensors:
+                                        mean_val = activity_stats.loc[activity, (sensor, 'mean')]
+                                        baseline_val = baseline[sensor]
+                                        
+                                        # Check if sensor is significantly elevated (>20% increase)
+                                        if mean_val > baseline_val * 1.2:
+                                            pct_increase = ((mean_val - baseline_val) / baseline_val) * 100
+                                            elevated_sensors.append(f"{sensor.upper()}↑{pct_increase:.0f}%")
+                                        elif mean_val < baseline_val * 0.8:
+                                            pct_decrease = ((baseline_val - mean_val) / baseline_val) * 100
+                                            elevated_sensors.append(f"{sensor.upper()}↓{pct_decrease:.0f}%")
+                                    
+                                    activity_row['Learned Pattern'] = ', '.join(elevated_sensors) if elevated_sensors else 'No significant changes'
+                                    all_insights.append(activity_row)
+                            
+                            if all_insights:
+                                insights_df = pd.DataFrame(all_insights)
+                                
+                                st.markdown("---")
+                                st.subheader("📊 Aggregated Model Knowledge")
+                                
+                                # Display as grouped table
+                                for room in sorted(insights_df['Room'].unique()):
+                                    with st.expander(f"🚪 {room}", expanded=True):
+                                        room_data = insights_df[insights_df['Room'] == room][['Activity', 'Total Samples', 'Learned Pattern']]
+                                        st.dataframe(room_data, use_container_width=True, hide_index=True)
+                                        
+                                        # Show sample count summary
+                                        total_samples = room_data['Total Samples'].sum()
+                                        st.caption(f"💡 This room's model trained on **{total_samples:,} total labeled examples** across all sessions")
+                            else:
+                                st.info("No activity patterns found. Ensure training files have 'activity' labels.")
+                                
+                    except Exception as e:
+                        st.error(f"Analysis failed: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
+    
+    # --- Training History Sub-Panel ---
+    st.markdown("---")
+    st.subheader("🛠️ Model Training History")
+    
+    def get_training_history(elder_id):
+        """Fetch training logs for an elder."""
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                query = """
+                    SELECT timestamp, room, model_type, accuracy, samples_count, epochs, status, error_message
+                    FROM model_training_history
+                    WHERE elder_id = ?
+                    ORDER BY timestamp DESC
+                """
+                return pd.read_sql(query, conn, params=(elder_id,))
+        except Exception:
+            return pd.DataFrame()
+    
+    # Use selected resident from above or default
+    if 'available_residents' in dir() and available_residents:
+        training_df = get_training_history(selected_resident)
+        
+        if training_df.empty:
+            st.info("No training history found. Train models to see logs here.")
+        else:
+            with st.expander("View Training Logs", expanded=True):
+                # Optional Filters
+                rooms = training_df['room'].unique().tolist()
+                selected_rooms = st.multiselect("Filter by Room", rooms, default=rooms, key="training_hist_rooms")
+                
+                filtered_df = training_df[training_df['room'].isin(selected_rooms)]
+                
+                st.dataframe(
+                    filtered_df,
+                    column_config={
+                        "timestamp": st.column_config.DatetimeColumn("Run Time", format="D MMM, HH:mm:ss"),
+                        "accuracy": st.column_config.ProgressColumn(
+                            "Accuracy", 
+                            format="%.2f", 
+                            min_value=0, 
+                            max_value=1
+                        ),
+                        "samples_count": st.column_config.NumberColumn("Samples"),
+                        "status": st.column_config.TextColumn("Status"),
+                    },
+                    hide_index=True,
+                    use_container_width=True
+                )
+    else:
+        st.info("Select a resident above to view training history.")
+
+# ==========================================
+# TAB 4: HOUSEHOLD OVERVIEW
+# ==========================================
+with tab4:
+    st.header("🏠 Household Overview (Global Behavior)")
+    
+    st.info("This view aggregates data from ALL rooms to determine the overall state of the home (e.g. Empty, Active, Resting).")
+    
+    # Grid Layout
+    col_main, col_config = st.columns([2, 1])
+    
+    # Init Analyzer
+    h_analyzer = HouseholdAnalyzer()
+    
+    with col_config:
+        st.subheader("⚙️ Rule Configuration")
+        with st.form("household_config_form"):
+            current_config = h_analyzer.get_config()
+            
+            # Household Type Toggle (NEW)
+            household_type = st.radio(
+                "Household Type",
+                options=['single', 'double'],
+                index=0 if current_config.get('household_type', 'single') == 'single' else 1,
+                help="Single = 1 elder. Double = 2 people (enables Conflict Resolution to filter out secondary person)."
+            )
+            
+            enable_detection = st.checkbox("Enable Empty Home Detection", value=current_config.get('enable_empty_home_detection', True))
+            
+            silence_threshold = st.slider(
+                "Silence Threshold (Minutes)", 
+                min_value=5, 
+                max_value=60, 
+                value=current_config.get('empty_home_silence_threshold_min', 15),
+                help="How long must the house be silent (ignoring ignored rooms) to confirm it is empty?"
+            )
+            
+            # Fetch all rooms for multiselect
+            all_rooms = []
+            if DB_PATH.exists():
+                with sqlite3.connect(DB_PATH) as conn:
+                    rooms_df = pd.read_sql("SELECT DISTINCT room FROM adl_history", conn)
+                    all_rooms = rooms_df['room'].tolist()
+            
+            # Filter out Entrance from options if desired, or keep it. 
+            # Usually Entrance cannot be ignored as it's the trigger.
+            # Convert config list to actual list
+            default_ignored = current_config.get('empty_home_ignore_rooms', [])
+            if not isinstance(default_ignored, list): default_ignored = []
+            
+            ignored_rooms = st.multiselect(
+                "Ignore Rooms for Silence Check",
+                options=[r for r in all_rooms if r != 'entrance'],
+                default=[r for r in default_ignored if r in all_rooms],
+                help="Rooms where activity should NOT prevent 'Empty Home' status (e.g. Basement, Garage)"
+            )
+            
+            save_config = st.form_submit_button("💾 Save Configuration")
+    
+    if save_config:
+        # Save to DB
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                conn.execute("INSERT OR REPLACE INTO household_config (key, value) VALUES (?, ?)", 
+                             ('household_type', household_type))
+                conn.execute("INSERT OR REPLACE INTO household_config (key, value) VALUES (?, ?)", 
+                             ('enable_empty_home_detection', str(enable_detection).lower()))
+                conn.execute("INSERT OR REPLACE INTO household_config (key, value) VALUES (?, ?)", 
+                             ('empty_home_silence_threshold_min', str(silence_threshold)))
+                conn.execute("INSERT OR REPLACE INTO household_config (key, value) VALUES (?, ?)", 
+                             ('empty_home_ignore_rooms', json.dumps(ignored_rooms)))
+                conn.commit()
+            st.success("Configuration saved!")
+        except Exception as e:
+            st.error(f"Failed to save config: {e}")
+            
+    with col_main:
+        st.subheader("Global History Timeline")
+        
+        # Date Selection (Synced with Session State or Local)
+        # Using a fresh date picker for this tab 
+        view_date = st.date_input("Select Date", value=datetime.today(), key="global_date_picker")
+        
+        if save_config:
+            # Re-run analysis for this date
+            with st.spinner("Recalculating Global State..."):
+                # Need resident ID. Assuming single resident or first one.
+                res_id = 'resident_01'
+                if get_residents():
+                    res_id = get_residents()[0]
+                    
+                h_analyzer.analyze_day(res_id, view_date.strftime('%Y-%m-%d'))
+                # Force reload by rerun
+                st.rerun()
+
+        # Load Segments
+        try:
+             with sqlite3.connect(DB_PATH) as conn:
+                 # Need resident ID
+                 res_id = 'resident_01'
+                 if get_residents():
+                    res_id = get_residents()[0]
+                    
+                 query = """
+                     SELECT state, start_time, end_time, duration_minutes 
+                     FROM household_segments 
+                     WHERE elder_id = ? AND date(start_time) = ?
+                     ORDER BY start_time
+                 """
+                 segments_df = pd.read_sql(query, conn, params=(res_id, view_date.strftime('%Y-%m-%d'),))
+                 
+                 if not segments_df.empty:
+                     # Color Mapping
+                     domain = ['empty_home', 'home_active', 'home_quiet', 'social_interaction']
+                     range_ = ['#d3d3d3', '#4daf4a', '#377eb8', '#e41a1c'] # Grey, Green, Blue, Red
+                     
+                     # Convert timestamps for human-readable tooltips
+                     segments_df['start_time'] = pd.to_datetime(segments_df['start_time'])
+                     segments_df['end_time'] = pd.to_datetime(segments_df['end_time'])
+                     segments_df['start_display'] = segments_df['start_time'].dt.strftime('%H:%M')
+                     segments_df['end_display'] = segments_df['end_time'].dt.strftime('%H:%M')
+                     
+                     chart = alt.Chart(segments_df).mark_bar().encode(
+                         x=alt.X('start_time:T', title='Time', axis=alt.Axis(format='%H:%M')),
+                         x2='end_time:T',
+                         y=alt.Y('state:N', title=None, sort=['home_active', 'home_quiet', 'empty_home', 'social_interaction'], axis=alt.Axis(labelFontSize=11, labelLimit=150)),
+                         color=alt.Color('state:N', scale=alt.Scale(domain=domain, range=range_), legend=alt.Legend(orient='top')),
+                         tooltip=[
+                              alt.Tooltip('state:N', title='State'),
+                              alt.Tooltip('start_display:N', title='Start'),
+                              alt.Tooltip('end_display:N', title='End'),
+                              alt.Tooltip('duration_minutes:Q', title='Duration (min)', format='.1f')
+                          ]
+                     ).properties(
+                         width='container',
+                         height=250
+                     ).configure_axis(
+                         labelFontSize=11
+                     ).interactive()
+                     
+                     st.altair_chart(chart, use_container_width=True)
+                     
+                     # Simple Stats
+                     total_mins = 24 * 60
+                     empty_mins = segments_df[segments_df['state'] == 'empty_home']['duration_minutes'].sum()
+                     occupancy_rate = 100 - (empty_mins / total_mins * 100)
+                     
+                     m1, m2, m3 = st.columns(3)
+                     m1.metric("Home Occupancy", f"{occupancy_rate:.1f}%")
+                     m2.metric("Time Empty", f"{empty_mins/60:.1f} hrs")
+                     m3.metric("Status Count", len(segments_df))
+                     
+                 else:
+                     st.info(f"No global history found for {view_date}. Run analysis or load data.")
+                     if st.button("Run Analysis Now"):
+                         with st.spinner("Analyzing..."):
+                             res_id = get_residents()[0] if get_residents() else 'resident_01'
+                             h_analyzer.analyze_day(res_id, view_date.strftime('%Y-%m-%d'))
+                             st.rerun()
+                             
+        except Exception as e:
+            st.error(f"Error loading global history: {e}")
+
+
+# ==========================================
+# TAB 5: AI CONFIGURATION
+# ==========================================
+with tab5:
+    st.header("⚙️ AI Configuration & Room Window Tuning")
+    
+    st.write("""
+    Configure the **Sequence Context Window** for each room. 
+    This determines how many samples the AI looks at to make a prediction.
+    """)
+    
+    room_mgr = get_room_config()
+    defaults = room_mgr._config.get("defaults", {})
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.subheader("🏠 Room-Specific Settings")
+        with st.form("room_config_form"):
+            updated_windows = {}
+            for room_key, settings in room_mgr.get_all_rooms().items():
+                current_window = settings.get("sequence_time_window")
+                note = settings.get("note", "")
+                
+                new_window = st.number_input(
+                    f"Sequence Window: {room_key.replace('_', ' ').title()} (seconds)",
+                    min_value=60,
+                    max_value=7200,
+                    value=current_window,
+                    step=60,
+                    help=f"{note} | Standard interval is 10s."
+                )
+                updated_windows[room_key] = new_window
+            
+            st.divider()
+            
+            # Retrain Option
+            should_retrain = st.checkbox(
+                "✅ Apply & Retrain Immediately", 
+                value=False,
+                help="Finds the most recent training file and retrains all models with new window sizes. Takes ~3 mins."
+            )
+
+            save_room_config = st.form_submit_button("💾 Save & Apply")
+            
+            if save_room_config:
+                try:
+                    # 1. Save Config
+                    for r_key, r_window in updated_windows.items():
+                        room_mgr.update_room_config(r_key, r_window)
+                    st.success("Configuration saved!")
+                    
+                    # 2. Retrain if checked
+                    if should_retrain:
+                        with st.status("🔄 Retraining Intelligence Models...", expanded=True) as status:
+                            st.write("🔍 Searching for latest training file...")
+                            
+                            # Find all files in archive/raw matching *train*.xlsx
+                            search_paths = [
+                                str(RAW_DIR / "*train*.xlsx"),
+                                str(ARCHIVE_DIR / "**" / "*train*.xlsx")
+                            ]
+                            
+                            found_files = []
+                            for p in search_paths:
+                                found_files.extend(glob.glob(p, recursive=True))
+                                
+                            if not found_files:
+                                status.update(label="❌ No training files found!", state="error")
+                                st.error("Please drop a file named '*train*' into data/raw/ manually.")
+                            else:
+                                # Get latest by modification time
+                                latest_file = max(found_files, key=os.path.getmtime)
+                                st.write(f"📂 Found: `{os.path.basename(latest_file)}`")
+                                
+                                st.write("🏗️ Initializing Pipeline...")
+                                pipeline = UnifiedPipeline()
+                                
+                                # Extract Elder ID from filename
+                                folder_name = os.path.basename(latest_file).split("_train")[0]
+                                elder_id = folder_name if folder_name else "HK001_jessica"
+                                st.write(f"👤 Elder ID: `{elder_id}`")
+                                
+                                st.write("🚀 Starting Training (this may take ~3 mins)...")
+                                try:
+                                    pipeline.train_and_predict(latest_file, elder_id)
+                                    status.update(label="✅ Retraining Complete!", state="complete")
+                                    st.success("Models for all rooms have been updated with new Sequence Windows.")
+                                    st.balloons()
+                                except Exception as e:
+                                    status.update(label="❌ Training Failed", state="error")
+                                    st.error(f"Error during training: {e}")
+                                    st.code(str(e))
+
+                except Exception as e:
+                    st.error(f"Failed to process: {e}")
+
+    with col2:
+        st.subheader("ℹ️ System Info")
+        st.info(f"""
+        **Current Defaults:**
+        - Interval: `{defaults.get('data_interval')}s`
+        - Window: `{defaults.get('sequence_time_window')}s`
+        """)
+        
+        st.warning("""
+        **⚠️ ALERT on Retraining**
+        
+        Changing the sequence window size will make existing models **incompatible**.
+        
+        The **Apply & Retrain** checkbox will handle this for you automatically using your last uploaded dataset.
+        """)
+        
+        if st.button("🔄 Reload Config"):
+            room_mgr._load_config()
+            st.rerun()
+
+    # --- Activity Label Management ---
+    st.divider()
+    st.subheader("🏷️ Activity Label Management")
+    st.caption("Configure the activity labels available in the Correction Studio dropdown.")
+    
+    current_labels = get_activity_labels()
+    
+    with st.expander("📝 Current Labels", expanded=False):
+        st.code("\n".join(current_labels))
+    
+    col_add, col_remove = st.columns(2)
+    
+    with col_add:
+        new_label = st.text_input("Add New Label", placeholder="e.g., reading")
+        if st.button("➕ Add Label"):
+            if new_label and new_label.strip():
+                label = new_label.strip().lower().replace(" ", "_")
+                if label not in current_labels:
+                    current_labels.append(label)
+                    save_activity_labels(current_labels)
+                    st.success(f"Added: {label}")
+                    st.rerun()
+                else:
+                    st.warning("Label already exists.")
+            else:
+                st.warning("Enter a label name.")
+    
+    with col_remove:
+        if current_labels:
+            label_to_remove = st.selectbox("Remove Label", current_labels, key="remove_label_select")
+            if st.button("🗑️ Remove Label"):
+                if label_to_remove in current_labels:
+                    current_labels.remove(label_to_remove)
+                    save_activity_labels(current_labels)
+                    st.success(f"Removed: {label_to_remove}")
+                    st.rerun()
+    
+    if st.button("🔄 Reset to Defaults"):
+        save_activity_labels(DEFAULT_ACTIVITY_LABELS)
+        st.success("Labels reset to defaults.")
+        st.rerun()
+
+# ==========================================
+# TAB 6: AUDIT TRAIL
+# ==========================================
+with tab6:
+    st.header("📝 Correction Audit Trail")
+    st.markdown("Track and review all manual corrections made to activity predictions. Supports 100+ elders with advanced filtering.")
+    
+    # --- Cached Data Fetchers ---
+    @st.cache_data(ttl=60)
+    def fetch_correction_history_cached(elder_filter=None, room_filter=None, days=30, include_deleted=False):
+        """Fetch correction history with optional filters."""
+        if not DB_PATH.exists():
+            return pd.DataFrame()
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                query = '''
+                    SELECT 
+                        id,
+                        corrected_at,
+                        elder_id,
+                        room,
+                        timestamp_start,
+                        timestamp_end,
+                        old_activity,
+                        new_activity,
+                        rows_affected,
+                        corrected_by,
+                        is_deleted,
+                        deleted_at,
+                        deleted_by
+                    FROM correction_history
+                    WHERE corrected_at >= date('now', ?)
+                '''
+                params = [f'-{days} days']
+                
+                # Filter deleted unless showing all
+                if not include_deleted:
+                    query += ' AND (is_deleted = 0 OR is_deleted IS NULL)'
+                
+                if elder_filter and elder_filter != 'All':
+                    query += ' AND elder_id = ?'
+                    params.append(elder_filter)
+                if room_filter and room_filter != 'All':
+                    query += ' AND LOWER(room) = LOWER(?)'
+                    params.append(room_filter)
+                
+                query += ' ORDER BY corrected_at DESC'
+                
+                df = pd.read_sql(query, conn, params=params)
+                return df
+        except Exception as e:
+            st.error(f"Failed to load correction history: {e}")
+            return pd.DataFrame()
+
+    
+    @st.cache_data(ttl=60)
+    def get_correction_summary():
+        """Get summary statistics for dashboard."""
+        if not DB_PATH.exists():
+            return {}
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                
+                # Total corrections
+                cursor.execute('SELECT COUNT(*) FROM correction_history')
+                total = cursor.fetchone()[0]
+                
+                # This week
+                cursor.execute("SELECT COUNT(*) FROM correction_history WHERE corrected_at >= date('now', '-7 days')")
+                this_week = cursor.fetchone()[0]
+                
+                # Today
+                cursor.execute("SELECT COUNT(*) FROM correction_history WHERE date(corrected_at) = date('now')")
+                today = cursor.fetchone()[0]
+                
+                # Most corrected elder
+                cursor.execute('''
+                    SELECT elder_id, COUNT(*) as cnt 
+                    FROM correction_history 
+                    GROUP BY elder_id 
+                    ORDER BY cnt DESC 
+                    LIMIT 1
+                ''')
+                top_elder_row = cursor.fetchone()
+                top_elder = f"{top_elder_row[0]} ({top_elder_row[1]})" if top_elder_row else "N/A"
+                
+                # Most corrected activity (new_activity)
+                cursor.execute('''
+                    SELECT new_activity, COUNT(*) as cnt 
+                    FROM correction_history 
+                    GROUP BY new_activity 
+                    ORDER BY cnt DESC 
+                    LIMIT 1
+                ''')
+                top_activity_row = cursor.fetchone()
+                top_activity = f"{top_activity_row[0]} ({top_activity_row[1]})" if top_activity_row else "N/A"
+                
+                # Total rows affected
+                cursor.execute('SELECT SUM(rows_affected) FROM correction_history')
+                total_rows = cursor.fetchone()[0] or 0
+                
+                return {
+                    'total': total,
+                    'this_week': this_week,
+                    'today': today,
+                    'top_elder': top_elder,
+                    'top_activity': top_activity,
+                    'total_rows': total_rows
+                }
+        except Exception as e:
+            return {'error': str(e)}
+    
+    @st.cache_data(ttl=120)
+    def get_available_filters():
+        """Get unique elders and rooms for filter dropdowns."""
+        if not DB_PATH.exists():
+            return [], []
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                elders = pd.read_sql('SELECT DISTINCT elder_id FROM correction_history ORDER BY elder_id', conn)['elder_id'].tolist()
+                rooms = pd.read_sql('SELECT DISTINCT room FROM correction_history ORDER BY room', conn)['room'].tolist()
+                return elders, rooms
+        except:
+            return [], []
+    
+    # --- Summary Dashboard ---
+    st.subheader("📊 Summary Dashboard")
+    summary = get_correction_summary()
+    
+    if 'error' in summary:
+        st.warning(f"Could not load summary: {summary['error']}")
+    elif summary.get('total', 0) == 0:
+        st.info("No corrections recorded yet. Corrections made in Labeling Studio will appear here.")
+    else:
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Corrections", summary.get('total', 0))
+        with col2:
+            st.metric("This Week", summary.get('this_week', 0))
+        with col3:
+            st.metric("Today", summary.get('today', 0))
+        with col4:
+            st.metric("Rows Modified", f"{summary.get('total_rows', 0):,}")
+        
+        col5, col6 = st.columns(2)
+        with col5:
+            st.info(f"**Most Corrected Elder:** {summary.get('top_elder', 'N/A')}")
+        with col6:
+            st.info(f"**Most Applied Activity:** {summary.get('top_activity', 'N/A')}")
+    
+    st.divider()
+    
+    # --- Filters ---
+    st.subheader("🔍 Filter Corrections")
+    
+    elders_list, rooms_list = get_available_filters()
+    
+    filter_col1, filter_col2, filter_col3, filter_col4 = st.columns([1, 1, 1, 1])
+    
+    with filter_col1:
+        elder_options = ['All'] + elders_list
+        selected_elder = st.selectbox("Elder", elder_options, key="audit_elder_filter")
+    
+    with filter_col2:
+        room_options = ['All'] + rooms_list
+        selected_room = st.selectbox("Room", room_options, key="audit_room_filter")
+    
+    with filter_col3:
+        days_options = {'Last 7 Days': 7, 'Last 30 Days': 30, 'Last 90 Days': 90, 'All Time': 3650}
+        selected_period = st.selectbox("Time Period", list(days_options.keys()), key="audit_period_filter")
+        days = days_options[selected_period]
+    
+    with filter_col4:
+        include_deleted = st.checkbox("Show Deleted", value=False, help="Include soft-deleted corrections in the list")
+    
+    # Apply filters button
+    if st.button("🔄 Apply Filters", key="apply_audit_filters"):
+        st.cache_data.clear()  # Clear cache to reload with new filters
+    
+    # --- Data Table ---
+    st.subheader("📋 Correction History")
+    
+    history_df = fetch_correction_history_cached(
+        elder_filter=selected_elder if selected_elder != 'All' else None,
+        room_filter=selected_room if selected_room != 'All' else None,
+        days=days,
+        include_deleted=include_deleted
+    )
+    
+    if history_df.empty:
+        st.info("No correction records found for the selected filters.")
+    else:
+        # Add status column for display
+        history_df['status'] = history_df['is_deleted'].apply(lambda x: '🗑️ Deleted' if x == 1 else '✅ Active')
+        
+        # Add selection checkbox column (only for active corrections)
+        history_df['select'] = False
+        
+        # Format for display - include 'select' column and 'id' for deletion
+        display_df = history_df[['select', 'id', 'corrected_at', 'elder_id', 'room', 'timestamp_start', 'timestamp_end', 
+                                  'old_activity', 'new_activity', 'rows_affected', 'status']].copy()
+        display_df.columns = ['Select', 'ID', 'Corrected At', 'Elder', 'Room', 'Start', 'End', 'From', 'To', 'Rows', 'Status']
+        
+        # Pagination for large datasets
+        ROWS_PER_PAGE = 50
+        total_rows = len(display_df)
+        total_pages = max(1, (total_rows + ROWS_PER_PAGE - 1) // ROWS_PER_PAGE)
+        
+        if total_rows > ROWS_PER_PAGE:
+            page = st.number_input("Page", min_value=1, max_value=total_pages, value=1, key="audit_page")
+            st.caption(f"Showing page {page} of {total_pages} ({total_rows} total records)")
+            start_idx = (page - 1) * ROWS_PER_PAGE
+            end_idx = start_idx + ROWS_PER_PAGE
+            paginated_df = display_df.iloc[start_idx:end_idx].copy()
+        else:
+            paginated_df = display_df.copy()
+            st.caption(f"Showing {total_rows} records")
+        
+        # Disable checkbox for already deleted items
+        disabled_rows = paginated_df['Status'] == '🗑️ Deleted'
+        
+        # Display editable table with checkbox column
+        edited_df = st.data_editor(
+            paginated_df,
+            column_config={
+                "Select": st.column_config.CheckboxColumn(
+                    "🗑️",
+                    help="Select to delete",
+                    default=False,
+                    width="small"
+                ),
+                "ID": st.column_config.NumberColumn("ID", width="small"),
+                "Corrected At": st.column_config.DatetimeColumn("Corrected At", format="D MMM, HH:mm"),
+                "Start": st.column_config.TextColumn("Start", width="medium"),
+                "End": st.column_config.TextColumn("End", width="medium"),
+                "Rows": st.column_config.NumberColumn("Rows", width="small"),
+                "Status": st.column_config.TextColumn("Status", width="small"),
+            },
+            disabled=["ID", "Corrected At", "Elder", "Room", "Start", "End", "From", "To", "Rows", "Status"],
+            hide_index=True,
+            use_container_width=True,
+            key="audit_table_editor"
+        )
+        
+        # Get selected rows for deletion
+        selected_ids = edited_df[edited_df['Select'] == True]['ID'].tolist()
+        
+        # Filter out already deleted ones
+        active_selected = [id for id in selected_ids if history_df[history_df['id'] == id]['is_deleted'].values[0] != 1]
+        
+        # Delete button at bottom
+        st.divider()
+        col_del, col_info = st.columns([1, 3])
+        
+        with col_del:
+            delete_disabled = len(active_selected) == 0
+            if st.button(
+                f"🗑️ Delete Selected ({len(active_selected)})", 
+                type="secondary" if delete_disabled else "primary",
+                disabled=delete_disabled,
+                key="delete_selected_btn"
+            ):
+                try:
+                    from elderlycare_v1_16.services.adl_service import ADLService
+                    adl_svc = ADLService()
+                    
+                    total_reset = 0
+                    success_count = 0
+                    
+                    for correction_id in active_selected:
+                        result = adl_svc.delete_correction(int(correction_id), deleted_by='dashboard_user')
+                        if result['success']:
+                            total_reset += result['adl_rows_reset']
+                            success_count += 1
+                    
+                    st.success(f"✅ Deleted {success_count} correction(s). Reset {total_reset} ADL rows from ML training.")
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Error: {e}")
+        
+        with col_info:
+            if len(active_selected) > 0:
+                st.warning(f"**ML forgets, Audit remembers**: {len(active_selected)} correction(s) will be removed from ML training but kept in audit history.")
+        
+        # --- Export ---
+        st.divider()
+        st.subheader("📥 Export")
+        
+        export_col1, export_col2 = st.columns(2)
+        
+        with export_col1:
+            # Export filtered data
+            csv_filtered = history_df.to_csv(index=False)
+            st.download_button(
+                "📄 Download Filtered (CSV)",
+                data=csv_filtered,
+                file_name=f"correction_history_filtered_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+                key="export_filtered_audit"
+            )
+        
+        with export_col2:
+            # Export all data
+            @st.cache_data(ttl=300)
+            def get_full_history():
+                if not DB_PATH.exists():
+                    return pd.DataFrame()
+                try:
+                    with sqlite3.connect(DB_PATH) as conn:
+                        return pd.read_sql('SELECT * FROM correction_history ORDER BY corrected_at DESC', conn)
+                except:
+                    return pd.DataFrame()
+            
+            full_df = get_full_history()
+            if not full_df.empty:
+                csv_full = full_df.to_csv(index=False)
+                st.download_button(
+                    "📊 Download All History (CSV)",
+                    data=csv_full,
+                    file_name=f"correction_history_full_{pd.Timestamp.now().strftime('%Y%m%d')}.csv",
+                    mime="text/csv",
+                    key="export_full_audit"
+                )
+

@@ -1,0 +1,38 @@
+version: v1
+
+critical_labels_by_room:
+  bedroom:
+    - unoccupied
+    - sleep
+    - bedroom_normal_use
+  bathroom:
+    - unoccupied
+    - bathroom_normal_use
+  kitchen:
+    - unoccupied
+    - kitchen_normal_use
+  livingroom:
+    - unoccupied
+    - livingroom_normal_use
+  entrance:
+    - unoccupied
+    - out
+
+defaults:
+  include_uncertainty_labels: true
+  uncertainty_labels:
+    - low_confidence
+    - unknown
+    - outside_sensed_space
+  alias_to_canonical:
+    sleeping: sleep
+    showering: shower
+    bathroom_use: bathroom_normal_use
+    kitchen_use: kitchen_normal_use
+    livingroom_active: livingroom_normal_use
+    active_living: livingroom_normal_use
+    relaxing: livingroom_normal_use
+    out_time: out
+    leaving_home: out
+    entering_home: out
+    room_normal_use: bedroom_normal_use

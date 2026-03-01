@@ -1,0 +1,67 @@
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+.agent/
+.codex/
+
+# Python
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+
+# Node/web
+node_modules/
+.next/
+.turbo/
+.vercel/
+
+# Logs/runtime output
+*.log
+logs/
+tmp/
+archive/
+automation.log
+export_ui.log
+MagicMock/
+backend/MagicMock/
+
+# Secrets/local env
+.env
+backend/.env
+web-ui/.env
+web-ui/.env.local
+*.pem
+*.key
+
+# Local backup/noise
+*.bak
+*.backup*
+*~
+
+# DB files
+*.db
+*.db-shm
+*.db-wal
+
+# Data (local runtime/training artifacts)
+data/
+backend/data/
+elder_data/
+
+# ML artifacts and run outputs
+backend/models/
+backend/models_beta6_registry_v2/
+backend/validation_runs_canary/
+backend/tmp/
+backend/logs/
+
+# Streamlit/cache
+backend/.streamlit/

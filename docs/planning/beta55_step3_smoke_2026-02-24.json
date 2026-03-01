@@ -1,0 +1,74 @@
+{
+  "status": "pass",
+  "checks": [
+    {
+      "name": "backtest_command_exit_zero",
+      "pass": true,
+      "details": {
+        "returncode": 0
+      }
+    },
+    {
+      "name": "backtest_report_generated",
+      "pass": true,
+      "details": {
+        "path": "/tmp/smoke_backtest_day7_seed11.json"
+      }
+    },
+    {
+      "name": "data_continuity_audit_present",
+      "pass": true,
+      "details": {}
+    },
+    {
+      "name": "label_corrections_summary_present",
+      "pass": true,
+      "details": {}
+    },
+    {
+      "name": "target_day_split_present",
+      "pass": true,
+      "details": {
+        "target_day": 7
+      }
+    },
+    {
+      "name": "minimum_changed_minutes_evidence",
+      "pass": true,
+      "details": {
+        "changed_minutes_total": 6777.0,
+        "minimum_required": 30.0,
+        "diff_report": "/tmp/beta55_hyst_e2e_diff_20260224.json"
+      }
+    },
+    {
+      "name": "occupied_rate:livingroom:day7",
+      "pass": true,
+      "details": {
+        "observed_rate": 0.0718421052631579,
+        "min_rate": 0.07,
+        "file": "HK0011_jessica_train_7dec2025.xlsx"
+      }
+    }
+  ],
+  "blocking_reasons": [],
+  "backtest_report_path": "/tmp/smoke_backtest_day7_seed11.json",
+  "command": [
+    "/Library/Frameworks/Python.framework/Versions/3.12/bin/python3",
+    "backend/scripts/run_event_first_backtest.py",
+    "--data-dir",
+    "/Users/dicksonng/DT/Development/New training files",
+    "--elder-id",
+    "HK0011_jessica",
+    "--min-day",
+    "6",
+    "--max-day",
+    "7",
+    "--seed",
+    "11",
+    "--output",
+    "/tmp/smoke_backtest_day7_seed11.json"
+  ],
+  "stdout": "Wrote event-first backtest report: /tmp/smoke_backtest_day7_seed11.json\n",
+  "stderr": ""
+}

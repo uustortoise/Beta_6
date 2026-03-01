@@ -1,0 +1,39 @@
+version: v1
+report_cadence: daily
+
+thresholds:
+  unknown_rate:
+    warn: 0.10
+    critical: 0.16
+  abstain_rate:
+    warn: 0.12
+    critical: 0.18
+  occupancy_drift_abs_pp:
+    warn: 0.12
+    critical: 0.20
+
+reason_code_ratio_caps:
+  fail_uncertainty_unknown:
+    warn: 0.08
+    critical: 0.12
+  fail_timeline_mae:
+    warn: 0.05
+    critical: 0.10
+  fail_timeline_fragmentation:
+    warn: 0.06
+    critical: 0.11
+
+routing:
+  default_owner: mlops_oncall
+  metric_owners:
+    unknown_rate: mlops_oncall
+    abstain_rate: mlops_oncall
+    occupancy_drift_abs_pp: modeling_lead
+    reason_code_distribution: qa_gate_owner
+    slo_input_contract: ml_platform_owner
+  severity_channels:
+    warn: slack://beta6-model-alerts
+    critical: pagerduty://beta6-mlops
+  severity_eta_hours:
+    warn: 24
+    critical: 4

@@ -1,0 +1,243 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "last_updated": "2026-02-08",
+    "total_entries": 12,
+    "sources": ["AGS_BEERS", "AGS_FALLS", "WHO_ICOPE"]
+  },
+  "guidelines": [
+    {
+      "id": "beers_2023_anticholinergic",
+      "source": "AGS_BEERS",
+      "version": "2023",
+      "publication_year": 2023,
+      "category": "medication_safety",
+      "title": "Avoid Anticholinergic Medications",
+      "description": "Highly anticholinergic medications increase risk of confusion, constipation, urinary retention, and falls in older adults.",
+      "evidence_grade": "A",
+      "evidence_summary": "Based on AGS Beers Criteria 2023",
+      "examples": ["Diphenhydramine", "Oxybutynin", "Amitriptyline", "Paroxetine"],
+      "action_steps": [
+        "Review current medications for anticholinergic burden",
+        "Consider alternative medications with lower anticholinergic properties",
+        "If necessary, use lowest effective dose for shortest duration"
+      ],
+      "applicable_conditions": ["polypharmacy", "cognitive_impairment", "fall_risk"],
+      "contraindications": []
+    },
+    {
+      "id": "beers_2023_benzodiazepine",
+      "source": "AGS_BEERS",
+      "version": "2023",
+      "publication_year": 2023,
+      "category": "medication_safety",
+      "title": "Avoid Benzodiazepines for Insomnia",
+      "description": "Benzodiazepines increase risk of cognitive impairment, delirium, falls, fractures, and motor vehicle accidents in older adults.",
+      "evidence_grade": "A",
+      "evidence_summary": "Based on AGS Beers Criteria 2023",
+      "examples": ["Diazepam", "Lorazepam", "Alprazolam", "Temazepam"],
+      "action_steps": [
+        "Gradual tapering if long-term use",
+        "Consider non-pharmacological sleep interventions",
+        "If sleep medication necessary, consider ramelteon or low-dose doxepin"
+      ],
+      "applicable_conditions": ["insomnia", "anxiety", "fall_risk"],
+      "contraindications": []
+    },
+    {
+      "id": "beers_2023_nsaid",
+      "source": "AGS_BEERS",
+      "version": "2023",
+      "publication_year": 2023,
+      "category": "medication_safety",
+      "title": "Caution with NSAIDs",
+      "description": "NSAIDs increase risk of GI bleeding, renal failure, cardiovascular events, and exacerbation of heart failure.",
+      "evidence_grade": "A",
+      "evidence_summary": "Based on AGS Beers Criteria 2023",
+      "action_steps": [
+        "Use lowest effective dose for shortest duration",
+        "Consider PPI protection if GI risk factors present",
+        "Monitor renal function and blood pressure",
+        "Consider acetaminophen as first-line for pain"
+      ],
+      "applicable_conditions": ["chronic_pain", "arthritis", "cardiovascular_disease"],
+      "contraindications": ["active_GI_bleeding", "severe_renal_impairment", "uncontrolled_HTN"]
+    },
+    {
+      "id": "beers_2023_hypoglycemic",
+      "source": "AGS_BEERS",
+      "version": "2023",
+      "publication_year": 2023,
+      "category": "medication_safety",
+      "title": "Avoid Long-acting Sulfonylureas in Diabetes",
+      "description": "Glyburide and chlorpropamide cause prolonged hypoglycemia; prefer shorter-acting agents.",
+      "evidence_grade": "A",
+      "evidence_summary": "Based on AGS Beers Criteria 2023",
+      "examples": ["Glyburide", "Chlorpropamide"],
+      "action_steps": [
+        "Switch to glipizide or other shorter-acting agent",
+        "Consider metformin if renal function adequate",
+        "Monitor blood glucose closely during transition"
+      ],
+      "applicable_conditions": ["diabetes_type_2", "hypoglycemia_history"],
+      "contraindications": []
+    },
+    {
+      "id": "ags_falls_2023_multifactorial",
+      "source": "AGS_FALLS",
+      "version": "2023",
+      "publication_year": 2023,
+      "category": "fall_prevention",
+      "title": "Multifactorial Fall Risk Assessment",
+      "description": "Comprehensive fall risk assessment including history of falls, gait/balance assessment, orthostatic hypotension, medication review, vision assessment, and environmental hazards.",
+      "evidence_grade": "A",
+      "evidence_summary": "Based on AGS Fall Prevention Guidelines 2023",
+      "action_steps": [
+        "Conduct standardized gait assessment (Tinetti or Timed Up and Go)",
+        "Review medications for fall-risk increasing drugs",
+        "Assess orthostatic vital signs",
+        "Evaluate vision and footwear",
+        "Conduct home safety evaluation"
+      ],
+      "applicable_conditions": ["history_of_falls", "gait_abnormality", "high_fall_risk"],
+      "contraindications": []
+    },
+    {
+      "id": "ags_falls_2023_exercise",
+      "source": "AGS_FALLS",
+      "version": "2023",
+      "publication_year": 2023,
+      "category": "fall_prevention",
+      "title": "Exercise Programs for Fall Prevention",
+      "description": "Group or individual exercise programs including gait, balance, and functional training to prevent falls.",
+      "evidence_grade": "A",
+      "evidence_summary": "Based on AGS Fall Prevention Guidelines 2023",
+      "action_steps": [
+        "Tai Chi (strong evidence)",
+        "Balance and strength training at least 3x/week",
+        "Physical therapy referral for individualized program",
+        "Continue exercises indefinitely for sustained benefit"
+      ],
+      "applicable_conditions": ["high_fall_risk", "mobility_limitation", "balance_impairment"],
+      "contraindications": ["acute_fracture", "unstable_cardiovascular_condition"]
+    },
+    {
+      "id": "ags_falls_2023_vitamin_d",
+      "source": "AGS_FALLS",
+      "version": "2023",
+      "publication_year": 2023,
+      "category": "fall_prevention",
+      "title": "Vitamin D Supplementation",
+      "description": "Vitamin D supplementation (800 IU/day) for adults aged 65+ with vitamin D deficiency or high fall risk.",
+      "evidence_grade": "B",
+      "evidence_summary": "Based on AGS Fall Prevention Guidelines 2023",
+      "action_steps": [
+        "Check 25-hydroxyvitamin D level",
+        "Supplement if <20 ng/mL or high fall risk",
+        "Typical dose: 800-1000 IU daily",
+        "Monitor calcium levels if combined with calcium"
+      ],
+      "applicable_conditions": ["vitamin_d_deficiency", "high_fall_risk", "osteoporosis"],
+      "contraindications": ["hypercalcemia", "kidney_stones_history"]
+    },
+    {
+      "id": "ags_falls_2023_home_modification",
+      "source": "AGS_FALLS",
+      "version": "2023",
+      "publication_year": 2023,
+      "category": "fall_prevention",
+      "title": "Home Safety Modifications",
+      "description": "Environmental modifications to reduce fall hazards, particularly for those with visual impairment or history of falls.",
+      "evidence_grade": "B",
+      "evidence_summary": "Based on AGS Fall Prevention Guidelines 2023",
+      "action_steps": [
+        "Remove tripping hazards (rugs, cords)",
+        "Install grab bars in bathroom",
+        "Improve lighting, especially at night",
+        "Install handrails on stairs",
+        "Non-slip mats in bathroom"
+      ],
+      "applicable_conditions": ["history_of_falls", "visual_impairment", "high_fall_risk"],
+      "contraindications": []
+    },
+    {
+      "id": "who_icope_cognitive",
+      "source": "WHO_ICOPE",
+      "version": "2017",
+      "publication_year": 2017,
+      "category": "cognitive_health",
+      "title": "ICOPE Cognitive Decline Screening",
+      "description": "Screen for cognitive decline using validated tools; intervene with cognitive stimulation, physical activity, and vascular risk factor management.",
+      "evidence_grade": "B",
+      "evidence_summary": "Based on WHO ICOPE Guidelines 2017",
+      "action_steps": [
+        "Mini-Cog or MMSE screening",
+        "Cognitive stimulation activities",
+        "Physical exercise (150 min/week moderate)",
+        "Manage hypertension, diabetes, cholesterol",
+        "Social engagement programs"
+      ],
+      "applicable_conditions": ["mild_cognitive_impairment", "cognitive_decline"],
+      "contraindications": []
+    },
+    {
+      "id": "who_icope_mobility",
+      "source": "WHO_ICOPE",
+      "version": "2017",
+      "publication_year": 2017,
+      "category": "mobility",
+      "title": "ICOPE Locomotor Capacity Assessment",
+      "description": "Assess mobility using SPPB or gait speed; intervene with progressive resistance training and balance exercises.",
+      "evidence_grade": "A",
+      "evidence_summary": "Based on WHO ICOPE Guidelines 2017",
+      "action_steps": [
+        "Measure usual gait speed over 4-6 meters",
+        "Short Physical Performance Battery (SPPB)",
+        "Progressive resistance training 2-3x/week",
+        "Balance training daily",
+        "Walking program 30 min/day"
+      ],
+      "applicable_conditions": ["slow_gait", "mobility_limitation", "sarcopenia"],
+      "contraindications": ["acute_fracture", "unstable_angina"]
+    },
+    {
+      "id": "who_icope_nutrition",
+      "source": "WHO_ICOPE",
+      "version": "2017",
+      "publication_year": 2017,
+      "category": "nutrition",
+      "title": "ICOPE Malnutrition Screening",
+      "description": "Screen for malnutrition risk; intervene with nutritional counseling and protein supplementation if indicated.",
+      "evidence_grade": "B",
+      "evidence_summary": "Based on WHO ICOPE Guidelines 2017",
+      "action_steps": [
+        "MNA-SF or MUST screening",
+        "Dietary assessment",
+        "Protein intake 1.0-1.2 g/kg/day",
+        "Vitamin D and calcium as needed",
+        "Oral nutritional supplements if underweight"
+      ],
+      "applicable_conditions": ["unintentional_weight_loss", "malnutrition_risk", "sarcopenia"],
+      "contraindications": []
+    },
+    {
+      "id": "who_icope_vision",
+      "source": "WHO_ICOPE",
+      "version": "2017",
+      "publication_year": 2017,
+      "category": "sensory",
+      "title": "ICOPE Vision Assessment",
+      "description": "Screen for vision impairment; intervene with refractive correction, cataract evaluation, and environmental modifications.",
+      "evidence_grade": "B",
+      "evidence_summary": "Based on WHO ICOPE Guidelines 2017",
+      "action_steps": [
+        "Visual acuity testing",
+        "Cataract assessment if indicated",
+        "Referral to ophthalmology for significant impairment",
+        "Improve home lighting and contrast"
+      ],
+      "applicable_conditions": ["visual_impairment", "cataracts", "glaucoma"],
+      "contraindications": []
+    }
+  ]
+}

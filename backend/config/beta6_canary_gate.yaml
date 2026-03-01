@@ -1,0 +1,8 @@
+version: v1
+canary:
+  require_real_data_evidence: true
+  min_residents_covered: 1
+  min_resident_days_total: 7
+  allowed_data_sources:
+    - production_shadow
+    - production_canary

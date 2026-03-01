@@ -1,0 +1,32 @@
+version: 1
+
+go_no_go:
+  overall_eligible_pass_count_min: 24
+  livingroom_eligible_pass_count_min: 3
+  bedroom_max_regression_splits: 1
+  day7_livingroom_recall_min: 0.45
+  day7_livingroom_episode_recall_min: 0.45
+  day8_bedroom_sleep_recall_min: 0.40
+  day8_bedroom_sleep_recall_min_support: 100
+  day8_livingroom_fragmentation_min: 0.45
+  livingroom_episode_recall_min: 0.40
+  livingroom_episode_f1_min: 0.35
+  informational_checks:
+    - livingroom_eligible_pass_count_min
+    - day7_livingroom_episode_recall_min
+    - livingroom_episode_recall_min
+    - livingroom_episode_f1_min
+  livingroom_active_mae_baseline_minutes: 131.13459299972334
+  livingroom_active_mae_max_regression_pct: 10.0
+  bedroom_sleep_mae_baseline_minutes: 130.1962363951708
+  bedroom_sleep_mae_max_regression_pct: 10.0
+
+smoke:
+  require_data_continuity_audit: true
+  fail_on_missing_days_in_requested_window: false
+  require_label_corrections_summary: true
+  min_changed_minutes_total: 30.0
+  min_room_day_occupied_rate:
+    livingroom:
+      day: 7
+      min_rate: 0.07

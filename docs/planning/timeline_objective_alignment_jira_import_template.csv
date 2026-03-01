@@ -1,0 +1,29 @@
+Issue Type,Summary,Description,Labels,Story Points,Epic Link,Parent
+Epic,"Timeline Objective Alignment for Reliable ADL Timeline","Move from event-pass capable to timeline-reliable output by aligning training objective, decoding, and promotion gates.","timeline,ml,adl,event-first",,,
+Story,"WS-0 Baseline Freeze + Reproducibility Pointer","Freeze v31 baseline artifacts and add baseline pointers (version/hash) in signoff payload.","timeline,ml,evaluation",3,TIMELINE_EPIC,
+Sub-task,"Add baseline fields to aggregate signoff payload","Update aggregate_event_first_backtest.py to emit baseline_version and baseline_artifact_hash.","timeline,ml,evaluation",,TIMELINE_EPIC,"WS-0 Baseline Freeze + Reproducibility Pointer"
+Sub-task,"Add aggregate tests for baseline pointers","Extend test_event_first_backtest_aggregate.py with assertions for baseline pointer fields.","timeline,ml,test",,TIMELINE_EPIC,"WS-0 Baseline Freeze + Reproducibility Pointer"
+Story,"WS-1 Timeline Target Builder","Build deterministic boundary and episode-attribute targets from existing labels.","timeline,ml,targets",5,TIMELINE_EPIC,
+Sub-task,"Create timeline_targets.py","Implement build_boundary_targets and build_episode_attribute_targets.","timeline,ml,targets",,TIMELINE_EPIC,"WS-1 Timeline Target Builder"
+Sub-task,"Add timeline target tests","Create test_timeline_targets.py with synthetic boundary and duration/count checks.","timeline,ml,test",,TIMELINE_EPIC,"WS-1 Timeline Target Builder"
+Sub-task,"Emit timeline target debug in backtest","Update run_event_first_backtest.py to include timeline target diagnostics.","timeline,ml,backtest",,TIMELINE_EPIC,"WS-1 Timeline Target Builder"
+Story,"WS-2 Multi-Task Objective in CNN+Transformer","Add boundary/duration/count supervision heads and weighted multi-task loss under feature flag.","timeline,ml,training,transformer",8,TIMELINE_EPIC,
+Sub-task,"Create transformer_timeline_heads.py","Implement boundary and daily regression heads for timeline supervision.","timeline,ml,training",,TIMELINE_EPIC,"WS-2 Multi-Task Objective in CNN+Transformer"
+Sub-task,"Wire multi-task loss in training.py","Add weighted objective and feature flag ENABLE_TIMELINE_MULTITASK.","timeline,ml,training",,TIMELINE_EPIC,"WS-2 Multi-Task Objective in CNN+Transformer"
+Sub-task,"Add model head tests","Create test_transformer_timeline_heads.py and update test_training.py.","timeline,ml,test",,TIMELINE_EPIC,"WS-2 Multi-Task Objective in CNN+Transformer"
+Story,"WS-3 Timeline Decoder v2","Implement room-aware boundary-guided segment decoder with continuity constraints.","timeline,ml,decoder",8,TIMELINE_EPIC,
+Sub-task,"Create timeline_decoder_v2.py","Add TimelineDecodePolicy and decode_timeline_v2 implementation.","timeline,ml,decoder",,TIMELINE_EPIC,"WS-3 Timeline Decoder v2"
+Sub-task,"Integrate decoder v2 into backtest path","Update run_event_first_backtest.py and event_decoder.py feature-gated flow.","timeline,ml,decoder,backtest",,TIMELINE_EPIC,"WS-3 Timeline Decoder v2"
+Sub-task,"Add decoder v2 tests","Create test_timeline_decoder_v2.py for merge/split and determinism.","timeline,ml,test",,TIMELINE_EPIC,"WS-3 Timeline Decoder v2"
+Story,"WS-4 Timeline Metrics + Promotion Gates","Promote timeline-native metrics and gate checks to signoff decision payload.","timeline,ml,gates,metrics",5,TIMELINE_EPIC,
+Sub-task,"Add timeline metrics in event_metrics.py","Implement start/end MAE, duration MAE, episode count error, fragmentation rate.","timeline,ml,metrics",,TIMELINE_EPIC,"WS-4 Timeline Metrics + Promotion Gates"
+Sub-task,"Add timeline gate checks","Update event_gates.py and aggregate_event_first_backtest.py with internal/external timeline rules.","timeline,ml,gates",,TIMELINE_EPIC,"WS-4 Timeline Metrics + Promotion Gates"
+Sub-task,"Add metrics/gates tests","Update test_event_metrics.py, test_event_gates.py, test_event_first_backtest_aggregate.py.","timeline,ml,test",,TIMELINE_EPIC,"WS-4 Timeline Metrics + Promotion Gates"
+Story,"WS-5 Pipeline + Unified Training Shadow Integration","Wire timeline multitask + decoder v2 in shadow mode with artifact persistence.","timeline,ml,pipeline,shadow",5,TIMELINE_EPIC,
+Sub-task,"Add timeline shadow flags","Update pipeline.py and unified_training.py for event_first_shadow/timeline_decoder_v2/timeline_multitask.","timeline,ml,pipeline",,TIMELINE_EPIC,"WS-5 Pipeline + Unified Training Shadow Integration"
+Sub-task,"Persist timeline artifacts","Write timeline_windows.parquet, timeline_episodes.parquet, timeline_qc.json.","timeline,ml,pipeline,artifacts",,TIMELINE_EPIC,"WS-5 Pipeline + Unified Training Shadow Integration"
+Sub-task,"Add integration tests for shadow mode","Update test_unified_training_path.py and test_pipeline_integration.py.","timeline,ml,test",,TIMELINE_EPIC,"WS-5 Pipeline + Unified Training Shadow Integration"
+Story,"WS-6 Rolling Backtest + Signoff Pack","Run fixed 3-seed rolling protocol and produce signoff + residual evidence pack.","timeline,ml,backtest,signoff",5,TIMELINE_EPIC,
+Sub-task,"Run 3-seed rolling backtest","Generate seed artifacts using fixed config hash.","timeline,ml,backtest",,TIMELINE_EPIC,"WS-6 Rolling Backtest + Signoff Pack"
+Sub-task,"Generate aggregate signoff + residual pack","Run aggregate_event_first_backtest.py and generate_residual_review_pack.py.","timeline,ml,signoff,artifacts",,TIMELINE_EPIC,"WS-6 Rolling Backtest + Signoff Pack"
+Sub-task,"Publish baseline-vs-candidate delta report","Create concise summary for go/no-go review.","timeline,ml,review",,TIMELINE_EPIC,"WS-6 Rolling Backtest + Signoff Pack"

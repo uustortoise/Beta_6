@@ -1,0 +1,1252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LOCAL_LLM_1000_POC_ANALYSIS</title>
+    <style>
+        :root {
+            --primary-color: #1a365d;
+            --secondary-color: #2c5282;
+            --accent-color: #3182ce;
+            --bg-color: #ffffff;
+            --text-color: #333;
+            --border-color: #e2e8f0;
+            --code-bg: #f7fafc;
+        }
+        
+        * {
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            font-size: 11pt;
+            line-height: 1.7;
+            color: var(--text-color);
+            max-width: 210mm;
+            margin: 0 auto;
+            padding: 20mm;
+            background: var(--bg-color);
+        }
+        
+        h1 {
+            font-size: 26pt;
+            color: var(--primary-color);
+            border-bottom: 4px solid var(--secondary-color);
+            padding-bottom: 15px;
+            margin-top: 0;
+            margin-bottom: 30px;
+        }
+        
+        h2 {
+            font-size: 16pt;
+            color: var(--secondary-color);
+            border-bottom: 2px solid var(--border-color);
+            padding-bottom: 10px;
+            margin-top: 40px;
+            margin-bottom: 20px;
+        }
+        
+        h3 {
+            font-size: 13pt;
+            color: #2d3748;
+            margin-top: 30px;
+            margin-bottom: 15px;
+        }
+        
+        h4 {
+            font-size: 11pt;
+            color: #4a5568;
+            margin-top: 25px;
+            margin-bottom: 10px;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 25px 0;
+            font-size: 10pt;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        
+        th {
+            background: linear-gradient(135deg, var(--secondary-color) 0%, var(--accent-color) 100%);
+            color: white;
+            padding: 12px 10px;
+            text-align: left;
+            font-weight: 600;
+        }
+        
+        td {
+            padding: 10px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        tr:nth-child(even) {
+            background-color: #f7fafc;
+        }
+        
+        tr:hover {
+            background-color: #edf2f7;
+        }
+        
+        code {
+            background-color: var(--code-bg);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-family: 'Monaco', 'Consolas', 'Courier New', monospace;
+            font-size: 9pt;
+            color: #2d3748;
+        }
+        
+        pre {
+            background-color: #2d3748;
+            color: #e2e8f0;
+            padding: 20px;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-size: 9pt;
+            line-height: 1.5;
+            margin: 20px 0;
+        }
+        
+        pre code {
+            background-color: transparent;
+            padding: 0;
+            color: inherit;
+        }
+        
+        blockquote {
+            border-left: 4px solid var(--accent-color);
+            margin: 25px 0;
+            padding: 15px 25px;
+            background: linear-gradient(90deg, #ebf8ff 0%, #f7fafc 100%);
+            border-radius: 0 8px 8px 0;
+        }
+        
+        ul, ol {
+            margin: 20px 0;
+            padding-left: 30px;
+        }
+        
+        li {
+            margin: 8px 0;
+        }
+        
+        hr {
+            border: none;
+            height: 2px;
+            background: linear-gradient(90deg, var(--border-color) 0%, var(--secondary-color) 50%, var(--border-color) 100%);
+            margin: 40px 0;
+        }
+        
+        strong {
+            color: var(--primary-color);
+            font-weight: 600;
+        }
+        
+        em {
+            color: #4a5568;
+        }
+        
+        a {
+            color: var(--accent-color);
+            text-decoration: none;
+        }
+        
+        a:hover {
+            text-decoration: underline;
+        }
+        
+        /* Print styles */
+        @media print {
+            body {
+                padding: 0;
+                max-width: 100%;
+            }
+            
+            h1, h2, h3 {
+                page-break-after: avoid;
+            }
+            
+            table, pre, blockquote {
+                page-break-inside: avoid;
+            }
+            
+            tr {
+                page-break-inside: avoid;
+            }
+        }
+        
+        /* Screen styles */
+        @media screen {
+            body {
+                box-shadow: 0 0 20px rgba(0,0,0,0.1);
+                margin: 20px auto;
+            }
+        }
+        
+        /* Status indicators */
+        .status-yes, .status-good, .status-check {
+            color: #38a169;
+            font-weight: bold;
+        }
+        
+        .status-no, .status-bad, .status-error {
+            color: #e53e3e;
+            font-weight: bold;
+        }
+        
+        .status-warning, .status-maybe {
+            color: #d69e2e;
+            font-weight: bold;
+        }
+    </style>
+    <!-- Mermaid JS for diagrams -->
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+        
+        // Initialize with manual start
+        mermaid.initialize({ startOnLoad: false });
+
+        document.addEventListener('DOMContentLoaded', async function() {
+            const mermaidBlocks = document.querySelectorAll('code.language-mermaid');
+            
+            // Transform markdown code blocks to mermaid divs
+            mermaidBlocks.forEach(block => {
+                const pre = block.parentElement;
+                const div = document.createElement('div');
+                div.className = 'mermaid';
+                div.textContent = block.textContent;
+                pre.replaceWith(div);
+            });
+            
+            // Explicitly run mermaid on the new divs
+            await mermaid.run({
+                nodes: document.querySelectorAll('.mermaid')
+            });
+        });
+    </script>
+</head>
+<body>
+<h1 id="local-llm-integration-analysis-for-1000-elder-poc">Local LLM Integration Analysis for 1000 Elder POC</h1>
+<blockquote>
+<p><strong>Document Version:</strong> 1.0<br />
+<strong>Date:</strong> February 9, 2026<br />
+<strong>Target Platform:</strong> Mac Studio M3 Ultra<br />
+<strong>Scope:</strong> Health Advisory Chatbot Local LLM Deployment</p>
+</blockquote>
+<hr />
+<h2 id="executive-summary">Executive Summary</h2>
+<p>This document analyzes options for integrating a <strong>local Large Language Model (LLM)</strong> into the Health Advisory Chatbot to replace or supplement the current <strong>DeepSeek API</strong> dependency, within the context of the new <strong>Safety-Critical RAG Architecture</strong>.</p>
+<p>The analysis covers:</p>
+<ol>
+<li>Current local infrastructure (Safety Gateway, Policy Engine, Hybrid Retrieval)</li>
+<li>Local LLM deployment options for the <strong>Response Composer</strong> role</li>
+<li>Mac Studio M3 Ultra resource requirements (including new re-ranker overhead)</li>
+<li>Cost-benefit analysis for 1000 elder POC</li>
+<li>Recommended implementation roadmap</li>
+</ol>
+<hr />
+<h2 id="1-safety-critical-rag-architecture-current-state">1. Safety-Critical RAG Architecture (Current State)</h2>
+<h3 id="11-local-components-safety-first">1.1 Local Components (Safety First)</h3>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Technology</th>
+<th>Status</th>
+<th>Resource Usage</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Safety Gateway</strong></td>
+<td>Regex/Classifier</td>
+<td>✅ <strong>Local</strong></td>
+<td>&lt;10MB RAM</td>
+</tr>
+<tr>
+<td><strong>Policy Engine</strong></td>
+<td>Python Rules Engine</td>
+<td>✅ <strong>Local</strong></td>
+<td>&lt;50MB RAM</td>
+</tr>
+<tr>
+<td><strong>Embedding Model</strong></td>
+<td><code>all-MiniLM-L6-v2</code></td>
+<td>✅ <strong>Local</strong></td>
+<td>~100MB RAM</td>
+</tr>
+<tr>
+<td><strong>Vector Store</strong></td>
+<td>ChromaDB (Filtered)</td>
+<td>✅ <strong>Local</strong></td>
+<td>~100MB RAM</td>
+</tr>
+<tr>
+<td><strong>Hybrid Retrieval</strong></td>
+<td>BM25 + Vector</td>
+<td>✅ <strong>Local</strong></td>
+<td>~50MB RAM</td>
+</tr>
+<tr>
+<td><strong>Response Composer</strong></td>
+<td>DeepSeek API</td>
+<td>⚠️ <strong>External</strong></td>
+<td>Requires internet</td>
+</tr>
+</tbody>
+</table>
+<h3 id="12-current-flow-strict-safety">1.2 Current Flow (Strict Safety)</h3>
+<pre><code class="language-mermaid">flowchart TD
+    User[&quot;User Query&quot;] --&gt; Safety[&quot;Safety Gateway (Local)&quot;]
+    Safety --&gt;|Emergency| Emergency[&quot;Crisis Response (Hardcoded)&quot;]
+    Safety --&gt;|Routine| Policy[&quot;Clinical Policy Engine (Local)&quot;]
+
+    subgraph &quot;Deterministic Layer&quot;
+    Policy --&gt; Action[&quot;Action Plan (Rules)&quot;]
+    end
+
+    subgraph &quot;Retrieval Layer&quot;
+    Action --&gt; Hybrid[&quot;Hybrid Retrieval (BM25 + Vector)&quot;]
+    Hybrid --&gt; Evidence[&quot;Verified Evidence Pack&quot;]
+    end
+
+    subgraph &quot;Generative Layer&quot;
+    Action --&gt; LLM[&quot;DeepSeek API (Currently External)&quot;]
+    Evidence --&gt; LLM
+    LLM --&gt; Validator[&quot;Claim/Citation Validator&quot;]
+    Validator --&gt; Response[&quot;Final Safe Response&quot;]
+    end
+</code></pre>
+<h3 id="13-current-costs-1000-elders">1.3 Current Costs (1000 Elders)</h3>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Avg Queries/Elder/Day</td>
+<td>5</td>
+</tr>
+<tr>
+<td>Avg Tokens/Query</td>
+<td>1,300 (500 input + 800 output)</td>
+</tr>
+<tr>
+<td>Daily Tokens</td>
+<td>6.5M</td>
+</tr>
+<tr>
+<td>Monthly Tokens</td>
+<td>195M</td>
+</tr>
+<tr>
+<td><strong>Estimated Cost</strong></td>
+<td><strong>$100-400/month</strong></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="2-embedding-infrastructure-already-implemented">2. Embedding Infrastructure (Already Implemented)</h2>
+<h3 id="21-what-is-all-minilm-l6-v2">2.1 What is <code>all-MiniLM-L6-v2</code>?</h3>
+<pre><code class="language-python"># File: backend/chatbot/rag/embeddings.py
+from sentence_transformers import SentenceTransformer
+
+class MedicalEmbeddings:
+    &quot;&quot;&quot;
+    Uses 'all-MiniLM-L6-v2' by default:
+    - 384 dimensions
+    - Fast inference
+    - Good general semantic performance
+    &quot;&quot;&quot;
+    def __init__(self, model_name: str = &quot;all-MiniLM-L6-v2&quot;):
+        self.model_name = model_name
+</code></pre>
+<h3 id="22-model-specifications">2.2 Model Specifications</h3>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Model Name</strong></td>
+<td>all-MiniLM-L6-v2</td>
+</tr>
+<tr>
+<td><strong>Architecture</strong></td>
+<td>MiniLM (distilled BERT)</td>
+</tr>
+<tr>
+<td><strong>Parameters</strong></td>
+<td>22M</td>
+</tr>
+<tr>
+<td><strong>Embedding Dimensions</strong></td>
+<td>384</td>
+</tr>
+<tr>
+<td><strong>Model Size</strong></td>
+<td>~90MB</td>
+</tr>
+<tr>
+<td><strong>Inference Speed</strong></td>
+<td>~10,000 sentences/sec (CPU)</td>
+</tr>
+<tr>
+<td><strong>Training Data</strong></td>
+<td>1B+ sentence pairs</td>
+</tr>
+<tr>
+<td><strong>Best For</strong></td>
+<td>Semantic similarity, semantic search</td>
+</tr>
+</tbody>
+</table>
+<h3 id="23-why-this-model">2.3 Why This Model?</h3>
+<table>
+<thead>
+<tr>
+<th>Advantage</th>
+<th>Explanation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Small</strong></td>
+<td>22M parameters vs 175B+ for GPT-3</td>
+</tr>
+<tr>
+<td><strong>Fast</strong></td>
+<td>Runs on CPU, no GPU needed</td>
+</tr>
+<tr>
+<td><strong>Good Enough</strong></td>
+<td>384 dimensions capture semantic meaning well</td>
+</tr>
+<tr>
+<td><strong>Proven</strong></td>
+<td>Industry standard for RAG applications</td>
+</tr>
+<tr>
+<td><strong>Free</strong></td>
+<td>Open source (Apache 2.0)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="24-current-usage-in-system">2.4 Current Usage in System</h3>
+<pre><code class="language-python"># 1. Embedding user queries for vector search
+query_embedding = embed_text(&quot;Why do I fall at night?&quot;)
+# Returns: 384-dimensional vector
+
+# 2. ChromaDB uses same model for document embeddings
+collection = chromadb.get_or_create_collection(
+    embedding_function=SentenceTransformerEmbeddingFunction(
+        model_name=&quot;all-MiniLM-L6-v2&quot;
+    )
+)
+</code></pre>
+<h3 id="25-limitation">2.5 Limitation</h3>
+<p><strong><code>all-MiniLM-L6-v2</code> is ONLY for embeddings, NOT for text generation.</strong></p>
+<table>
+<thead>
+<tr>
+<th>Task</th>
+<th>Can Do?</th>
+<th>Example</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Convert text → vector</td>
+<td>✅ Yes</td>
+<td>"fall" → [0.23, -0.15, ...] (384 dims)</td>
+</tr>
+<tr>
+<td>Find similar texts</td>
+<td>✅ Yes</td>
+<td>"fell" matches "fall" (cosine similarity)</td>
+</tr>
+<tr>
+<td>Generate responses</td>
+<td>❌ No</td>
+<td>Cannot write "You should..."</td>
+</tr>
+<tr>
+<td>Answer questions</td>
+<td>❌ No</td>
+<td>Cannot reason or produce advice</td>
+</tr>
+</tbody>
+</table>
+<p><strong>That's why we need a separate LLM for response generation.</strong></p>
+<hr />
+<h2 id="3-local-llm-options-to-be">3. Local LLM Options (To-Be)</h2>
+<h3 id="31-option-a-full-local-replacement-replace-deepseek">3.1 Option A: Full Local Replacement (Replace DeepSeek)</h3>
+<p>Replace the DeepSeek API call entirely with a local LLM.</p>
+<pre><code>User Query
+    │
+    ▼
+┌─────────────────────────────────────┐
+│  Local LLM (7B-14B parameters)      │ ◄── NEW: Local, 2-5s
+│  - Receives full prompt             │
+│  - Generates response               │
+│  - No internet required             │
+└─────────────────────────────────────┘
+</code></pre>
+<p><strong>Recommended Models:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Size</th>
+<th>Memory</th>
+<th>Speed (M3 Ultra)</th>
+<th>Quality</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Llama 3.2 Instruct</strong></td>
+<td>8B</td>
+<td>~6GB</td>
+<td>25-40 tok/s</td>
+<td>⭐⭐⭐⭐</td>
+</tr>
+<tr>
+<td><strong>Mistral 7B Instruct</strong></td>
+<td>7B</td>
+<td>~5GB</td>
+<td>30-50 tok/s</td>
+<td>⭐⭐⭐⭐</td>
+</tr>
+<tr>
+<td><strong>Phi-4</strong></td>
+<td>14B</td>
+<td>~10GB</td>
+<td>15-25 tok/s</td>
+<td>⭐⭐⭐⭐⭐</td>
+</tr>
+<tr>
+<td><strong>Qwen2.5 14B</strong></td>
+<td>14B</td>
+<td>~10GB</td>
+<td>15-25 tok/s</td>
+<td>⭐⭐⭐⭐⭐</td>
+</tr>
+<tr>
+<td><strong>Llama 3.3 70B (Q4)</strong></td>
+<td>40GB</td>
+<td>~40GB</td>
+<td>5-10 tok/s</td>
+<td>⭐⭐⭐⭐⭐</td>
+</tr>
+</tbody>
+</table>
+<h3 id="32-option-b-hybrid-architecture-recommended">3.2 Option B: Hybrid Architecture (Recommended)</h3>
+<p>Use local LLM only for specific tasks, keep rules for simple cases.</p>
+<pre><code>User Query
+    │
+    ├──► Rule-Based Topics (Fast Path) ──► 80% queries
+    │    - Keywords match → Use topic
+    │    - &lt;1ms latency
+    │
+    └──► Local LLM (Fallback) ───────────► 20% queries
+         - No keyword match
+         - Complex natural language
+         - &quot;How do I stop myself from going down?&quot;
+</code></pre>
+<p><strong>Two-Stage Setup:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Stage</th>
+<th>Model</th>
+<th>Purpose</th>
+<th>Memory</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Stage 1</strong></td>
+<td>Phi-3 Mini (3.8B)</td>
+<td>Topic Extraction</td>
+<td>~3GB</td>
+</tr>
+<tr>
+<td><strong>Stage 2</strong></td>
+<td>Llama 3.2 (8B)</td>
+<td>Response Generation</td>
+<td>~6GB</td>
+</tr>
+<tr>
+<td><strong>Total</strong></td>
+<td></td>
+<td></td>
+<td>~9GB</td>
+</tr>
+</tbody>
+</table>
+<h3 id="33-option-c-multi-model-load-balancing">3.3 Option C: Multi-Model Load Balancing</h3>
+<p>Run multiple model instances for high concurrency.</p>
+<pre><code>┌─────────────────────────────────────────┐
+│           Load Balancer                 │
+│    (Round-robin / Least-latency)        │
+└─────────────────────────────────────────┘
+         │              │              │
+    ┌────┴────┐   ┌────┴────┐   ┌────┴────┐
+    │ Model 1 │   │ Model 2 │   │ Model 3 │
+    │ 7B LLM  │   │ 7B LLM  │   │ 7B LLM  │
+    │ Instance│   │ Instance│   │ Instance│
+    └────┬────┘   └────┬────┘   └────┬────┘
+         └──────────────┼──────────────┘
+                        ▼
+                 Response Queue
+</code></pre>
+<hr />
+<h2 id="4-mac-studio-m3-ultra-capacity-analysis">4. Mac Studio M3 Ultra Capacity Analysis</h2>
+<h3 id="41-hardware-specifications">4.1 Hardware Specifications</h3>
+<table>
+<thead>
+<tr>
+<th>Spec</th>
+<th>M3 Ultra (Base)</th>
+<th>M3 Ultra (Max)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>CPU</strong></td>
+<td>28-core</td>
+<td>32-core</td>
+</tr>
+<tr>
+<td><strong>GPU</strong></td>
+<td>60-core</td>
+<td>80-core</td>
+</tr>
+<tr>
+<td><strong>Neural Engine</strong></td>
+<td>32-core</td>
+<td>32-core</td>
+</tr>
+<tr>
+<td><strong>Memory</strong></td>
+<td>96GB</td>
+<td>256GB</td>
+</tr>
+<tr>
+<td><strong>Memory Bandwidth</strong></td>
+<td>800GB/s</td>
+<td>800GB/s</td>
+</tr>
+<tr>
+<td><strong>Transistors</strong></td>
+<td>184 billion</td>
+<td>184 billion</td>
+</tr>
+</tbody>
+</table>
+<h3 id="42-llm-performance-on-m3-ultra">4.2 LLM Performance on M3 Ultra</h3>
+<table>
+<thead>
+<tr>
+<th>Model Size</th>
+<th>Memory</th>
+<th>Tokens/Second</th>
+<th>Latency (500 tokens)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>3B (Phi-3 Mini)</td>
+<td>~3GB</td>
+<td>60-100 tok/s</td>
+<td>0.5-1s</td>
+</tr>
+<tr>
+<td>7B (Llama 3.2)</td>
+<td>~6GB</td>
+<td>30-50 tok/s</td>
+<td>1-2s</td>
+</tr>
+<tr>
+<td>8B (Llama 3.2)</td>
+<td>~6GB</td>
+<td>25-40 tok/s</td>
+<td>1.5-2.5s</td>
+</tr>
+<tr>
+<td>14B (Phi-4)</td>
+<td>~10GB</td>
+<td>15-25 tok/s</td>
+<td>2-3s</td>
+</tr>
+<tr>
+<td>70B (Llama 3.3 Q4)</td>
+<td>~40GB</td>
+<td>5-10 tok/s</td>
+<td>5-10s</td>
+</tr>
+</tbody>
+</table>
+<p><em>Performance with MLX framework (Apple-optimized)</em></p>
+<h3 id="43-resource-calculation-for-1000-elders">4.3 Resource Calculation for 1000 Elders</h3>
+<h4 id="assumptions">Assumptions</h4>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Value</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Total Elders</td>
+<td>1,000</td>
+</tr>
+<tr>
+<td>Concurrent Users (peak)</td>
+<td>50 (5%)</td>
+</tr>
+<tr>
+<td>Queries/Elder/Day</td>
+<td>5</td>
+</tr>
+<tr>
+<td>Avg Tokens/Query</td>
+<td>1,300 (500 input + 800 output)</td>
+</tr>
+<tr>
+<td>Peak Hours</td>
+<td>4 hours/day</td>
+</tr>
+</tbody>
+</table>
+<h4 id="scenario-a-conservative-m3-ultra-96gb">Scenario A: Conservative (M3 Ultra 96GB)</h4>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Memory Allocation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>macOS + System</td>
+<td>8GB</td>
+</tr>
+<tr>
+<td>PostgreSQL</td>
+<td>4GB</td>
+</tr>
+<tr>
+<td>ML Pipeline (Transformers)</td>
+<td>8GB</td>
+</tr>
+<tr>
+<td><strong>Local LLM 8B</strong></td>
+<td><strong>10GB</strong></td>
+</tr>
+<tr>
+<td><strong>Re-ranking Model</strong></td>
+<td><strong>1GB</strong></td>
+</tr>
+<tr>
+<td>Vector Store (ChromaDB)</td>
+<td>2GB</td>
+</tr>
+<tr>
+<td>Embedding Model</td>
+<td>1GB</td>
+</tr>
+<tr>
+<td>Buffer/Cache</td>
+<td>62GB</td>
+</tr>
+<tr>
+<td><strong>Total</strong></td>
+<td><strong>96GB</strong></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Capacity:</strong>
+- <strong>Concurrent Users:</strong> 30-50
+- <strong>Throughput:</strong> ~20-30 queries/minute
+- <strong>Latency:</strong> 2-4 seconds per response</p>
+<h4 id="scenario-b-aggressive-m3-ultra-256gb">Scenario B: Aggressive (M3 Ultra 256GB)</h4>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Memory Allocation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>macOS + System</td>
+<td>8GB</td>
+</tr>
+<tr>
+<td>PostgreSQL</td>
+<td>8GB</td>
+</tr>
+<tr>
+<td>ML Pipeline</td>
+<td>16GB</td>
+</tr>
+<tr>
+<td><strong>3× Local LLM 8B</strong></td>
+<td><strong>20GB</strong></td>
+</tr>
+<tr>
+<td>OR <strong>1× Local LLM 70B</strong></td>
+<td><strong>50GB</strong></td>
+</tr>
+<tr>
+<td>Vector Store</td>
+<td>4GB</td>
+</tr>
+<tr>
+<td>Embedding Model</td>
+<td>1GB</td>
+</tr>
+<tr>
+<td>Buffer/Cache</td>
+<td>157GB</td>
+</tr>
+<tr>
+<td><strong>Total</strong></td>
+<td><strong>256GB</strong></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Capacity:</strong>
+- <strong>Concurrent Users:</strong> 100-150
+- <strong>Throughput:</strong> ~60-90 queries/minute
+- <strong>Latency:</strong> 2-4 seconds per response</p>
+<hr />
+<h2 id="5-cost-benefit-analysis">5. Cost-Benefit Analysis</h2>
+<h3 id="51-3-year-total-cost-of-ownership-tco">5.1 3-Year Total Cost of Ownership (TCO)</h3>
+<table>
+<thead>
+<tr>
+<th>Approach</th>
+<th>Year 1</th>
+<th>Year 2</th>
+<th>Year 3</th>
+<th>3-Year Total</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>DeepSeek API</strong></td>
+<td>$1,200</td>
+<td>$1,200</td>
+<td>$1,200</td>
+<td><strong>$3,600</strong></td>
+</tr>
+<tr>
+<td><strong>M3 Ultra 96GB</strong></td>
+<td>$4,000*</td>
+<td>$0</td>
+<td>$0</td>
+<td><strong>$4,000</strong></td>
+</tr>
+<tr>
+<td><strong>M3 Ultra 256GB</strong></td>
+<td>$6,000*</td>
+<td>$0</td>
+<td>$0</td>
+<td><strong>$6,000</strong></td>
+</tr>
+</tbody>
+</table>
+<p>*One-time hardware cost</p>
+<h3 id="52-break-even-analysis">5.2 Break-Even Analysis</h3>
+<table>
+<thead>
+<tr>
+<th>Setup</th>
+<th>Break-Even Point</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>M3 Ultra 96GB</td>
+<td>~40 months</td>
+</tr>
+<tr>
+<td>M3 Ultra 256GB</td>
+<td>~60 months</td>
+</tr>
+</tbody>
+</table>
+<h3 id="53-non-financial-benefits">5.3 Non-Financial Benefits</h3>
+<table>
+<thead>
+<tr>
+<th>Benefit</th>
+<th>DeepSeek API</th>
+<th>Local LLM</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Data Privacy</strong></td>
+<td>⚠️ Data leaves system</td>
+<td>✅ Fully local</td>
+</tr>
+<tr>
+<td><strong>Internet Dependency</strong></td>
+<td>❌ Required</td>
+<td>✅ Offline capable</td>
+</tr>
+<tr>
+<td><strong>Latency Variance</strong></td>
+<td>⚠️ Network dependent</td>
+<td>✅ Consistent</td>
+</tr>
+<tr>
+<td><strong>HIPAA Compliance</strong></td>
+<td>⚠️ BAA required</td>
+<td>✅ Easier compliance</td>
+</tr>
+<tr>
+<td><strong>Customization</strong></td>
+<td>❌ Limited</td>
+<td>✅ Full control</td>
+</tr>
+<tr>
+<td><strong>Rate Limits</strong></td>
+<td>⚠️ Subject to quotas</td>
+<td>✅ Unlimited</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="6-implementation-roadmap">6. Implementation Roadmap</h2>
+<h3 id="61-phase-1-research-validation-week-1-2">6.1 Phase 1: Research &amp; Validation (Week 1-2)</h3>
+<p><strong>Objective:</strong> Validate local LLM quality vs DeepSeek</p>
+<table>
+<thead>
+<tr>
+<th>Task</th>
+<th>Deliverable</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Download Llama 3.2 8B</td>
+<td>Working local model</td>
+</tr>
+<tr>
+<td>Create test benchmark</td>
+<td>100 representative queries</td>
+</tr>
+<tr>
+<td>Run A/B comparison</td>
+<td>Quality scoring report</td>
+</tr>
+<tr>
+<td>Measure performance</td>
+<td>Latency/throughput metrics</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Go/No-Go Decision Point</strong></p>
+<h3 id="62-phase-2-hybrid-deployment-week-3-4">6.2 Phase 2: Hybrid Deployment (Week 3-4)</h3>
+<p><strong>Objective:</strong> Deploy local LLM as fallback</p>
+<pre><code class="language-python"># Pseudocode for hybrid approach
+def generate_response(query, context):
+    # Try rule-based first (fast)
+    topics = extract_topics_rule_based(query)
+
+    if not topics:
+        # Fallback to local LLM for topic extraction
+        topics = local_llm_extract_topics(query)
+
+    # Retrieve knowledge
+    knowledge = retrieve_evidence(topics)
+
+    # Generate response (DeepSeek or Local)
+    if use_local_llm:
+        return local_llm_generate(query, context, knowledge)
+    else:
+        return deepseek_generate(query, context, knowledge)
+</code></pre>
+<h3 id="63-phase-3-full-local-week-5-8">6.3 Phase 3: Full Local (Week 5-8)</h3>
+<p><strong>Objective:</strong> Replace DeepSeek entirely</p>
+<table>
+<thead>
+<tr>
+<th>Task</th>
+<th>Details</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Integrate MLX framework</td>
+<td>Apple-optimized inference</td>
+</tr>
+<tr>
+<td>Implement model caching</td>
+<td>Reduce load times</td>
+</tr>
+<tr>
+<td>Add request queue</td>
+<td>Handle concurrent users</td>
+</tr>
+<tr>
+<td>Monitoring</td>
+<td>GPU/Neural Engine utilization</td>
+</tr>
+<tr>
+<td>Fallback to DeepSeek</td>
+<td>If local model fails</td>
+</tr>
+</tbody>
+</table>
+<h3 id="64-phase-4-optimization-week-9-12">6.4 Phase 4: Optimization (Week 9-12)</h3>
+<p><strong>Objective:</strong> Scale to 1000 elders</p>
+<table>
+<thead>
+<tr>
+<th>Optimization</th>
+<th>Expected Gain</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Model quantization (Q4)</td>
+<td>50% memory reduction</td>
+</tr>
+<tr>
+<td>Batch inference</td>
+<td>2-3x throughput</td>
+</tr>
+<tr>
+<td>Request caching</td>
+<td>Reduce duplicate queries</td>
+</tr>
+<tr>
+<td>Multi-model instances</td>
+<td>Linear scaling</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="7-risk-assessment">7. Risk Assessment</h2>
+<h3 id="71-technical-risks">7.1 Technical Risks</h3>
+<table>
+<thead>
+<tr>
+<th>Risk</th>
+<th>Likelihood</th>
+<th>Impact</th>
+<th>Mitigation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Model quality lower than DeepSeek</td>
+<td>Medium</td>
+<td>High</td>
+<td>A/B testing, fallback mechanism</td>
+</tr>
+<tr>
+<td>Memory exhaustion</td>
+<td>Low</td>
+<td>High</td>
+<td>Monitoring, swap space, model offloading</td>
+</tr>
+<tr>
+<td>Slow inference</td>
+<td>Medium</td>
+<td>Medium</td>
+<td>Quantization, batching, caching</td>
+</tr>
+<tr>
+<td>Model compatibility issues</td>
+<td>Low</td>
+<td>Medium</td>
+<td>Test thoroughly before deployment</td>
+</tr>
+</tbody>
+</table>
+<h3 id="72-business-risks">7.2 Business Risks</h3>
+<table>
+<thead>
+<tr>
+<th>Risk</th>
+<th>Likelihood</th>
+<th>Impact</th>
+<th>Mitigation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Higher TCO than expected</td>
+<td>Low</td>
+<td>Medium</td>
+<td>Accurate usage forecasting</td>
+</tr>
+<tr>
+<td>Maintenance burden</td>
+<td>Medium</td>
+<td>Medium</td>
+<td>Documentation, automation</td>
+</tr>
+<tr>
+<td>Team skill gap</td>
+<td>Medium</td>
+<td>Medium</td>
+<td>Training, external consulting</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="8-recommendations">8. Recommendations</h2>
+<h3 id="81-for-1000-elder-poc">8.1 For 1000 Elder POC</h3>
+<table>
+<thead>
+<tr>
+<th>Recommendation</th>
+<th>Rationale</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Start with Hybrid</strong></td>
+<td>Lower risk, gradual transition</td>
+</tr>
+<tr>
+<td><strong>Use Llama 3.2 8B</strong></td>
+<td>Best balance of quality/speed</td>
+</tr>
+<tr>
+<td><strong>M3 Ultra 96GB sufficient</strong></td>
+<td>Can handle 50 concurrent users</td>
+</tr>
+<tr>
+<td><strong>Keep DeepSeek as fallback</strong></td>
+<td>Safety net for edge cases</td>
+</tr>
+</tbody>
+</table>
+<h3 id="82-long-term-strategy">8.2 Long-Term Strategy</h3>
+<table>
+<thead>
+<tr>
+<th>Phase</th>
+<th>Timeline</th>
+<th>Action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Phase 1</strong></td>
+<td>Q1 2026</td>
+<td>Hybrid deployment, validate quality</td>
+</tr>
+<tr>
+<td><strong>Phase 2</strong></td>
+<td>Q2 2026</td>
+<td>Full local if validation passes</td>
+</tr>
+<tr>
+<td><strong>Phase 3</strong></td>
+<td>Q3 2026</td>
+<td>Scale to 256GB if needed</td>
+</tr>
+<tr>
+<td><strong>Phase 4</strong></td>
+<td>Q4 2026**</td>
+<td>Optimize, fine-tune for domain</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="9-appendix">9. Appendix</h2>
+<h3 id="91-mlx-installation-apple-optimized">9.1 MLX Installation (Apple-Optimized)</h3>
+<pre><code class="language-bash"># Install MLX for Apple Silicon
+pip install mlx-lm
+
+# Download model
+from mlx_lm import load, generate
+
+model, tokenizer = load(&quot;meta-llama/Llama-3.2-8B-Instruct&quot;)
+
+# Generate response
+response = generate(
+    model, 
+    tokenizer, 
+    prompt=&quot;You are a health advisor... User: Why do I fall?&quot;,
+    max_tokens=1000
+)
+</code></pre>
+<h3 id="92-resource-monitoring">9.2 Resource Monitoring</h3>
+<pre><code class="language-bash"># Monitor Neural Engine usage
+sudo powermetrics --samplers gpu_power -n 1
+
+# Monitor memory pressure
+vm_stat
+
+# Monitor process memory
+ps aux | grep python
+</code></pre>
+<h3 id="93-model-sources">9.3 Model Sources</h3>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Download Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Llama 3.2</td>
+<td>HuggingFace: <code>meta-llama/Llama-3.2-8B-Instruct</code></td>
+</tr>
+<tr>
+<td>Mistral 7B</td>
+<td>HuggingFace: <code>mistralai/Mistral-7B-Instruct-v0.3</code></td>
+</tr>
+<tr>
+<td>Phi-4</td>
+<td>HuggingFace: <code>microsoft/phi-4</code></td>
+</tr>
+<tr>
+<td>Qwen2.5</td>
+<td>HuggingFace: <code>Qwen/Qwen2.5-14B-Instruct</code></td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="10-conclusion">10. Conclusion</h2>
+<p><strong>Current State:</strong>
+- ✅ Embedding model (<code>all-MiniLM-L6-v2</code>) already local
+- ✅ Knowledge base already local
+- ⚠️ Only response generation uses external API</p>
+<p><strong>Recommendation:</strong>
+Deploy <strong>Llama 3.2 8B</strong> on <strong>Mac Studio M3 Ultra 96GB</strong> in <strong>hybrid mode</strong>:
+- Use rules for 80% of queries (fast, deterministic)
+- Use local LLM for 20% edge cases (flexible, intelligent)
+- Keep DeepSeek as emergency fallback</p>
+<p><strong>Expected Outcome:</strong>
+- 90% cost reduction after break-even
+- Full data privacy
+- Sub-3s response times
+- Capacity for 50+ concurrent users</p>
+<hr />
+<p><em>Document prepared for technical team review and stakeholder decision-making.</em></p>
+</body>
+</html>

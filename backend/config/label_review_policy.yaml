@@ -1,0 +1,28 @@
+version: v1
+
+review_policy:
+  queue_bands:
+    green:
+      requires_dual_review: false
+      sla_hours: 72
+    amber:
+      requires_dual_review: true
+      sla_hours: 48
+    red:
+      requires_dual_review: true
+      requires_clinical_escalation: true
+      sla_hours: 24
+
+  adjudication:
+    max_rounds: 2
+    conflict_resolution_owner: "clinical_reviewer_oncall"
+    require_reason_code: true
+
+  audit:
+    retain_days: 365
+    required_fields:
+      - candidate_id
+      - reviewer_id
+      - decision
+      - reason_code
+      - reviewed_at

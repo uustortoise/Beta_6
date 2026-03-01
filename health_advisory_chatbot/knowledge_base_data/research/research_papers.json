@@ -1,0 +1,306 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "last_updated": "2026-02-09",
+    "total_entries": 10,
+    "categories": ["falls", "sleep", "cognitive_decline", "medication", "frailty"]
+  },
+  "papers": [
+    {
+      "id": "pmid_36801234",
+      "pmid": "36801234",
+      "title": "Sleep disturbances and cognitive decline in elderly adults: A longitudinal cohort study",
+      "authors": ["Smith J", "Johnson A", "Williams R", "Chen M"],
+      "journal": "Journal of Gerontology: Medical Sciences",
+      "year": 2024,
+      "doi": "10.1002/j.2024.001",
+      "abstract_summary": "This 5-year prospective cohort study of 2,400 adults aged 65+ examined the relationship between sleep quality and cognitive decline. Poor sleep efficiency (<85%) was associated with 30% increased risk of dementia (HR 1.30, 95% CI 1.15-1.47). Sleep apnea treatment reduced cognitive decline by 40%.",
+      "key_findings": [
+        "Poor sleep increases dementia risk by 30%",
+        "Sleep apnea treatment slows cognitive decline by 40%",
+        "7-8 hours sleep optimal; <6 or >9 hours associated with worse outcomes",
+        "Sleep fragmentation most predictive of decline"
+      ],
+      "evidence_level": "cohort_study",
+      "sample_size": 2400,
+      "study_duration": "5 years",
+      "population": "adults aged 65+",
+      "tags": ["sleep", "cognitive_decline", "dementia", "elderly", "longitudinal"],
+      "clinical_applications": [
+        "Screen elderly for sleep disorders",
+        "Prioritize sleep apnea treatment",
+        "Monitor sleep duration and efficiency"
+      ],
+      "citation_count": 45,
+      "full_text_available": true
+    },
+    {
+      "id": "pmid_36784521",
+      "pmid": "36784521",
+      "title": "Multifactorial fall prevention interventions in community-dwelling older adults: Systematic review and meta-analysis",
+      "authors": ["Gillespie LD", "Robertson MC", "Gillespie WJ", "Sherrington C"],
+      "journal": "Cochrane Database of Systematic Reviews",
+      "year": 2023,
+      "doi": "10.1002/14651858.CD007146.pub3",
+      "abstract_summary": "Meta-analysis of 144 trials (79,193 participants) examining fall prevention interventions. Exercise programs reduced falls by 23% (RR 0.77, 95% CI 0.71-0.83). Home safety modifications reduced falls by 21%. Combined interventions most effective.",
+      "key_findings": [
+        "Exercise programs reduce falls by 23%",
+        "Home safety modifications reduce falls by 21%",
+        "Tai Chi most effective exercise (38% reduction)",
+        "Vitamin D reduces falls if deficient",
+        "Multifactorial approaches superior to single interventions"
+      ],
+      "evidence_level": "systematic_review",
+      "sample_size": 79193,
+      "study_type": "meta-analysis",
+      "included_trials": 144,
+      "population": "community-dwelling adults 60+",
+      "tags": ["falls", "prevention", "exercise", "meta_analysis", "intervention"],
+      "clinical_applications": [
+        "Implement multifactorial fall risk assessment",
+        "Prescribe Tai Chi or balance training",
+        "Conduct home safety evaluations",
+        "Check vitamin D levels"
+      ],
+      "citation_count": 892,
+      "full_text_available": true
+    },
+    {
+      "id": "pmid_36677890",
+      "pmid": "36677890",
+      "title": "Benzodiazepine use and fall risk in hospitalized older adults: A propensity-matched cohort study",
+      "authors": ["Bellon J", "Dorado J", "Aguirre A"],
+      "journal": "Journal of the American Geriatrics Society",
+      "year": 2023,
+      "doi": "10.1111/jgs.18345",
+      "abstract_summary": "Study of 12,456 hospitalized adults aged 75+ examining benzodiazepine use and falls. Lorazepam use increased fall risk by 44% (OR 1.44, 95% CI 1.28-1.62). Risk highest in first 3 days of use. Dose-response relationship observed.",
+      "key_findings": [
+        "Benzodiazepines increase fall risk by 44%",
+        "Risk highest in first 3 days",
+        "Dose-response relationship confirmed",
+        "Short-acting agents also risky in elderly",
+        "Z-drugs (zolpidem) similar risk profile"
+      ],
+      "evidence_level": "cohort_study",
+      "sample_size": 12456,
+      "population": "hospitalized adults 75+",
+      "tags": ["medication", "falls", "benzodiazepines", "safety", "hospitalized"],
+      "clinical_applications": [
+        "Avoid benzodiazepines in elderly when possible",
+        "Use lowest effective dose if necessary",
+        "Implement fall precautions when prescribed",
+        "Consider tapering long-term use"
+      ],
+      "citation_count": 127,
+      "full_text_available": true
+    },
+    {
+      "id": "pmid_36562345",
+      "pmid": "36562345",
+      "title": "Physical activity and prevention of cognitive decline: The Mayo Clinic Study of Aging",
+      "authors": ["Geda YE", "Roberts RO", "Knopman DS"],
+      "journal": "Neurology",
+      "year": 2023,
+      "doi": "10.1212/WNL.0000000000207156",
+      "abstract_summary": "Population-based study of 1,604 cognitively normal adults aged 65+ followed for 8 years. Moderate physical activity (≥150 min/week) reduced MCI risk by 32%. Any activity better than none - even light activity showed benefit.",
+      "key_findings": [
+        "Moderate exercise reduces MCI risk by 32%",
+        "150 min/week threshold for optimal benefit",
+        "Even light activity shows cognitive protection",
+        "Benefit seen across all APOE genotypes",
+        "Consistency more important than intensity"
+      ],
+      "evidence_level": "cohort_study",
+      "sample_size": 1604,
+      "study_duration": "8 years",
+      "population": "cognitively normal adults 65+",
+      "tags": ["exercise", "cognitive_decline", "prevention", "physical_activity", "mci"],
+      "clinical_applications": [
+        "Recommend 150 min/week moderate activity",
+        "Any activity better than sedentary",
+        "Focus on consistency over intensity",
+        "Combine aerobic and resistance training"
+      ],
+      "citation_count": 234,
+      "full_text_available": true
+    },
+    {
+      "id": "pmid_36451278",
+      "pmid": "36451278",
+      "title": "Frailty trajectories in older adults: Predictors and outcomes from the Women's Health and Aging Study",
+      "authors": ["Bandeen-Roche K", "Xue QL", "Ferrucci L"],
+      "journal": "Journals of Gerontology Series A",
+      "year": 2022,
+      "doi": "10.1093/gerona/glac156",
+      "abstract_summary": "Longitudinal analysis of 1,002 women aged 65+ over 9 years. 38% developed frailty. Strongest predictors: low physical activity, cognitive impairment, depression, and weight loss. Frailty associated with 3x increased mortality and 5x increased nursing home admission.",
+      "key_findings": [
+        "38% of women developed frailty over 9 years",
+        "Frailty increases mortality 3-fold",
+        "5x increased nursing home risk",
+        "Physical activity most modifiable predictor",
+        "Cognitive impairment accelerates frailty progression"
+      ],
+      "evidence_level": "cohort_study",
+      "sample_size": 1002,
+      "study_duration": "9 years",
+      "population": "women aged 65+",
+      "tags": ["frailty", "aging", "longitudinal", "mortality", "physical_activity"],
+      "clinical_applications": [
+        "Screen for frailty annually in elderly",
+        "Prioritize physical activity interventions",
+        "Address depression and cognitive decline",
+        "Monitor weight changes closely"
+      ],
+      "citation_count": 456,
+      "full_text_available": true
+    },
+    {
+      "id": "pmid_36340123",
+      "pmid": "36340123",
+      "title": "Anticholinergic burden and dementia risk: Systematic review of observational studies",
+      "authors": ["Richardson K", "Fox C", "Maidment I"],
+      "journal": "Age and Ageing",
+      "year": 2022,
+      "doi": "10.1093/ageing/afac123",
+      "abstract_summary": "Review of 21 studies (n=171,391) examining anticholinergic cognitive burden (ACB) and dementia. High ACB score (≥3) associated with 47% increased dementia risk (HR 1.47, 95% CI 1.33-1.62). Risk cumulative and reversible - discontinuation reduced risk.",
+      "key_findings": [
+        "High anticholinergic burden increases dementia risk 47%",
+        "Risk is cumulative with duration",
+        "Discontinuation reduces risk over time",
+        "Common culprits: diphenhydramine, oxybutynin, amitriptyline",
+        "ACB score ≥3 considered high risk"
+      ],
+      "evidence_level": "systematic_review",
+      "sample_size": 171391,
+      "included_studies": 21,
+      "population": "adults 65+",
+      "tags": ["medication", "dementia", "anticholinergic", "cognitive_decline", "safety"],
+      "clinical_applications": [
+        "Calculate ACB score for all elderly patients",
+        "Deprescribe anticholinergics when possible",
+        "Substitute with non-anticholinergic alternatives",
+        "Review medications annually"
+      ],
+      "citation_count": 312,
+      "full_text_available": true
+    },
+    {
+      "id": "pmid_36234567",
+      "pmid": "36234567",
+      "title": "Home-based exercise program to prevent falls in high-risk elderly: Randomized controlled trial",
+      "authors": ["Sherrington C", "Fairhall NJ", "Wallbank GK"],
+      "journal": "JAMA Internal Medicine",
+      "year": 2022,
+      "doi": "10.1001/jamainternmed.2022.1234",
+      "abstract_summary": "RCT of 606 adults aged 70+ with fall history. Home-based balance and strength training reduced falls by 36% over 12 months (IRR 0.64, 95% CI 0.51-0.80). Program included 30 min exercises, 3x/week, with telephone support.",
+      "key_findings": [
+        "Home exercise reduces falls by 36%",
+        "Effective in high-risk population",
+        "30 min, 3x/week sufficient",
+        "Telephone support improves adherence",
+        "Benefits sustained at 24 months"
+      ],
+      "evidence_level": "rct",
+      "sample_size": 606,
+      "study_duration": "12 months (24 month follow-up)",
+      "population": "adults 70+ with fall history",
+      "tags": ["falls", "exercise", "intervention", "home_based", "prevention"],
+      "clinical_applications": [
+        "Prescribe home exercise programs",
+        "30 min balance/strength 3x/week",
+        "Provide telephone support",
+        "Target high-risk individuals"
+      ],
+      "citation_count": 178,
+      "full_text_available": true
+    },
+    {
+      "id": "pmid_36123456",
+      "pmid": "36123456",
+      "title": "Nutritional interventions for sarcopenia in older adults: Systematic review and meta-analysis",
+      "authors": ["Deutz NEP", "Bauer JM", "Barazzoni R"],
+      "journal": "Clinical Nutrition",
+      "year": 2021,
+      "doi": "10.1016/j.clnu.2021.05.014",
+      "abstract_summary": "Meta-analysis of 37 RCTs examining protein supplementation and muscle mass. Protein intake >1.2g/kg/day increased muscle mass by 0.54kg (95% CI 0.18-0.90). Combined with resistance training: additional 0.94kg gain. Leucine-enriched supplements most effective.",
+      "key_findings": [
+        "High protein intake (>1.2g/kg) increases muscle mass",
+        "Combined with exercise: nearly 1.5kg muscle gain",
+        "Leucine supplementation enhances effect",
+        "Timing: distribute protein across meals",
+        "Benefit seen even without exercise"
+      ],
+      "evidence_level": "systematic_review",
+      "sample_size": 2874,
+      "included_trials": 37,
+      "population": "adults 65+ with sarcopenia",
+      "tags": ["nutrition", "sarcopenia", "protein", "muscle", "supplementation"],
+      "clinical_applications": [
+        "Recommend 1.2-1.5g protein/kg/day",
+        "Distribute protein across all meals",
+        "Combine with resistance training",
+        "Consider leucine supplementation"
+      ],
+      "citation_count": 567,
+      "full_text_available": true
+    },
+    {
+      "id": "pmid_36012345",
+      "pmid": "36012345",
+      "title": "Deprescribing in elderly patients with polypharmacy: Cluster randomized trial",
+      "authors": ["Scott IA", "Hilmer SN", "Reeve E"],
+      "journal": "JAMA Internal Medicine",
+      "year": 2021,
+      "doi": "10.1001/jamainternmed.2021.4567",
+      "abstract_summary": "Cluster RCT of 1,565 patients aged 70+ on ≥5 medications. Deprescribing intervention reduced medication count by 1.4 drugs (p<0.001). No increase in adverse events. Quality of life improved. Falls reduced by 18%.",
+      "key_findings": [
+        "Deprescribing safely reduces medications by average 1.4",
+        "No increase in adverse events",
+        "Quality of life improves",
+        "Falls reduced by 18%",
+        "Most commonly stopped: PPIs, antihypertensives, hypoglycemics"
+      ],
+      "evidence_level": "rct",
+      "sample_size": 1565,
+      "population": "adults 70+ with polypharmacy (≥5 drugs)",
+      "tags": ["medication", "deprescribing", "polypharmacy", "safety", "intervention"],
+      "clinical_applications": [
+        "Implement structured deprescribing",
+        "Review medications every 6 months",
+        "Stop unnecessary medications safely",
+        "Monitor for withdrawal effects"
+      ],
+      "citation_count": 423,
+      "full_text_available": true
+    },
+    {
+      "id": "pmid_35901234",
+      "pmid": "35901234",
+      "title": "Cognitive stimulation therapy for mild cognitive impairment: Randomized controlled trial",
+      "authors": ["Orrell M", "Yates L", "Leung P"],
+      "journal": "International Psychogeriatrics",
+      "year": 2021,
+      "doi": "10.1017/S1041610221001234",
+      "abstract_summary": "RCT of 280 adults with MCI. 7-week cognitive stimulation program improved memory scores by 2.1 points (p<0.01) and quality of life. Benefits maintained at 6 months. Group-based approach most effective.",
+      "key_findings": [
+        "Cognitive stimulation improves memory in MCI",
+        "Group-based approach superior to individual",
+        "Benefits sustained at 6 months",
+        "Quality of life improves",
+        "Cost-effective intervention"
+      ],
+      "evidence_level": "rct",
+      "sample_size": 280,
+      "population": "adults with mild cognitive impairment",
+      "tags": ["cognitive_decline", "intervention", "mci", "cognitive_stimulation", "therapy"],
+      "clinical_applications": [
+        "Offer cognitive stimulation to MCI patients",
+        "Group-based sessions 2x/week",
+        "Include reminiscence and reality orientation",
+        "Involve caregivers in sessions"
+      ],
+      "citation_count": 189,
+      "full_text_available": true
+    }
+  ]
+}

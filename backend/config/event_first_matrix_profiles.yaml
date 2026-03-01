@@ -1,0 +1,823 @@
+version: 1
+
+defaults:
+  min_day: 4
+  max_day: 10
+  seeds: [11, 22, 33]
+  occupancy_threshold: 0.35
+  calib_fraction: 0.20
+  min_calib_samples: 500
+  min_calib_label_support: 30
+  calibration_method: isotonic
+  comparison_window: dec4_to_dec10
+  required_split_pass_ratio: 1.0
+  require_baseline_for_promotion: false
+  require_leakage_artifact: false
+  baseline_version: top2_frag_v3
+  baseline_artifact_hash: null
+  baseline_artifact_path: null
+
+variants:
+  anchor_top2_frag_v3:
+    description: Current top-2 frag tuned anchor setup.
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --segment-bedroom-min-duration-seconds=30
+      - --segment-bedroom-gap-merge-seconds=90
+      - --segment-bedroom-min-activity-prob=0.30
+      - --segment-livingroom-min-duration-seconds=60
+      - --segment-livingroom-gap-merge-seconds=30
+      - --segment-livingroom-min-activity-prob=0.40
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --bedroom-livingroom-prediction-smoothing-min-run-windows=9
+      - --bedroom-livingroom-prediction-smoothing-gap-fill-windows=6
+      - --enable-room-temporal-occupancy-features
+      - --bedroom-livingroom-texture-profile=mixed
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --enable-bedroom-livingroom-hard-negative-mining
+      - --bedroom-livingroom-hard-negative-weight=2.0
+      - --enable-bedroom-livingroom-failure-replay
+      - --bedroom-livingroom-failure-replay-weight=1.5
+      - --bedroom-livingroom-max-replay-rows-per-day=1800
+      - --livingroom-occupied-sample-weight=2.5
+      - --hard-gate-min-train-days=3
+
+  anchor_top2_frag_v3_option_y_masked_day8:
+    description: Option Y canonical anchor with Day-8 Bedroom unsensored-sleep runtime mask.
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --segment-bedroom-min-duration-seconds=30
+      - --segment-bedroom-gap-merge-seconds=90
+      - --segment-bedroom-min-activity-prob=0.30
+      - --segment-livingroom-min-duration-seconds=60
+      - --segment-livingroom-gap-merge-seconds=30
+      - --segment-livingroom-min-activity-prob=0.40
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --bedroom-livingroom-prediction-smoothing-min-run-windows=9
+      - --bedroom-livingroom-prediction-smoothing-gap-fill-windows=6
+      - --enable-room-temporal-occupancy-features
+      - --bedroom-livingroom-texture-profile=mixed
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --enable-bedroom-livingroom-hard-negative-mining
+      - --bedroom-livingroom-hard-negative-weight=2.0
+      - --enable-bedroom-livingroom-failure-replay
+      - --bedroom-livingroom-failure-replay-weight=1.5
+      - --bedroom-livingroom-max-replay-rows-per-day=1800
+      - --livingroom-occupied-sample-weight=2.5
+      - --hard-gate-min-train-days=3
+      - --label-corrections-csv=backend/config/label_corrections/option_y_day8_bedroom_unsensored_mask.csv
+
+  frag_sweep_room_targeted:
+    description: Slightly stronger BL fragmentation smoothing for targeted triage.
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --segment-bedroom-min-duration-seconds=40
+      - --segment-bedroom-gap-merge-seconds=100
+      - --segment-bedroom-min-activity-prob=0.30
+      - --segment-livingroom-min-duration-seconds=70
+      - --segment-livingroom-gap-merge-seconds=40
+      - --segment-livingroom-min-activity-prob=0.38
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --bedroom-livingroom-prediction-smoothing-min-run-windows=10
+      - --bedroom-livingroom-prediction-smoothing-gap-fill-windows=7
+      - --enable-room-temporal-occupancy-features
+      - --bedroom-livingroom-texture-profile=mixed
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --hard-gate-min-train-days=3
+
+  lr_only_minute_grid_optional:
+    description: LivingRoom-only Stage-A minute-grid experimental profile (default non-production).
+    args:
+      - --enable-bedroom-livingroom-stage-a-minute-grid
+      - --bedroom-livingroom-stage-a-minute-grid-rooms=livingroom
+      - --bedroom-livingroom-stage-a-group-seconds=60
+      - --bedroom-livingroom-stage-a-group-occupied-ratio-threshold=0.50
+      - --enable-bedroom-livingroom-segment-mode
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --hard-gate-min-train-days=3
+
+  learned_segment_classifier_off:
+    description: Explicit control profile with learned segment classifier disabled.
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --disable-bedroom-livingroom-segment-learned-classifier
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --hard-gate-min-train-days=3
+
+  anchor_top2_frag_v3_passive_hysteresis:
+    description: Anchor + passive-occupancy hysteresis for Bedroom/LivingRoom (episode-persistence aligned).
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --segment-bedroom-min-duration-seconds=30
+      - --segment-bedroom-gap-merge-seconds=90
+      - --segment-bedroom-min-activity-prob=0.30
+      - --segment-livingroom-min-duration-seconds=60
+      - --segment-livingroom-gap-merge-seconds=30
+      - --segment-livingroom-min-activity-prob=0.40
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --bedroom-livingroom-prediction-smoothing-min-run-windows=9
+      - --bedroom-livingroom-prediction-smoothing-gap-fill-windows=6
+      - --enable-bedroom-livingroom-passive-hysteresis
+      - --bedroom-passive-hold-minutes=45
+      - --livingroom-passive-hold-minutes=30
+      - --passive-exit-min-consecutive-windows=18
+      - --enable-room-temporal-occupancy-features
+      - --bedroom-livingroom-texture-profile=mixed
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --enable-bedroom-livingroom-hard-negative-mining
+      - --bedroom-livingroom-hard-negative-weight=2.0
+      - --enable-bedroom-livingroom-failure-replay
+      - --bedroom-livingroom-failure-replay-weight=1.5
+      - --bedroom-livingroom-max-replay-rows-per-day=1800
+      - --livingroom-occupied-sample-weight=2.5
+      - --hard-gate-min-train-days=3
+
+  lr_frag_focus_v1:
+    description: LivingRoom-focused fragmentation reduction with moderate smoothing increase.
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --segment-bedroom-min-duration-seconds=30
+      - --segment-bedroom-gap-merge-seconds=90
+      - --segment-bedroom-min-activity-prob=0.30
+      - --segment-livingroom-min-duration-seconds=90
+      - --segment-livingroom-gap-merge-seconds=60
+      - --segment-livingroom-min-activity-prob=0.35
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --bedroom-livingroom-prediction-smoothing-min-run-windows=10
+      - --bedroom-livingroom-prediction-smoothing-gap-fill-windows=8
+      - --enable-room-temporal-occupancy-features
+      - --bedroom-livingroom-texture-profile=mixed
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --enable-bedroom-livingroom-hard-negative-mining
+      - --bedroom-livingroom-hard-negative-weight=2.0
+      - --enable-bedroom-livingroom-failure-replay
+      - --bedroom-livingroom-failure-replay-weight=1.5
+      - --bedroom-livingroom-max-replay-rows-per-day=1800
+      - --livingroom-occupied-sample-weight=2.5
+      - --hard-gate-min-train-days=3
+
+  lr_frag_focus_v2:
+    description: LivingRoom-focused fragmentation reduction with stronger segment persistence.
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --segment-bedroom-min-duration-seconds=30
+      - --segment-bedroom-gap-merge-seconds=90
+      - --segment-bedroom-min-activity-prob=0.30
+      - --segment-livingroom-min-duration-seconds=120
+      - --segment-livingroom-gap-merge-seconds=90
+      - --segment-livingroom-min-activity-prob=0.33
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --bedroom-livingroom-prediction-smoothing-min-run-windows=12
+      - --bedroom-livingroom-prediction-smoothing-gap-fill-windows=10
+      - --enable-room-temporal-occupancy-features
+      - --bedroom-livingroom-texture-profile=mixed
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --enable-bedroom-livingroom-hard-negative-mining
+      - --bedroom-livingroom-hard-negative-weight=2.0
+      - --enable-bedroom-livingroom-failure-replay
+      - --bedroom-livingroom-failure-replay-weight=1.5
+      - --bedroom-livingroom-max-replay-rows-per-day=1800
+      - --livingroom-occupied-sample-weight=2.5
+      - --hard-gate-min-train-days=3
+
+  lr_frag_focus_v3:
+    description: LivingRoom-focused fragmentation reduction with balanced merge and run-fill.
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --segment-bedroom-min-duration-seconds=30
+      - --segment-bedroom-gap-merge-seconds=90
+      - --segment-bedroom-min-activity-prob=0.30
+      - --segment-livingroom-min-duration-seconds=75
+      - --segment-livingroom-gap-merge-seconds=75
+      - --segment-livingroom-min-activity-prob=0.36
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --bedroom-livingroom-prediction-smoothing-min-run-windows=11
+      - --bedroom-livingroom-prediction-smoothing-gap-fill-windows=9
+      - --enable-room-temporal-occupancy-features
+      - --bedroom-livingroom-texture-profile=mixed
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --enable-bedroom-livingroom-hard-negative-mining
+      - --bedroom-livingroom-hard-negative-weight=2.0
+      - --enable-bedroom-livingroom-failure-replay
+      - --bedroom-livingroom-failure-replay-weight=1.5
+      - --bedroom-livingroom-max-replay-rows-per-day=1800
+      - --livingroom-occupied-sample-weight=2.5
+      - --hard-gate-min-train-days=3
+
+  lr_occ_focus_v1:
+    description: LivingRoom occupied-F1 focus by reducing positive amplification and tightening activity support.
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --segment-bedroom-min-duration-seconds=30
+      - --segment-bedroom-gap-merge-seconds=90
+      - --segment-bedroom-min-activity-prob=0.30
+      - --segment-livingroom-min-duration-seconds=60
+      - --segment-livingroom-gap-merge-seconds=30
+      - --segment-livingroom-min-activity-prob=0.45
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --bedroom-livingroom-prediction-smoothing-min-run-windows=9
+      - --bedroom-livingroom-prediction-smoothing-gap-fill-windows=6
+      - --enable-room-temporal-occupancy-features
+      - --bedroom-livingroom-texture-profile=mixed
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --disable-bedroom-livingroom-hard-negative-mining
+      - --disable-bedroom-livingroom-failure-replay
+      - --livingroom-occupied-sample-weight=1.25
+      - --hard-gate-min-train-days=3
+
+  lr_occ_focus_v2:
+    description: LR occupied-F1 focus with hard-gate threshold tuning and explicit LR threshold prior.
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --segment-bedroom-min-duration-seconds=30
+      - --segment-bedroom-gap-merge-seconds=90
+      - --segment-bedroom-min-activity-prob=0.30
+      - --segment-livingroom-min-duration-seconds=60
+      - --segment-livingroom-gap-merge-seconds=30
+      - --segment-livingroom-min-activity-prob=0.45
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --bedroom-livingroom-prediction-smoothing-min-run-windows=9
+      - --bedroom-livingroom-prediction-smoothing-gap-fill-windows=6
+      - --enable-room-temporal-occupancy-features
+      - --bedroom-livingroom-texture-profile=mixed
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --disable-bedroom-livingroom-hard-negative-mining
+      - --disable-bedroom-livingroom-failure-replay
+      - --enable-bedroom-livingroom-hardgate-threshold-tuning
+      - --room-occupancy-thresholds=entrance=0.55,livingroom=0.45
+      - --livingroom-occupied-sample-weight=1.25
+      - --hard-gate-min-train-days=3
+
+  lr_occ_focus_v3:
+    description: LR occupied-F1 focus with temporal sequence model and occupancy decoder.
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --segment-bedroom-min-duration-seconds=30
+      - --segment-bedroom-gap-merge-seconds=90
+      - --segment-bedroom-min-activity-prob=0.30
+      - --segment-livingroom-min-duration-seconds=60
+      - --segment-livingroom-gap-merge-seconds=30
+      - --segment-livingroom-min-activity-prob=0.45
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --bedroom-livingroom-prediction-smoothing-min-run-windows=9
+      - --bedroom-livingroom-prediction-smoothing-gap-fill-windows=6
+      - --enable-room-temporal-occupancy-features
+      - --bedroom-livingroom-texture-profile=mixed
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --disable-bedroom-livingroom-hard-negative-mining
+      - --disable-bedroom-livingroom-failure-replay
+      - --enable-bedroom-livingroom-hardgate-threshold-tuning
+      - --enable-bedroom-livingroom-stage-a-sequence-model
+      - --bedroom-livingroom-stage-a-sequence-lag-windows=18
+      - --enable-bedroom-livingroom-occupancy-decoder
+      - --room-occupancy-thresholds=entrance=0.55,livingroom=0.45
+      - --livingroom-occupied-sample-weight=1.25
+      - --hard-gate-min-train-days=3
+
+  lr_semantic_align_v1:
+    description: LivingRoom semantic alignment baseline (direct-vs-passive supervision + strict passive entry).
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --segment-bedroom-min-duration-seconds=30
+      - --segment-bedroom-gap-merge-seconds=90
+      - --segment-bedroom-min-activity-prob=0.30
+      - --segment-livingroom-min-duration-seconds=60
+      - --segment-livingroom-gap-merge-seconds=30
+      - --segment-livingroom-min-activity-prob=0.40
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --bedroom-livingroom-prediction-smoothing-min-run-windows=9
+      - --bedroom-livingroom-prediction-smoothing-gap-fill-windows=6
+      - --enable-bedroom-livingroom-passive-hysteresis
+      - --bedroom-passive-hold-minutes=45
+      - --livingroom-passive-hold-minutes=30
+      - --passive-exit-min-consecutive-windows=18
+      - --enable-livingroom-passive-label-alignment
+      - --livingroom-direct-positive-weight=1.0
+      - --livingroom-passive-positive-weight=0.25
+      - --livingroom-unoccupied-weight=1.0
+      - --livingroom-direct-entry-exit-band-windows=24
+      - --livingroom-direct-motion-threshold=0.55
+      - --enable-livingroom-passive-strict-entry
+      - --livingroom-passive-entry-motion-threshold=0.75
+      - --enable-room-temporal-occupancy-features
+      - --bedroom-livingroom-texture-profile=mixed
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --disable-bedroom-livingroom-hard-negative-mining
+      - --disable-bedroom-livingroom-failure-replay
+      - --livingroom-occupied-sample-weight=1.5
+      - --hard-gate-min-train-days=3
+
+  lr_semantic_align_v2:
+    description: Semantic alignment with softer passive penalty and longer LR hold.
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --segment-bedroom-min-duration-seconds=30
+      - --segment-bedroom-gap-merge-seconds=90
+      - --segment-bedroom-min-activity-prob=0.30
+      - --segment-livingroom-min-duration-seconds=60
+      - --segment-livingroom-gap-merge-seconds=30
+      - --segment-livingroom-min-activity-prob=0.40
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --bedroom-livingroom-prediction-smoothing-min-run-windows=9
+      - --bedroom-livingroom-prediction-smoothing-gap-fill-windows=6
+      - --enable-bedroom-livingroom-passive-hysteresis
+      - --bedroom-passive-hold-minutes=45
+      - --livingroom-passive-hold-minutes=40
+      - --passive-exit-min-consecutive-windows=24
+      - --enable-livingroom-passive-label-alignment
+      - --livingroom-direct-positive-weight=1.0
+      - --livingroom-passive-positive-weight=0.35
+      - --livingroom-unoccupied-weight=1.0
+      - --livingroom-direct-entry-exit-band-windows=30
+      - --livingroom-direct-motion-threshold=0.50
+      - --enable-livingroom-passive-strict-entry
+      - --livingroom-passive-entry-motion-threshold=0.70
+      - --enable-room-temporal-occupancy-features
+      - --bedroom-livingroom-texture-profile=mixed
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --disable-bedroom-livingroom-hard-negative-mining
+      - --disable-bedroom-livingroom-failure-replay
+      - --livingroom-occupied-sample-weight=1.5
+      - --hard-gate-min-train-days=3
+
+  lr_semantic_align_v3:
+    description: Semantic alignment + occupancy decoder support while keeping segment mode.
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --segment-bedroom-min-duration-seconds=30
+      - --segment-bedroom-gap-merge-seconds=90
+      - --segment-bedroom-min-activity-prob=0.30
+      - --segment-livingroom-min-duration-seconds=60
+      - --segment-livingroom-gap-merge-seconds=30
+      - --segment-livingroom-min-activity-prob=0.40
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --bedroom-livingroom-prediction-smoothing-min-run-windows=9
+      - --bedroom-livingroom-prediction-smoothing-gap-fill-windows=6
+      - --enable-bedroom-livingroom-occupancy-decoder
+      - --enable-bedroom-livingroom-passive-hysteresis
+      - --bedroom-passive-hold-minutes=45
+      - --livingroom-passive-hold-minutes=35
+      - --passive-exit-min-consecutive-windows=20
+      - --enable-livingroom-passive-label-alignment
+      - --livingroom-direct-positive-weight=1.0
+      - --livingroom-passive-positive-weight=0.30
+      - --livingroom-unoccupied-weight=1.0
+      - --livingroom-direct-entry-exit-band-windows=24
+      - --livingroom-direct-motion-threshold=0.55
+      - --enable-livingroom-passive-strict-entry
+      - --livingroom-passive-entry-motion-threshold=0.75
+      - --enable-room-temporal-occupancy-features
+      - --bedroom-livingroom-texture-profile=mixed
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --disable-bedroom-livingroom-hard-negative-mining
+      - --disable-bedroom-livingroom-failure-replay
+      - --livingroom-occupied-sample-weight=1.5
+      - --hard-gate-min-train-days=3
+
+  lr_semantic_align_v4:
+    description: Semantic alignment without passive hysteresis (decoder offload to avoid occupancy inflation).
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --segment-bedroom-min-duration-seconds=30
+      - --segment-bedroom-gap-merge-seconds=90
+      - --segment-bedroom-min-activity-prob=0.30
+      - --segment-livingroom-min-duration-seconds=60
+      - --segment-livingroom-gap-merge-seconds=30
+      - --segment-livingroom-min-activity-prob=0.40
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --bedroom-livingroom-prediction-smoothing-min-run-windows=9
+      - --bedroom-livingroom-prediction-smoothing-gap-fill-windows=6
+      - --enable-livingroom-passive-label-alignment
+      - --livingroom-direct-positive-weight=1.0
+      - --livingroom-passive-positive-weight=0.25
+      - --livingroom-unoccupied-weight=1.0
+      - --livingroom-direct-entry-exit-band-windows=24
+      - --livingroom-direct-motion-threshold=0.55
+      - --enable-room-temporal-occupancy-features
+      - --bedroom-livingroom-texture-profile=mixed
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --disable-bedroom-livingroom-hard-negative-mining
+      - --disable-bedroom-livingroom-failure-replay
+      - --livingroom-occupied-sample-weight=1.5
+      - --hard-gate-min-train-days=3
+
+  lr_semantic_align_v5:
+    description: Semantic alignment with conservative LivingRoom hysteresis guardrails.
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --segment-bedroom-min-duration-seconds=30
+      - --segment-bedroom-gap-merge-seconds=90
+      - --segment-bedroom-min-activity-prob=0.30
+      - --segment-livingroom-min-duration-seconds=60
+      - --segment-livingroom-gap-merge-seconds=30
+      - --segment-livingroom-min-activity-prob=0.40
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --bedroom-livingroom-prediction-smoothing-min-run-windows=9
+      - --bedroom-livingroom-prediction-smoothing-gap-fill-windows=6
+      - --enable-livingroom-passive-label-alignment
+      - --livingroom-direct-positive-weight=1.0
+      - --livingroom-passive-positive-weight=0.25
+      - --livingroom-unoccupied-weight=1.0
+      - --livingroom-direct-entry-exit-band-windows=24
+      - --livingroom-direct-motion-threshold=0.55
+      - --enable-bedroom-livingroom-passive-hysteresis
+      - --bedroom-passive-hold-minutes=45
+      - --livingroom-passive-hold-minutes=10
+      - --passive-exit-min-consecutive-windows=6
+      - --passive-entry-occ-threshold=0.72
+      - --passive-entry-room-prob-threshold=0.55
+      - --passive-stay-occ-threshold=0.45
+      - --passive-stay-room-prob-threshold=0.25
+      - --passive-exit-occ-threshold=0.20
+      - --passive-exit-room-prob-threshold=0.12
+      - --passive-motion-reset-threshold=0.80
+      - --passive-motion-quiet-threshold=0.10
+      - --enable-livingroom-passive-strict-entry
+      - --livingroom-passive-entry-motion-threshold=0.85
+      - --enable-room-temporal-occupancy-features
+      - --bedroom-livingroom-texture-profile=mixed
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --disable-bedroom-livingroom-hard-negative-mining
+      - --disable-bedroom-livingroom-failure-replay
+      - --livingroom-occupied-sample-weight=1.5
+      - --hard-gate-min-train-days=3
+
+  lr_semantic_align_v6:
+    description: Semantic alignment with LR-only conservative hysteresis (Bedroom hold disabled).
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --segment-bedroom-min-duration-seconds=30
+      - --segment-bedroom-gap-merge-seconds=90
+      - --segment-bedroom-min-activity-prob=0.30
+      - --segment-livingroom-min-duration-seconds=60
+      - --segment-livingroom-gap-merge-seconds=30
+      - --segment-livingroom-min-activity-prob=0.40
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --bedroom-livingroom-prediction-smoothing-min-run-windows=9
+      - --bedroom-livingroom-prediction-smoothing-gap-fill-windows=6
+      - --enable-livingroom-passive-label-alignment
+      - --livingroom-direct-positive-weight=1.0
+      - --livingroom-passive-positive-weight=0.25
+      - --livingroom-unoccupied-weight=1.0
+      - --livingroom-direct-entry-exit-band-windows=24
+      - --livingroom-direct-motion-threshold=0.55
+      - --enable-bedroom-livingroom-passive-hysteresis
+      - --bedroom-passive-hold-minutes=0
+      - --livingroom-passive-hold-minutes=15
+      - --passive-exit-min-consecutive-windows=8
+      - --passive-entry-occ-threshold=0.68
+      - --passive-entry-room-prob-threshold=0.50
+      - --passive-stay-occ-threshold=0.35
+      - --passive-stay-room-prob-threshold=0.18
+      - --passive-exit-occ-threshold=0.18
+      - --passive-exit-room-prob-threshold=0.10
+      - --passive-motion-reset-threshold=0.75
+      - --passive-motion-quiet-threshold=0.10
+      - --enable-livingroom-passive-strict-entry
+      - --livingroom-passive-entry-motion-threshold=0.75
+      - --enable-room-temporal-occupancy-features
+      - --bedroom-livingroom-texture-profile=mixed
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --disable-bedroom-livingroom-hard-negative-mining
+      - --disable-bedroom-livingroom-failure-replay
+      - --livingroom-occupied-sample-weight=1.5
+      - --hard-gate-min-train-days=3
+
+  lr_cross_room_presence_v1:
+    description: Option B v1 - LR cross-room process-of-elimination decoder (no arbitration changes).
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --segment-bedroom-min-duration-seconds=30
+      - --segment-bedroom-gap-merge-seconds=90
+      - --segment-bedroom-min-activity-prob=0.30
+      - --segment-livingroom-min-duration-seconds=60
+      - --segment-livingroom-gap-merge-seconds=30
+      - --segment-livingroom-min-activity-prob=0.40
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --bedroom-livingroom-prediction-smoothing-min-run-windows=9
+      - --bedroom-livingroom-prediction-smoothing-gap-fill-windows=6
+      - --enable-room-temporal-occupancy-features
+      - --bedroom-livingroom-texture-profile=mixed
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --enable-bedroom-livingroom-hard-negative-mining
+      - --bedroom-livingroom-hard-negative-weight=2.0
+      - --enable-bedroom-livingroom-failure-replay
+      - --bedroom-livingroom-failure-replay-weight=1.5
+      - --bedroom-livingroom-max-replay-rows-per-day=1800
+      - --livingroom-occupied-sample-weight=2.5
+      - --enable-livingroom-cross-room-presence-decoder
+      - --livingroom-cross-room-supporting-rooms=bedroom,kitchen,bathroom,entrance
+      - --livingroom-cross-room-hold-minutes=10
+      - --livingroom-cross-room-max-extension-minutes=24
+      - --livingroom-cross-room-entry-occ-threshold=0.66
+      - --livingroom-cross-room-entry-room-prob-threshold=0.42
+      - --livingroom-cross-room-entry-motion-threshold=0.75
+      - --livingroom-cross-room-refresh-occ-threshold=0.44
+      - --livingroom-cross-room-refresh-room-prob-threshold=0.18
+      - --livingroom-cross-room-other-room-exit-occ-threshold=0.62
+      - --livingroom-cross-room-other-room-exit-confirm-windows=2
+      - --livingroom-cross-room-other-room-unoccupied-max-occ-prob=0.30
+      - --livingroom-cross-room-entrance-exit-occ-threshold=0.58
+      - --livingroom-cross-room-min-support-rooms=2
+      - --enable-livingroom-cross-room-require-other-room-predicted-occupied
+      - --hard-gate-min-train-days=3
+
+  lr_cross_room_presence_v2:
+    description: Option B v2 - LR cross-room decoder + full single-resident arbitration.
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --segment-bedroom-min-duration-seconds=30
+      - --segment-bedroom-gap-merge-seconds=90
+      - --segment-bedroom-min-activity-prob=0.30
+      - --segment-livingroom-min-duration-seconds=60
+      - --segment-livingroom-gap-merge-seconds=30
+      - --segment-livingroom-min-activity-prob=0.40
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --bedroom-livingroom-prediction-smoothing-min-run-windows=9
+      - --bedroom-livingroom-prediction-smoothing-gap-fill-windows=6
+      - --enable-room-temporal-occupancy-features
+      - --bedroom-livingroom-texture-profile=mixed
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --enable-bedroom-livingroom-hard-negative-mining
+      - --bedroom-livingroom-hard-negative-weight=2.0
+      - --enable-bedroom-livingroom-failure-replay
+      - --bedroom-livingroom-failure-replay-weight=1.5
+      - --bedroom-livingroom-max-replay-rows-per-day=1800
+      - --livingroom-occupied-sample-weight=2.5
+      - --enable-livingroom-cross-room-presence-decoder
+      - --livingroom-cross-room-supporting-rooms=bedroom,kitchen,bathroom,entrance
+      - --livingroom-cross-room-hold-minutes=8
+      - --livingroom-cross-room-max-extension-minutes=18
+      - --livingroom-cross-room-entry-occ-threshold=0.68
+      - --livingroom-cross-room-entry-room-prob-threshold=0.45
+      - --livingroom-cross-room-entry-motion-threshold=0.80
+      - --livingroom-cross-room-refresh-occ-threshold=0.46
+      - --livingroom-cross-room-refresh-room-prob-threshold=0.20
+      - --livingroom-cross-room-other-room-exit-occ-threshold=0.60
+      - --livingroom-cross-room-other-room-exit-confirm-windows=2
+      - --livingroom-cross-room-other-room-unoccupied-max-occ-prob=0.28
+      - --livingroom-cross-room-entrance-exit-occ-threshold=0.55
+      - --livingroom-cross-room-min-support-rooms=2
+      - --enable-livingroom-cross-room-require-other-room-predicted-occupied
+      - --enable-single-resident-arbitration
+      - --single-resident-rooms=bedroom,livingroom,kitchen,bathroom,entrance
+      - --single-resident-min-margin=0.03
+      - --hard-gate-min-train-days=3
+
+  lr_cross_room_presence_v3:
+    description: Option B v3 - conservative LR cross-room decoder (stricter entry, shorter extension).
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --segment-bedroom-min-duration-seconds=30
+      - --segment-bedroom-gap-merge-seconds=90
+      - --segment-bedroom-min-activity-prob=0.30
+      - --segment-livingroom-min-duration-seconds=60
+      - --segment-livingroom-gap-merge-seconds=30
+      - --segment-livingroom-min-activity-prob=0.40
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --bedroom-livingroom-prediction-smoothing-min-run-windows=9
+      - --bedroom-livingroom-prediction-smoothing-gap-fill-windows=6
+      - --enable-room-temporal-occupancy-features
+      - --bedroom-livingroom-texture-profile=mixed
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --enable-bedroom-livingroom-hard-negative-mining
+      - --bedroom-livingroom-hard-negative-weight=2.0
+      - --enable-bedroom-livingroom-failure-replay
+      - --bedroom-livingroom-failure-replay-weight=1.5
+      - --bedroom-livingroom-max-replay-rows-per-day=1800
+      - --livingroom-occupied-sample-weight=2.5
+      - --enable-livingroom-cross-room-presence-decoder
+      - --livingroom-cross-room-supporting-rooms=bedroom,kitchen,bathroom,entrance
+      - --livingroom-cross-room-hold-minutes=6
+      - --livingroom-cross-room-max-extension-minutes=12
+      - --livingroom-cross-room-entry-occ-threshold=0.72
+      - --livingroom-cross-room-entry-room-prob-threshold=0.50
+      - --livingroom-cross-room-entry-motion-threshold=0.85
+      - --livingroom-cross-room-refresh-occ-threshold=0.52
+      - --livingroom-cross-room-refresh-room-prob-threshold=0.26
+      - --livingroom-cross-room-other-room-exit-occ-threshold=0.56
+      - --livingroom-cross-room-other-room-exit-confirm-windows=2
+      - --livingroom-cross-room-other-room-unoccupied-max-occ-prob=0.24
+      - --livingroom-cross-room-entrance-exit-occ-threshold=0.52
+      - --livingroom-cross-room-min-support-rooms=3
+      - --enable-livingroom-cross-room-require-other-room-predicted-occupied
+      - --hard-gate-min-train-days=3
+
+  lr_cross_room_presence_v4_night_guard:
+    description: Option B v4 - conservative cross-room decoder + night Bedroom-sleep dominance guard.
+    args:
+      - --enable-bedroom-livingroom-segment-mode
+      - --segment-bedroom-min-duration-seconds=30
+      - --segment-bedroom-gap-merge-seconds=90
+      - --segment-bedroom-min-activity-prob=0.30
+      - --segment-livingroom-min-duration-seconds=60
+      - --segment-livingroom-gap-merge-seconds=30
+      - --segment-livingroom-min-activity-prob=0.40
+      - --enable-bedroom-livingroom-prediction-smoothing
+      - --bedroom-livingroom-prediction-smoothing-min-run-windows=9
+      - --bedroom-livingroom-prediction-smoothing-gap-fill-windows=6
+      - --enable-room-temporal-occupancy-features
+      - --bedroom-livingroom-texture-profile=mixed
+      - --enable-bedroom-livingroom-stage-a-hgb
+      - --enable-bedroom-livingroom-hard-negative-mining
+      - --bedroom-livingroom-hard-negative-weight=2.0
+      - --enable-bedroom-livingroom-failure-replay
+      - --bedroom-livingroom-failure-replay-weight=1.5
+      - --bedroom-livingroom-max-replay-rows-per-day=1800
+      - --livingroom-occupied-sample-weight=2.5
+      - --enable-livingroom-cross-room-presence-decoder
+      - --livingroom-cross-room-supporting-rooms=bedroom,kitchen,bathroom,entrance
+      - --livingroom-cross-room-hold-minutes=6
+      - --livingroom-cross-room-max-extension-minutes=12
+      - --livingroom-cross-room-entry-occ-threshold=0.72
+      - --livingroom-cross-room-entry-room-prob-threshold=0.50
+      - --livingroom-cross-room-entry-motion-threshold=0.85
+      - --livingroom-cross-room-refresh-occ-threshold=0.52
+      - --livingroom-cross-room-refresh-room-prob-threshold=0.26
+      - --livingroom-cross-room-other-room-exit-occ-threshold=0.56
+      - --livingroom-cross-room-other-room-exit-confirm-windows=2
+      - --livingroom-cross-room-other-room-unoccupied-max-occ-prob=0.24
+      - --livingroom-cross-room-entrance-exit-occ-threshold=0.52
+      - --livingroom-cross-room-min-support-rooms=3
+      - --enable-livingroom-cross-room-require-other-room-predicted-occupied
+      - --enable-livingroom-night-bedroom-sleep-guard
+      - --livingroom-night-bedroom-sleep-guard-hours=22-6
+      - --livingroom-night-bedroom-sleep-guard-bedroom-sleep-occ-threshold=0.66
+      - --livingroom-night-bedroom-sleep-guard-bedroom-sleep-prob-threshold=0.55
+      - --livingroom-night-bedroom-sleep-guard-bedroom-exit-occ-threshold=0.35
+      - --livingroom-night-bedroom-sleep-guard-bedroom-exit-motion-threshold=0.75
+      - --livingroom-night-bedroom-sleep-guard-entry-occ-threshold=0.66
+      - --livingroom-night-bedroom-sleep-guard-entry-motion-threshold=0.75
+      - --livingroom-night-bedroom-sleep-guard-entry-confirm-windows=2
+      - --livingroom-night-bedroom-sleep-guard-suppression-label=unknown
+      - --hard-gate-min-train-days=3
+
+profiles:
+  pre_arrival_full:
+    description: Full pre-arrival readiness matrix.
+    variants:
+      - anchor_top2_frag_v3
+      - frag_sweep_room_targeted
+      - lr_only_minute_grid_optional
+      - learned_segment_classifier_off
+
+  pre_arrival_quick:
+    description: Reduced matrix for quick rehearsals.
+    seeds: [11]
+    variants:
+      - anchor_top2_frag_v3
+      - learned_segment_classifier_off
+
+  passive_hysteresis_ablation_quick:
+    description: Quick A/B between current anchor and passive-hysteresis candidate.
+    seeds: [11]
+    variants:
+      - anchor_top2_frag_v3
+      - anchor_top2_frag_v3_passive_hysteresis
+
+  passive_hysteresis_ablation_full:
+    description: Full 3-seed A/B between current anchor and passive-hysteresis candidate.
+    variants:
+      - anchor_top2_frag_v3
+      - anchor_top2_frag_v3_passive_hysteresis
+
+  lr_fragmentation_sweep:
+    description: LivingRoom-focused fragmentation sweep with Bedroom unchanged as regression guard.
+    variants:
+      - anchor_top2_frag_v3
+      - lr_frag_focus_v1
+      - lr_frag_focus_v2
+      - lr_frag_focus_v3
+
+  lr_occupied_f1_sweep_quick:
+    description: Quick LR occupied-F1 candidate screening (single seed).
+    seeds: [11]
+    variants:
+      - anchor_top2_frag_v3
+      - lr_occ_focus_v1
+      - lr_occ_focus_v2
+      - lr_occ_focus_v3
+
+  lr_occupied_f1_sweep_full:
+    description: Full LR occupied-F1 candidate sweep (3 seeds).
+    variants:
+      - anchor_top2_frag_v3
+      - lr_occ_focus_v1
+      - lr_occ_focus_v2
+      - lr_occ_focus_v3
+
+  lr_semantic_alignment_quick:
+    description: Quick semantic-alignment screen for LivingRoom passive occupancy mismatch.
+    seeds: [11]
+    variants:
+      - anchor_top2_frag_v3
+      - lr_semantic_align_v1
+      - lr_semantic_align_v2
+      - lr_semantic_align_v3
+
+  lr_semantic_alignment_full:
+    description: Full 3-seed semantic-alignment sweep.
+    variants:
+      - anchor_top2_frag_v3
+      - lr_semantic_align_v1
+      - lr_semantic_align_v2
+      - lr_semantic_align_v3
+
+  lr_semantic_alignment_rescue_quick:
+    description: Quick rescue sweep focusing on conservative semantic-alignment candidates.
+    seeds: [11]
+    variants:
+      - anchor_top2_frag_v3
+      - lr_semantic_align_v4
+      - lr_semantic_align_v5
+
+  lr_semantic_alignment_rescue_full:
+    description: Full 3-seed rescue sweep focusing on conservative semantic-alignment candidates.
+    variants:
+      - anchor_top2_frag_v3
+      - lr_semantic_align_v4
+      - lr_semantic_align_v5
+
+  lr_semantic_alignment_tune_quick:
+    description: Quick tune pass for LR-only conservative hysteresis alignment.
+    seeds: [11]
+    variants:
+      - anchor_top2_frag_v3
+      - lr_semantic_align_v6
+
+  lr_semantic_alignment_tune_full:
+    description: Full 3-seed tune pass for LR-only conservative hysteresis alignment.
+    variants:
+      - anchor_top2_frag_v3
+      - lr_semantic_align_v6
+
+  lr_semantic_alignment_candidate_full:
+    description: Full 3-seed candidate confirmation (anchor vs best semantic candidate).
+    variants:
+      - anchor_top2_frag_v3
+      - lr_semantic_align_v5
+
+  lr_cross_room_presence_quick:
+    description: Quick Option B screen (single seed) for LR cross-room persistence decoder.
+    seeds: [11]
+    variants:
+      - anchor_top2_frag_v3
+      - lr_cross_room_presence_v1
+      - lr_cross_room_presence_v2
+
+  lr_cross_room_presence_full:
+    description: Full 3-seed Option B cross-room persistence sweep.
+    variants:
+      - anchor_top2_frag_v3
+      - lr_cross_room_presence_v1
+      - lr_cross_room_presence_v2
+
+  lr_cross_room_presence_candidate_full:
+    description: Full 3-seed candidate confirmation (anchor vs Option B v1).
+    variants:
+      - anchor_top2_frag_v3
+      - lr_cross_room_presence_v1
+
+  lr_cross_room_presence_tune_quick:
+    description: Quick tune pass for conservative Option B candidate.
+    seeds: [11]
+    variants:
+      - anchor_top2_frag_v3
+      - lr_cross_room_presence_v3
+
+  lr_cross_room_presence_tune_full:
+    description: Full 3-seed tune pass for conservative Option B candidate.
+    variants:
+      - anchor_top2_frag_v3
+      - lr_cross_room_presence_v3
+
+  lr_cross_room_presence_night_guard_quick:
+    description: Quick A/B for night Bedroom-sleep guardrail on top of conservative cross-room decoder.
+    seeds: [11]
+    variants:
+      - anchor_top2_frag_v3
+      - lr_cross_room_presence_v4_night_guard
+
+  lr_cross_room_presence_night_guard_full:
+    description: Full 3-seed A/B for night Bedroom-sleep guardrail on top of conservative cross-room decoder.
+    variants:
+      - anchor_top2_frag_v3
+      - lr_cross_room_presence_v4_night_guard
+
+  option_y_canonical_full:
+    description: Option Y canonical 3-seed decision run (anchor + Day-8 Bedroom runtime mask).
+    variants:
+      - anchor_top2_frag_v3_option_y_masked_day8
+
+  option_y_newpack_compare_quick:
+    description: "Quick A/B on new training pack (anchor no-mask vs legacy Day-8 runtime mask)."
+    seeds: [11]
+    variants:
+      - anchor_top2_frag_v3
+      - anchor_top2_frag_v3_option_y_masked_day8
+
+  option_y_newpack_anchor_full:
+    description: "Option Y canonical anchor run on new training pack (no runtime mask)."
+    variants:
+      - anchor_top2_frag_v3

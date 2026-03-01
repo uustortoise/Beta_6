@@ -1,0 +1,38 @@
+version: v1
+strict_taxonomy: true
+allow_combined_states: false
+
+accepted_input_shapes:
+  - uncertainty_state
+  - uncertainty
+  - uncertainty.state
+  - low_confidence
+  - unknown
+  - outside_sensed_space
+  - uncertainty.low_confidence
+  - uncertainty.unknown
+  - uncertainty.outside_sensed_space
+
+taxonomy:
+  low_confidence:
+    gate_reason_code: fail_uncertainty_low_confidence
+    timeline_state: abstain_low_confidence
+    operator_queue: model_quality_review
+    description: >
+      Model has signal but confidence is below threshold.
+  unknown:
+    gate_reason_code: fail_uncertainty_unknown
+    timeline_state: abstain_unknown
+    operator_queue: label_ambiguity_review
+    description: >
+      State is intrinsically ambiguous under available labels and context.
+  outside_sensed_space:
+    gate_reason_code: fail_uncertainty_outside_sensed_space
+    timeline_state: abstain_outside_sensed_space
+    operator_queue: sensor_coverage_review
+    description: >
+      Behavior likely occurred outside instrumented sensor coverage.
+
+contract_violations:
+  conflicting_states_reason_code: fail_uncertainty_conflict
+  invalid_payload_reason_code: fail_uncertainty_invalid

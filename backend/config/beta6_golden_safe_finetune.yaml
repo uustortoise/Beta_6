@@ -1,0 +1,14 @@
+version: v1
+
+fine_tune:
+  safe_classes:
+    - sleep
+    - nap
+    - shower
+    - out
+  min_samples_per_class: 8
+  min_unique_residents: 2
+  holdout_fraction: 0.2
+  random_seed: 42
+  min_accuracy: 0.85
+  max_split_attempts: 40

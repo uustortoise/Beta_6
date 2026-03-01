@@ -15,10 +15,9 @@
 name: CI Gate Hardening
 
 on:
-  push:
-    branches: [ main, master, "beta-*" ]
   pull_request:
     branches: [ main, master, "beta-*" ]
+  workflow_dispatch:
 
 jobs:
   # Job 0: Beta 6 contract freeze + leakage guard checks (Step 1.1 + Step 1.3)

@@ -1,10 +1,9 @@
 name: Repo Hygiene
 
 on:
-  push:
-    branches: [ main, master, "beta-*", "codex/*" ]
   pull_request:
     branches: [ main, master, "beta-*" ]
+  workflow_dispatch:
 
 jobs:
   hygiene:
@@ -23,4 +22,3 @@ jobs:
     - name: Run repository hygiene guard
       run: |
         python scripts/check_repo_hygiene.py
-

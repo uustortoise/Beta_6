@@ -2418,6 +2418,8 @@ def _evaluate_walk_forward_promotion_gate(
     wf_minority_support_default = max(0, int(get_runtime_wf_min_minority_support_default()))
     wf_minority_support_by_room = get_runtime_wf_min_minority_support_by_room()
     require_transition_coverage = _is_env_enabled("WF_REQUIRE_TRANSITION_COVERAGE", default=False)
+    evidence_profile = _resolve_release_gate_evidence_profile(default_profile="production")
+    pilot_relaxed_evidence = evidence_profile in {"pilot_stage_a", "pilot_stage_b"}
 
     try:
         policy = get_release_gates_config()
@@ -2486,6 +2488,13 @@ def _evaluate_walk_forward_promotion_gate(
         previous_version = int(previous_versions.get(room, 0) or 0)
         training_days = float(metric.get("training_days", 0.0) or 0.0)
         reasons: list[str] = []
+        watch_reasons: list[str] = []
+
+        def _add_reason(message: str, *, low_support: bool = False) -> None:
+            if low_support and pilot_relaxed_evidence:
+                watch_reasons.append(str(message))
+                return
+            reasons.append(str(message))
 
         room_df, room_err = load_room_training_dataframe(
             elder_id=elder_id,
@@ -2497,7 +2506,7 @@ def _evaluate_walk_forward_promotion_gate(
             include_files=pending_files or [],
         )
         if room_err:
-            reasons.append(f"dataset_error:{room_err}")
+            _add_reason(f"dataset_error:{room_err}")
             room_reports.append(
                 {
                     "room": room,
@@ -2517,7 +2526,7 @@ def _evaluate_walk_forward_promotion_gate(
             version=candidate_version,
         )
         if candidate_load_err:
-            reasons.append(f"candidate_load_error:{candidate_load_err}")
+            _add_reason(f"candidate_load_error:{candidate_load_err}")
             room_reports.append(
                 {
                     "room": room,
@@ -2543,7 +2552,7 @@ def _evaluate_walk_forward_promotion_gate(
             class_thresholds=candidate_artifacts.get("class_thresholds", {}),
         )
         if candidate_eval_err or not candidate_report:
-            reasons.append(f"candidate_eval_error:{candidate_eval_err or 'unknown'}")
+            _add_reason(f"candidate_eval_error:{candidate_eval_err or 'unknown'}")
             room_reports.append(
                 {
                     "room": room,
@@ -2570,14 +2579,14 @@ def _evaluate_walk_forward_promotion_gate(
         )
 
         if candidate_num_folds <= 0:
-            reasons.append(
+            _add_reason(
                 f"wf_no_folds:{room_key}:observed_days={int(wf_feasibility['observed_days'])}"
                 f"<required_days={int(wf_feasibility['required_days'])}"
             )
         elif candidate_f1 is None:
-            reasons.append("candidate_metric_missing:macro_f1_mean")
+            _add_reason("candidate_metric_missing:macro_f1_mean")
         elif room_threshold is not None and float(candidate_f1) < float(room_threshold):
-            reasons.append(
+            _add_reason(
                 f"room_threshold_failed:{room_key}:f1={float(candidate_f1):.3f}<required={float(room_threshold):.3f}"
             )
 
@@ -2587,7 +2596,7 @@ def _evaluate_walk_forward_promotion_gate(
             if float(fold.get("macro_f1", 0.0)) < float(room_drift_threshold)
         ]
         if len(low_folds) > int(room_max_low_folds):
-            reasons.append(
+            _add_reason(
                 f"drift_stability_failed:{room_key}:low_folds={len(low_folds)}>max_low_folds={int(room_max_low_folds)}"
             )
         low_support_folds = [
@@ -2596,9 +2605,10 @@ def _evaluate_walk_forward_promotion_gate(
             if int(fold.get("minority_support", 0) or 0) < int(room_min_minority_support)
         ]
         if int(room_min_minority_support) > 0 and low_support_folds:
-            reasons.append(
+            _add_reason(
                 f"fold_support_failed:{room_key}:"
-                f"low_support_folds={len(low_support_folds)}<min_support={int(room_min_minority_support)}"
+                f"low_support_folds={len(low_support_folds)}<min_support={int(room_min_minority_support)}",
+                low_support=True,
             )
         stability_low_folds = [
             fold
@@ -2607,7 +2617,7 @@ def _evaluate_walk_forward_promotion_gate(
             and float(fold.get("stability_accuracy")) < float(room_min_stability_accuracy)
         ]
         if len(stability_low_folds) > int(room_max_stability_low_folds):
-            reasons.append(
+            _add_reason(
                 f"stability_guard_failed:{room_key}:"
                 f"low_folds={len(stability_low_folds)}>max_low_folds={int(room_max_stability_low_folds)}"
             )
@@ -2622,12 +2632,12 @@ def _evaluate_walk_forward_promotion_gate(
             and float(fold.get("transition_macro_f1")) < float(room_min_transition_f1)
         ]
         if len(transition_low_folds) > int(room_max_transition_low_folds):
-            reasons.append(
+            _add_reason(
                 f"transition_guard_failed:{room_key}:"
                 f"low_folds={len(transition_low_folds)}>max_low_folds={int(room_max_transition_low_folds)}"
             )
         if require_transition_coverage and len(transition_candidate_folds) == 0:
-            reasons.append(f"transition_coverage_missing:{room_key}:no_transition_windows")
+            _add_reason(f"transition_coverage_missing:{room_key}:no_transition_windows")
 
         baseline_summary = None
         if training_days >= baseline_run_at_day and candidate_f1 is not None:
@@ -2642,16 +2652,16 @@ def _evaluate_walk_forward_promotion_gate(
                 baseline_model=baseline_model,
             )
             if baseline_err or not baseline_report:
-                reasons.append(f"baseline_eval_error:{baseline_err or 'unknown'}")
+                _add_reason(f"baseline_eval_error:{baseline_err or 'unknown'}")
             else:
                 baseline_summary = baseline_report.get("summary", {})
                 baseline_f1 = baseline_summary.get("macro_f1_mean")
                 if baseline_f1 is None:
-                    reasons.append("baseline_metric_missing:macro_f1_mean")
+                    _add_reason("baseline_metric_missing:macro_f1_mean")
                 else:
                     advantage = float(candidate_f1) - float(baseline_f1)
                     if advantage < baseline_required_adv:
-                        reasons.append(
+                        _add_reason(
                             f"baseline_advantage_failed:{room_key}:adv={advantage:.3f}<required={baseline_required_adv:.3f}"
                         )
 
@@ -2664,7 +2674,7 @@ def _evaluate_walk_forward_promotion_gate(
                 version=previous_version,
             )
             if champion_load_err:
-                reasons.append(f"champion_load_error:{champion_load_err}")
+                _add_reason(f"champion_load_error:{champion_load_err}")
             else:
                 champion_report, champion_eval_err = evaluate_model_version(
                     model=champion_artifacts["model"],
@@ -2678,7 +2688,7 @@ def _evaluate_walk_forward_promotion_gate(
                     class_thresholds=champion_artifacts.get("class_thresholds", {}),
                 )
                 if champion_eval_err or not champion_report:
-                    reasons.append(f"champion_eval_error:{champion_eval_err or 'unknown'}")
+                    _add_reason(f"champion_eval_error:{champion_eval_err or 'unknown'}")
                 else:
                     champion_f1 = champion_report.get("summary", {}).get("macro_f1_mean")
                     if (
@@ -2688,13 +2698,14 @@ def _evaluate_walk_forward_promotion_gate(
                         and (float(champion_f1) - float(candidate_f1)) > float(max_drop)
                     ):
                         drop = float(champion_f1) - float(candidate_f1)
-                        reasons.append(
+                        _add_reason(
                             f"no_regress_failed:{room_key}:drop={drop:.3f}>max_drop={float(max_drop):.3f}"
                         )
 
         room_pass = len(reasons) == 0
         if not room_pass:
             failed_rooms.append(room)
+        all_reasons = list(reasons) + list(watch_reasons)
 
         room_reports.append(
             {
@@ -2736,7 +2747,9 @@ def _evaluate_walk_forward_promotion_gate(
                     else None
                 ),
                 "pass": room_pass,
-                "reasons": reasons,
+                "reasons": all_reasons,
+                "blocking_reasons": list(reasons),
+                "watch_reasons": list(watch_reasons),
             }
         )
 

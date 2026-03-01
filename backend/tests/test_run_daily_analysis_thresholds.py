@@ -617,6 +617,7 @@ def test_walk_forward_gate_config_unavailable_marks_promoted_rooms_failed(monkey
 
 
 def test_walk_forward_gate_rejects_low_fold_minority_support_and_applies_room_overrides(monkeypatch):
+    monkeypatch.setenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")
     monkeypatch.setenv("WF_STEP_DAYS", "2")
     monkeypatch.setenv("WF_STEP_DAYS_BY_ROOM", "bedroom:1")
     monkeypatch.setenv("WF_DRIFT_THRESHOLD", "0.60")
@@ -659,7 +660,7 @@ def test_walk_forward_gate_rejects_low_fold_minority_support_and_applies_room_ov
         "run_daily_analysis.evaluate_model_version",
         lambda **kwargs: (
             {
-                "summary": {"macro_f1_mean": 0.75},
+                "summary": {"macro_f1_mean": 0.75, "num_folds": 2},
                 "folds": [
                     {"macro_f1": 0.79, "minority_support": 2},
                     {"macro_f1": 0.81, "minority_support": 7},
@@ -694,6 +695,7 @@ def test_walk_forward_gate_rejects_low_fold_minority_support_and_applies_room_ov
 
 
 def test_walk_forward_gate_uses_policy_default_minority_support(monkeypatch):
+    monkeypatch.setenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")
     monkeypatch.delenv("WF_MIN_MINORITY_SUPPORT", raising=False)
     monkeypatch.delenv("WF_MIN_MINORITY_SUPPORT_BY_ROOM", raising=False)
     monkeypatch.setattr("run_daily_analysis.get_runtime_wf_min_minority_support_default", lambda: 3)
@@ -736,7 +738,7 @@ def test_walk_forward_gate_uses_policy_default_minority_support(monkeypatch):
         "run_daily_analysis.evaluate_model_version",
         lambda **kwargs: (
             {
-                "summary": {"macro_f1_mean": 0.75},
+                "summary": {"macro_f1_mean": 0.75, "num_folds": 2},
                 "folds": [
                     {"macro_f1": 0.79, "minority_support": 2},
                     {"macro_f1": 0.81, "minority_support": 7},
@@ -764,6 +766,78 @@ def test_walk_forward_gate_uses_policy_default_minority_support(monkeypatch):
     room_report = next(r for r in report["room_reports"] if r["room"] == "Bedroom")
     assert room_report["candidate_wf_config"]["min_minority_support"] == 5
     assert any("fold_support_failed:bedroom" in reason for reason in room_report["reasons"])
+
+
+def test_walk_forward_gate_marks_low_fold_support_watch_only_in_pilot(monkeypatch):
+    monkeypatch.setenv("RELEASE_GATE_EVIDENCE_PROFILE", "pilot_stage_a")
+    monkeypatch.setenv("WF_MIN_MINORITY_SUPPORT", "0")
+    monkeypatch.setenv("WF_MIN_MINORITY_SUPPORT_BY_ROOM", "bedroom:5")
+
+    monkeypatch.setattr(
+        "run_daily_analysis.get_release_gates_config",
+        lambda: {
+            "release_gates": {
+                "rooms": {"bedroom": {"schedule": [{"min_days": 2, "max_days": None, "min_value": 0.50}]}},
+                "no_regress": {"max_drop_from_champion": 0.20, "exempt_rooms": []},
+            }
+        },
+    )
+
+    room_df = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-01-01", periods=24, freq="1h"),
+            "activity": ["sleep"] * 24,
+            "motion": [0.1] * 24,
+        }
+    )
+    monkeypatch.setattr("run_daily_analysis.load_room_training_dataframe", lambda **kwargs: (room_df, None))
+    monkeypatch.setattr(
+        "run_daily_analysis._load_version_artifacts",
+        lambda **kwargs: (
+            {
+                "model": MagicMock(),
+                "scaler": MagicMock(),
+                "label_encoder": MagicMock(classes_=["sleep", "inactive"]),
+                "class_thresholds": {},
+            },
+            None,
+        ),
+    )
+    monkeypatch.setattr(
+        "run_daily_analysis.evaluate_model_version",
+        lambda **kwargs: (
+            {
+                "summary": {"macro_f1_mean": 0.75, "num_folds": 2},
+                "folds": [
+                    {"macro_f1": 0.79, "minority_support": 2},
+                    {"macro_f1": 0.81, "minority_support": 7},
+                ],
+            },
+            None,
+        ),
+    )
+
+    registry = MagicMock()
+    registry.get_current_version.return_value = 2
+    pipeline = MagicMock()
+    pipeline.room_config.calculate_seq_length.return_value = 5
+    pipeline.platform = MagicMock()
+
+    gate_pass, report = _evaluate_walk_forward_promotion_gate(
+        pipeline=pipeline,
+        registry=registry,
+        elder_id="elder_1",
+        metrics=[{"room": "Bedroom", "gate_pass": True, "training_days": 10.0}],
+        previous_versions={"Bedroom": 0},
+    )
+
+    assert gate_pass is True
+    assert report["failed_rooms"] == []
+    room_report = next(r for r in report["room_reports"] if r["room"] == "Bedroom")
+    assert room_report["pass"] is True
+    assert any("fold_support_failed:bedroom" in reason for reason in room_report["reasons"])
+    assert room_report["blocking_reasons"] == []
+    assert any("fold_support_failed:bedroom" in reason for reason in room_report["watch_reasons"])
 
 
 def test_walk_forward_gate_rejects_split_metric_failures(monkeypatch):

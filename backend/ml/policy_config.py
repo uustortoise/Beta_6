@@ -46,6 +46,19 @@ def _is_truthy(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
 
+def _resolve_release_gate_profile(env: Mapping[str, str], default_profile: str) -> str:
+    profile = str(env.get("RELEASE_GATE_EVIDENCE_PROFILE", default_profile)).strip().lower()
+    if not profile:
+        profile = "production"
+    if profile not in _RELEASE_GATE_EVIDENCE_PROFILES:
+        logger.warning(
+            "Unknown RELEASE_GATE_EVIDENCE_PROFILE=%s; defaulting to production.",
+            profile,
+        )
+        profile = "production"
+    return profile
+
+
 def _read_int_env(
     env: Mapping[str, str],
     name: str,
@@ -480,6 +493,8 @@ def load_policy_from_env(environ: Mapping[str, str] | None = None) -> TrainingPo
     """
     env = os.environ if environ is None else environ
     policy = TrainingPolicy()
+    release_gate_profile = _resolve_release_gate_profile(env, policy.release_gate.evidence_profile)
+    pilot_relaxed_evidence = release_gate_profile in {"pilot_stage_a", "pilot_stage_b"}
 
     # Clinical priority + class weight clipping.
     policy.clinical_priority.class_weight_cap = _read_float_env(
@@ -503,6 +518,19 @@ def load_policy_from_env(environ: Mapping[str, str] | None = None) -> TrainingPo
         minimum=0.0,
         maximum=100.0,
     )
+    # Pilot profiles run on short-window evidence. Force neutral class weighting
+    # to avoid hidden default-label bias from partial env overrides.
+    if pilot_relaxed_evidence:
+        policy.clinical_priority.multipliers = {
+            str(label).strip().lower(): 1.0
+            for label in policy.clinical_priority.multipliers.keys()
+            if str(label).strip()
+        }
+        policy.clinical_priority.multipliers_by_room_label = {
+            str(key).strip().lower(): 1.0
+            for key in policy.clinical_priority.multipliers_by_room_label.keys()
+            if str(key).strip()
+        }
 
     # Unoccupied downsampling.
     unocc = policy.unoccupied_downsample
@@ -643,17 +671,7 @@ def load_policy_from_env(environ: Mapping[str, str] | None = None) -> TrainingPo
 
     # Release-gate hard evidence floors.
     release_gate = policy.release_gate
-    release_gate_profile = str(env.get("RELEASE_GATE_EVIDENCE_PROFILE", release_gate.evidence_profile)).strip().lower()
-    if not release_gate_profile:
-        release_gate_profile = "production"
-    profile_defaults = _RELEASE_GATE_EVIDENCE_PROFILES.get(release_gate_profile)
-    if profile_defaults is None:
-        logger.warning(
-            "Unknown RELEASE_GATE_EVIDENCE_PROFILE=%s; defaulting to production.",
-            release_gate_profile,
-        )
-        release_gate_profile = "production"
-        profile_defaults = _RELEASE_GATE_EVIDENCE_PROFILES["production"]
+    profile_defaults = _RELEASE_GATE_EVIDENCE_PROFILES[release_gate_profile]
     release_gate.evidence_profile = release_gate_profile
     release_gate.min_validation_class_support = int(
         profile_defaults.get("min_validation_class_support", release_gate.min_validation_class_support)

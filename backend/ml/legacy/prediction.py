@@ -338,6 +338,135 @@ class PredictionPipeline:
             decode_hmm_with_duration_priors_fn=decode_hmm_with_duration_priors,
         )
 
+    def _two_stage_runtime_enabled_for_room(self, room_name: str) -> bool:
+        if not _env_enabled("ENABLE_TWO_STAGE_CORE_RUNTIME", default=False):
+            return False
+        scoped = _parse_room_set_override(os.getenv("TWO_STAGE_CORE_RUNTIME_ROOMS", ""))
+        if not scoped:
+            return True
+        return normalize_room_name(room_name) in scoped
+
+    @staticmethod
+    def _resolve_two_stage_stage_a_default_threshold() -> float:
+        raw = os.getenv("TWO_STAGE_CORE_STAGE_A_OCCUPIED_THRESHOLD", "0.5")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = 0.5
+        return float(np.clip(value, 0.0, 1.0))
+
+    @staticmethod
+    def _to_probability_matrix(raw: Any) -> np.ndarray:
+        arr = np.asarray(raw, dtype=np.float32)
+        if arr.ndim != 2:
+            raise ValueError(f"expected rank-2 probability matrix, got shape={arr.shape}")
+        row_sums = np.sum(arr, axis=1, keepdims=True)
+        is_prob_like = (
+            np.all(np.isfinite(arr))
+            and np.min(arr) >= -1e-6
+            and np.max(arr) <= 1.0 + 1e-6
+            and np.all(np.isfinite(row_sums))
+            and float(np.mean(np.abs(row_sums - 1.0))) <= 1e-2
+        )
+        if is_prob_like:
+            return np.clip(arr, 0.0, 1.0)
+        logits = arr.astype(np.float64, copy=False)
+        logits = logits - np.max(logits, axis=1, keepdims=True)
+        exp = np.exp(logits)
+        denom = np.clip(np.sum(exp, axis=1, keepdims=True), 1e-12, None)
+        return (exp / denom).astype(np.float32, copy=False)
+
+    def _predict_two_stage_core_probabilities(self, room_name: str, X_seq: np.ndarray) -> Optional[np.ndarray]:
+        bundle = getattr(self.platform, "two_stage_core_models", {}).get(room_name)
+        if not isinstance(bundle, dict):
+            return None
+        if not self._two_stage_runtime_enabled_for_room(room_name):
+            return None
+
+        stage_a_model = bundle.get("stage_a_model")
+        if stage_a_model is None:
+            return None
+
+        raw_stage_a = stage_a_model.predict(X_seq, verbose=0)
+        if isinstance(raw_stage_a, dict):
+            raw_stage_a = raw_stage_a.get("activity_logits")
+        stage_a_probs = self._to_probability_matrix(raw_stage_a)
+        if stage_a_probs.shape[1] < 2:
+            raise PredictionError(
+                f"Two-stage stage_a width invalid for {room_name}: shape={stage_a_probs.shape}"
+            )
+
+        n_samples = int(stage_a_probs.shape[0])
+        n_classes = int(bundle.get("num_classes", 0) or 0)
+        excluded_ids = [int(v) for v in (bundle.get("excluded_class_ids") or []) if int(v) < n_classes]
+        occupied_ids = [int(v) for v in (bundle.get("occupied_class_ids") or []) if int(v) < n_classes]
+        if n_classes <= 1 or not excluded_ids or not occupied_ids:
+            raise PredictionError(
+                f"Two-stage class mapping invalid for {room_name}: "
+                f"num_classes={n_classes}, excluded={excluded_ids}, occupied={occupied_ids}"
+            )
+
+        raw_stage_a_threshold = bundle.get(
+            "stage_a_occupied_threshold",
+            self._resolve_two_stage_stage_a_default_threshold(),
+        )
+        try:
+            parsed_stage_a_threshold = float(raw_stage_a_threshold)
+        except (TypeError, ValueError):
+            parsed_stage_a_threshold = self._resolve_two_stage_stage_a_default_threshold()
+        stage_a_threshold = float(np.clip(parsed_stage_a_threshold, 0.0, 1.0))
+        p_occ = stage_a_probs[:, 1]
+        p_unocc = stage_a_probs[:, 0]
+        occupied_mask = p_occ >= stage_a_threshold
+        y_pred_probs = np.zeros((n_samples, n_classes), dtype=np.float32)
+        non_occ_indices = np.where(~occupied_mask)[0]
+        if non_occ_indices.size > 0:
+            y_pred_probs[np.ix_(non_occ_indices, np.asarray(excluded_ids, dtype=np.int32))] = (
+                1.0 / float(len(excluded_ids))
+            )
+
+        if np.any(occupied_mask):
+            occ_indices = np.where(occupied_mask)[0]
+            p_occ_active = p_occ[occupied_mask]
+            p_unocc_active = p_unocc[occupied_mask]
+            y_pred_probs[np.ix_(occ_indices, np.asarray(excluded_ids, dtype=np.int32))] = (
+                (p_unocc_active / float(len(excluded_ids)))[:, None]
+            )
+
+            stage_b_model = bundle.get("stage_b_model")
+            if stage_b_model is not None:
+                raw_stage_b = stage_b_model.predict(X_seq, verbose=0)
+                if isinstance(raw_stage_b, dict):
+                    raw_stage_b = raw_stage_b.get("activity_logits")
+                stage_b_probs = self._to_probability_matrix(raw_stage_b)
+                if stage_b_probs.shape[1] != len(occupied_ids):
+                    raise PredictionError(
+                        f"Two-stage stage_b width invalid for {room_name}: "
+                        f"shape={stage_b_probs.shape}, expected={len(occupied_ids)}"
+                    )
+                stage_b_probs = stage_b_probs[occupied_mask]
+                for idx, class_id in enumerate(occupied_ids):
+                    y_pred_probs[occ_indices, class_id] = p_occ_active * stage_b_probs[:, idx]
+            else:
+                primary_occupied = int(bundle.get("primary_occupied_class_id", occupied_ids[0]) or occupied_ids[0])
+                if primary_occupied not in occupied_ids:
+                    primary_occupied = occupied_ids[0]
+                y_pred_probs[occ_indices, primary_occupied] = p_occ_active
+
+        row_sums = np.sum(y_pred_probs, axis=1, keepdims=True)
+        invalid_rows = row_sums[:, 0] <= 1e-8
+        if np.any(invalid_rows):
+            y_pred_probs[invalid_rows, :] = 0.0
+            y_pred_probs[invalid_rows, excluded_ids[0]] = 1.0
+            row_sums = np.sum(y_pred_probs, axis=1, keepdims=True)
+        y_pred_probs = y_pred_probs / np.clip(row_sums, 1e-8, None)
+        logger.info(
+            "Using two-stage core runtime path for %s (stage_a_threshold=%.3f)",
+            room_name,
+            stage_a_threshold,
+        )
+        return y_pred_probs
+
     def run_prediction(self, 
                        sensor_data: Dict[str, pd.DataFrame], 
                        loaded_rooms: List[str],
@@ -404,7 +533,16 @@ class PredictionPipeline:
 
                 # Predict
                 model = self.platform.room_models[room_name]
-                y_pred_probs = model.predict(X_seq, verbose=0)
+                y_pred_probs = None
+                try:
+                    y_pred_probs = self._predict_two_stage_core_probabilities(room_name, X_seq)
+                except Exception as e:
+                    logger.warning(f"Two-stage runtime disabled for {room_name} due to error: {e}")
+                    y_pred_probs = None
+                if y_pred_probs is None:
+                    y_pred_probs = model.predict(X_seq, verbose=0)
+                    if isinstance(y_pred_probs, dict):
+                        y_pred_probs = y_pred_probs.get("activity_logits")
                 if y_pred_probs is None or len(y_pred_probs) == 0:
                     continue
 

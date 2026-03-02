@@ -173,6 +173,14 @@ class PostgresCursorShim:
         # Convert SQLite placeholders to psycopg2 placeholders.
         sql = sql.replace('?', '%s')
 
+        # SQLite AUTOINCREMENT DDL -> PostgreSQL SERIAL PRIMARY KEY
+        sql = re.sub(
+            r'INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT',
+            'SERIAL PRIMARY KEY',
+            sql,
+            flags=re.IGNORECASE,
+        )
+
         # Replace INSERT OR IGNORE
         if "INSERT OR IGNORE" in sql.upper():
             sql = sql.replace("INSERT OR IGNORE", "INSERT")

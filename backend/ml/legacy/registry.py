@@ -835,6 +835,86 @@ class ModelRegistry:
                 raise ModelLoadError(
                     f"All loading methods failed for {room_name}: Keras={keras_err}, Joblib={joblib_err}"
                 ) from joblib_err
+
+    def _load_two_stage_core_bundle(
+        self,
+        *,
+        elder_id: str,
+        room_name: str,
+        current_version: int,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Load latest promoted two-stage core artifacts when they match current champion version.
+        """
+        models_dir = self.get_models_dir(elder_id)
+        meta_path = models_dir / f"{room_name}_two_stage_meta.json"
+        stage_a_path = models_dir / f"{room_name}_two_stage_stage_a_model.keras"
+        stage_b_path = models_dir / f"{room_name}_two_stage_stage_b_model.keras"
+        if not meta_path.exists() or not stage_a_path.exists():
+            return None
+        try:
+            payload = json.loads(meta_path.read_text())
+        except Exception as e:
+            logger.warning(f"Failed reading two-stage metadata for {elder_id}/{room_name}: {e}")
+            return None
+        if str(payload.get("schema_version", "")).strip() != "beta6.two_stage_core.v1":
+            return None
+        try:
+            saved_version = int(payload.get("saved_version", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        if int(current_version) <= 0 or saved_version != int(current_version):
+            logger.info(
+                "Skipping stale two-stage artifacts for %s/%s: saved_version=%s current_version=%s",
+                elder_id,
+                room_name,
+                saved_version,
+                current_version,
+            )
+            return None
+
+        stage_a_model = self.load_room_model(
+            str(stage_a_path),
+            f"{room_name}_two_stage_stage_a",
+            compile_model=False,
+        )
+        stage_b_model = None
+        stage_b_enabled = bool(payload.get("stage_b_enabled", False))
+        if stage_b_enabled:
+            if not stage_b_path.exists():
+                logger.warning(
+                    "Two-stage metadata expects stage_b model but file missing for %s/%s",
+                    elder_id,
+                    room_name,
+                )
+                return None
+            stage_b_model = self.load_room_model(
+                str(stage_b_path),
+                f"{room_name}_two_stage_stage_b",
+                compile_model=False,
+            )
+
+        raw_stage_a_threshold = payload.get("stage_a_occupied_threshold", 0.5)
+        try:
+            stage_a_threshold = float(raw_stage_a_threshold)
+        except (TypeError, ValueError):
+            stage_a_threshold = 0.5
+
+        return {
+            "schema_version": str(payload.get("schema_version")),
+            "saved_version": int(saved_version),
+            "stage_a_model": stage_a_model,
+            "stage_b_model": stage_b_model,
+            "stage_b_enabled": bool(stage_b_enabled),
+            "stage_a_occupied_threshold": stage_a_threshold,
+            "stage_a_threshold_source": str(payload.get("stage_a_threshold_source") or "meta"),
+            "stage_a_calibration": dict(payload.get("stage_a_calibration") or {}),
+            "num_classes": int(payload.get("num_classes", 0) or 0),
+            "excluded_class_ids": [int(v) for v in (payload.get("excluded_class_ids") or [])],
+            "occupied_class_ids": [int(v) for v in (payload.get("occupied_class_ids") or [])],
+            "primary_occupied_class_id": int(payload.get("primary_occupied_class_id", -1) or -1),
+            "meta": payload,
+        }
                 
     def load_models_for_elder(self, elder_id: str, platform: Any) -> List[str]:
         """
@@ -859,6 +939,8 @@ class ModelRegistry:
         # Store calibrated per-class thresholds on the platform object.
         if not hasattr(platform, 'class_thresholds'):
             platform.class_thresholds = {}
+        if not hasattr(platform, 'two_stage_core_models'):
+            platform.two_stage_core_models = {}
         
         # Discover candidate rooms from both latest aliases and version metadata.
         room_names = set()
@@ -919,6 +1001,17 @@ class ModelRegistry:
                         platform.class_thresholds[room_name] = {}
                 else:
                     platform.class_thresholds[room_name] = {}
+
+                current_version = int(self.get_current_version(elder_id, room_name) or 0)
+                two_stage_bundle = self._load_two_stage_core_bundle(
+                    elder_id=elder_id,
+                    room_name=room_name,
+                    current_version=current_version,
+                )
+                if two_stage_bundle is not None:
+                    platform.two_stage_core_models[room_name] = two_stage_bundle
+                else:
+                    platform.two_stage_core_models.pop(room_name, None)
                 
                 loaded_rooms.append(room_name)
             except ModelLoadError as e:
@@ -927,6 +1020,8 @@ class ModelRegistry:
                 platform.label_encoders.pop(room_name, None)
                 if hasattr(platform, "class_thresholds"):
                     platform.class_thresholds.pop(room_name, None)
+                if hasattr(platform, "two_stage_core_models"):
+                    platform.two_stage_core_models.pop(room_name, None)
                 logger.error(f"Skipping room due to model load failure for {room_name}: {e}")
             except (tf.errors.OpError, ValueError, OSError, KeyError) as e:
                 platform.room_models.pop(room_name, None)
@@ -934,6 +1029,8 @@ class ModelRegistry:
                 platform.label_encoders.pop(room_name, None)
                 if hasattr(platform, "class_thresholds"):
                     platform.class_thresholds.pop(room_name, None)
+                if hasattr(platform, "two_stage_core_models"):
+                    platform.two_stage_core_models.pop(room_name, None)
                 logger.error(f"Failed to load model for {room_name}: {type(e).__name__}: {e}")
             except Exception as e:
                 platform.room_models.pop(room_name, None)
@@ -941,6 +1038,8 @@ class ModelRegistry:
                 platform.label_encoders.pop(room_name, None)
                 if hasattr(platform, "class_thresholds"):
                     platform.class_thresholds.pop(room_name, None)
+                if hasattr(platform, "two_stage_core_models"):
+                    platform.two_stage_core_models.pop(room_name, None)
                 logger.error(f"Unexpected error loading {room_name}: {e}")
                 
         return loaded_rooms

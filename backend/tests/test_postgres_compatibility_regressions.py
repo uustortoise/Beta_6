@@ -79,6 +79,25 @@ def test_postgres_connection_shim_executemany_delegates_and_translates():
     assert params == [("HK001", 1), ("HK002", 0)]
 
 
+def test_postgres_connection_shim_translates_autoincrement_ddl():
+    pg_conn = _StubPsycopgConnection()
+    shim = PostgresConnectionShim(pg_conn, db_proxy=None)
+
+    cursor = shim.execute(
+        """
+        CREATE TABLE IF NOT EXISTS hard_negative_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            elder_id TEXT NOT NULL
+        )
+        """
+    )
+
+    sql, params = cursor.pg_cursor.last_execute
+    assert params == ()
+    assert "AUTOINCREMENT" not in sql.upper()
+    assert "SERIAL PRIMARY KEY" in sql.upper()
+
+
 def test_insight_count_adl_event_handles_tuple_rows():
     connection = _FakeConnection([_FakeQueryResult(one=(3,))])
     service = InsightService()

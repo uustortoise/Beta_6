@@ -4751,6 +4751,7 @@ with tab3:
                 history_df = history_df.dropna(subset=["training_date"])
                 if not history_df.empty:
                     st.markdown("#### 📈 F1/Accuracy Over Time")
+                    st.caption("Hover any point to see exact run/time/metric values.")
                     room_options = sorted(history_df["room"].dropna().astype(str).unique().tolist())
                     default_rooms = room_options[: min(len(room_options), 6)]
                     selected_trend_rooms = st.multiselect(
@@ -4768,67 +4769,70 @@ with tab3:
                     threshold_df = history_df[history_df["required_threshold"].notna()].copy()
 
                     if not f1_df.empty:
-                        f1_chart = (
-                            alt.Chart(f1_df)
-                            .mark_line(point=True)
-                            .encode(
-                                x=alt.X("training_date:T", title="Training Time"),
-                                y=alt.Y("candidate_macro_f1_mean:Q", title="WF Candidate F1"),
-                                color=alt.Color("room:N", title="Room"),
-                                tooltip=[
-                                    alt.Tooltip("room:N", title="Room"),
-                                    alt.Tooltip("run_id:Q", title="Run ID"),
-                                    alt.Tooltip("training_date:T", title="Training Time"),
-                                    alt.Tooltip("candidate_macro_f1_mean:Q", title="WF Candidate F1", format=".3f"),
-                                    alt.Tooltip("required_threshold:Q", title="Required Threshold", format=".3f"),
-                                    alt.Tooltip("training_days:Q", title="Training Days", format=".1f"),
-                                    alt.Tooltip("pass:N", title="Passed"),
-                                ],
-                            )
-                            .properties(height=260)
+                        f1_tooltips = [
+                            alt.Tooltip("room:N", title="Room"),
+                            alt.Tooltip("run_id:Q", title="Run ID"),
+                            alt.Tooltip("training_date:T", title="Training Time"),
+                            alt.Tooltip("candidate_macro_f1_mean:Q", title="WF Candidate F1", format=".6f"),
+                            alt.Tooltip("required_threshold:Q", title="Required Threshold", format=".6f"),
+                            alt.Tooltip("training_days:Q", title="Training Days", format=".1f"),
+                            alt.Tooltip("pass:N", title="Passed"),
+                        ]
+                        f1_base = alt.Chart(f1_df).encode(
+                            x=alt.X("training_date:T", title="Training Time"),
+                            y=alt.Y("candidate_macro_f1_mean:Q", title="WF Candidate F1"),
+                            color=alt.Color("room:N", title="Room"),
                         )
+                        f1_chart = (
+                            f1_base.mark_line()
+                            + f1_base.mark_circle(size=70, filled=True)
+                            + f1_base.mark_circle(size=220, opacity=0).encode(tooltip=f1_tooltips)
+                        )
+                        f1_chart = f1_chart.properties(height=260)
                         if not threshold_df.empty:
-                            threshold_chart = (
-                                alt.Chart(threshold_df)
-                                .mark_line(point=False, strokeDash=[4, 4], opacity=0.55)
-                                .encode(
-                                    x=alt.X("training_date:T", title="Training Time"),
-                                    y=alt.Y("required_threshold:Q", title="WF Candidate F1"),
-                                    color=alt.Color("room:N", title="Room"),
-                                    tooltip=[
-                                        alt.Tooltip("room:N", title="Room"),
-                                        alt.Tooltip("run_id:Q", title="Run ID"),
-                                        alt.Tooltip("training_date:T", title="Training Time"),
-                                        alt.Tooltip("required_threshold:Q", title="Required Threshold", format=".3f"),
-                                        alt.Tooltip("training_days:Q", title="Training Days", format=".1f"),
-                                    ],
-                                )
-                                .properties(height=260)
+                            threshold_tooltips = [
+                                alt.Tooltip("room:N", title="Room"),
+                                alt.Tooltip("run_id:Q", title="Run ID"),
+                                alt.Tooltip("training_date:T", title="Training Time"),
+                                alt.Tooltip("required_threshold:Q", title="Required Threshold", format=".6f"),
+                                alt.Tooltip("training_days:Q", title="Training Days", format=".1f"),
+                            ]
+                            threshold_base = alt.Chart(threshold_df).encode(
+                                x=alt.X("training_date:T", title="Training Time"),
+                                y=alt.Y("required_threshold:Q", title="WF Candidate F1"),
+                                color=alt.Color("room:N", title="Room"),
                             )
-                            st.altair_chart(f1_chart + threshold_chart, use_container_width=True)
+                            threshold_chart = (
+                                threshold_base.mark_line(point=False, strokeDash=[4, 4], opacity=0.55)
+                                + threshold_base.mark_circle(size=64, filled=True, opacity=0.35)
+                                + threshold_base.mark_circle(size=220, opacity=0).encode(tooltip=threshold_tooltips)
+                            .properties(height=260)
+                            )
+                            st.altair_chart((f1_chart + threshold_chart).interactive(), use_container_width=True)
                         else:
-                            st.altair_chart(f1_chart, use_container_width=True)
+                            st.altair_chart(f1_chart.interactive(), use_container_width=True)
 
                     if not acc_df.empty:
-                        acc_chart = (
-                            alt.Chart(acc_df)
-                            .mark_line(point=True)
-                            .encode(
-                                x=alt.X("training_date:T", title="Training Time"),
-                                y=alt.Y("candidate_accuracy_mean:Q", title="WF Candidate Accuracy"),
-                                color=alt.Color("room:N", title="Room"),
-                                tooltip=[
-                                    alt.Tooltip("room:N", title="Room"),
-                                    alt.Tooltip("run_id:Q", title="Run ID"),
-                                    alt.Tooltip("training_date:T", title="Training Time"),
-                                    alt.Tooltip("candidate_accuracy_mean:Q", title="WF Candidate Accuracy", format=".3f"),
-                                    alt.Tooltip("training_days:Q", title="Training Days", format=".1f"),
-                                    alt.Tooltip("pass:N", title="Passed"),
-                                ],
-                            )
-                            .properties(height=260)
+                        acc_tooltips = [
+                            alt.Tooltip("room:N", title="Room"),
+                            alt.Tooltip("run_id:Q", title="Run ID"),
+                            alt.Tooltip("training_date:T", title="Training Time"),
+                            alt.Tooltip("candidate_accuracy_mean:Q", title="WF Candidate Accuracy", format=".6f"),
+                            alt.Tooltip("training_days:Q", title="Training Days", format=".1f"),
+                            alt.Tooltip("pass:N", title="Passed"),
+                        ]
+                        acc_base = alt.Chart(acc_df).encode(
+                            x=alt.X("training_date:T", title="Training Time"),
+                            y=alt.Y("candidate_accuracy_mean:Q", title="WF Candidate Accuracy"),
+                            color=alt.Color("room:N", title="Room"),
                         )
-                        st.altair_chart(acc_chart, use_container_width=True)
+                        acc_chart = (
+                            acc_base.mark_line()
+                            + acc_base.mark_circle(size=70, filled=True)
+                            + acc_base.mark_circle(size=220, opacity=0).encode(tooltip=acc_tooltips)
+                        )
+                        acc_chart = acc_chart.properties(height=260)
+                        st.altair_chart(acc_chart.interactive(), use_container_width=True)
 
         st.markdown("---")
         st.markdown("#### 🔧 Runtime Load Mode (Migration Coverage)")

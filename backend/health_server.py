@@ -1213,6 +1213,7 @@ def build_ml_snapshot_report(
             payload["status"] = room_status
             payload["status_reason"] = room_reason
             payload["status_reason_code"] = room_reason_code
+            payload["review_queue_recommended"] = room_reason_code == "routed_review_queue_uncertainty"
             if _is_insufficient_evidence_reason_code(room_reason_code):
                 _mask_insufficient_evidence_metrics(payload)
             room_payloads[room_key] = payload
@@ -1231,6 +1232,7 @@ def build_ml_snapshot_report(
         payload["status"] = room_status
         payload["status_reason"] = room_reason
         payload["status_reason_code"] = room_reason_code
+        payload["review_queue_recommended"] = room_reason_code == "routed_review_queue_uncertainty"
         if _is_insufficient_evidence_reason_code(room_reason_code):
             _mask_insufficient_evidence_metrics(payload)
 
@@ -1341,6 +1343,7 @@ def build_ml_snapshot_report(
                     "_run_status": str(promo_latest.get("status") or ""),
                     "status_reason": fallback_reason,
                     "status_reason_code": fallback_reason_code,
+                    "review_queue_recommended": False,
                 }
                 room_payloads["all_rooms"] = synthetic_payload
 

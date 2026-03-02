@@ -223,10 +223,23 @@ def build_room_status(
         "fold_support_failed:",
         "insufficient_validation_support:",
     )
+    normalized_gate_reason_codes: set[str] = set()
+    for reason in gate_reasons:
+        token = str(reason).strip().lower()
+        if not token:
+            continue
+        if token.startswith("beta6_reason:"):
+            token = token.split(":", 1)[1]
+        normalized_gate_reason_codes.add(token)
     has_explicit_evidence_failure = any(
         str(reason).strip().lower().startswith(evidence_reason_prefixes)
         for reason in gate_reasons
     )
+    routine_uncertainty_codes = {
+        "fail_uncertainty_low_confidence",
+        "fail_uncertainty_unknown",
+        "fail_uncertainty_outside_sensed_space",
+    }
 
     if candidate_macro is None and transition_f1 is None and stability_acc is None and fold_count == 0:
         return "not_available", f"No recent model-health checks for {room_name}.", "no_recent_data"
@@ -246,6 +259,17 @@ def build_room_status(
             "action_needed",
             f"Model quality checks for {room_name} have insufficient validation evidence.",
             "insufficient_evidence_gate",
+        )
+
+    if (
+        not _safe_bool(gate.get("pass", True))
+        and normalized_gate_reason_codes
+        and normalized_gate_reason_codes.issubset(routine_uncertainty_codes)
+    ):
+        return (
+            "watch",
+            f"Routine uncertainty in {room_name} is routed to Review Queue.",
+            "routed_review_queue_uncertainty",
         )
 
     if not _safe_bool(gate.get("pass", True)):

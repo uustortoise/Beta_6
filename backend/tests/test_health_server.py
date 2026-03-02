@@ -432,6 +432,86 @@ def test_build_ml_snapshot_report_maps_room_status_and_thresholds(monkeypatch):
     assert report["raw"] and isinstance(report["raw"], list)
 
 
+def test_build_ml_snapshot_report_routes_routine_uncertainty_to_review_queue(monkeypatch):
+    class _FakeCursor:
+        def execute(self, query, params):
+            self.query = query
+            self.params = params
+
+        def fetchall(self):
+            return [
+                {
+                    "training_date": "2026-02-27T09:12:00Z",
+                    "status": "rejected_by_walk_forward_gate",
+                    "accuracy": 0.90,
+                    "metadata": {
+                        "global_gate": {
+                            "training_days": 12,
+                            "required": 0.65,
+                            "actual_global_macro_f1": 0.70,
+                        },
+                        "walk_forward_gate": {
+                            "pass": False,
+                            "reason": "room_failures",
+                            "room_reports": [
+                                {
+                                    "room": "Bedroom",
+                                    "pass": False,
+                                    "reasons": ["beta6_reason:fail_uncertainty_low_confidence"],
+                                    "candidate_summary": {
+                                        "macro_f1_mean": 0.72,
+                                        "accuracy_mean": 0.91,
+                                        "num_folds": 5,
+                                        "stability_accuracy_mean": 0.995,
+                                        "transition_macro_f1_mean": 0.89,
+                                    },
+                                    "candidate_low_folds": 0,
+                                    "candidate_low_transition_folds": 0,
+                                    "candidate_transition_supported_folds": 5,
+                                    "candidate_stability_accuracy_mean": 0.995,
+                                    "candidate_transition_macro_f1_mean": 0.89,
+                                    "champion_macro_f1_mean": 0.70,
+                                    "candidate_wf_config": {
+                                        "lookback_days": 90,
+                                        "drift_threshold": 0.60,
+                                        "min_transition_f1": 0.80,
+                                        "min_stability_accuracy": 0.99,
+                                        "max_transition_low_folds": 1,
+                                    },
+                                }
+                            ],
+                        },
+                    },
+                }
+            ]
+
+    class _FakeConn:
+        def cursor(self):
+            return _FakeCursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _FakeAdapter:
+        def get_connection(self):
+            return _FakeConn()
+
+    monkeypatch.setattr("backend.health_server.adapter", _FakeAdapter())
+
+    report, status = build_ml_snapshot_report(elder_id="elder_123", lookback_runs=10, include_raw=False)
+    assert status == 200
+    assert report["status"]["overall"] == "watch"
+    assert report["status"]["reason_code"] == "routed_review_queue_uncertainty"
+    assert len(report["rooms"]) == 1
+    room = report["rooms"][0]
+    assert room["room"] == "bedroom"
+    assert room["status"] == "watch"
+    assert room["review_queue_recommended"] is True
+
+
 def test_build_ml_snapshot_report_runtime_fallback_overrides_metadata(monkeypatch):
     class _FakeCursor:
         def execute(self, query, params):

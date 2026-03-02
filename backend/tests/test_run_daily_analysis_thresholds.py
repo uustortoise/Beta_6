@@ -258,8 +258,48 @@ def test_beta6_authority_sets_default_evidence_profile(monkeypatch):
     monkeypatch.setattr("run_daily_analysis._is_beta6_authority_enabled", lambda: True)
 
     run_daily_analysis._ensure_beta6_authority_evidence_profile_default()
-
     assert run_daily_analysis.os.getenv("RELEASE_GATE_EVIDENCE_PROFILE") == "pilot_stage_a"
+
+
+def test_runtime_activation_preflight_skips_when_runtime_flags_disabled(monkeypatch):
+    for key in (
+        "BETA6_PHASE4_RUNTIME_ENABLED",
+        "ENABLE_BETA6_HMM_RUNTIME",
+        "ENABLE_BETA6_UNKNOWN_ABSTAIN_RUNTIME",
+        "ENABLE_BETA6_CRF_RUNTIME",
+        "BETA6_SEQUENCE_RUNTIME_MODE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    ok, report = run_daily_analysis._validate_beta6_runtime_activation_preflight("HK0011_jessica")
+
+    assert ok is True
+    assert report["reason"] == "runtime_flags_disabled"
+
+
+def test_runtime_activation_preflight_calls_single_validator_when_runtime_enabled(monkeypatch, tmp_path):
+    monkeypatch.setenv("BETA6_PHASE4_RUNTIME_ENABLED", "true")
+    monkeypatch.setenv("BETA6_RUNTIME_TARGET_COHORT", "HK0011_jessica")
+    monkeypatch.setenv("BETA6_REGISTRY_V2_ROOT", str(tmp_path / "registry_v2"))
+    captured = {}
+
+    def _fake_validator(**kwargs):
+        captured.update(kwargs)
+        return False, {"reason": "runtime_policy_missing"}
+
+    monkeypatch.setattr(
+        run_daily_analysis,
+        "validate_beta6_phase4_runtime_preflight",
+        _fake_validator,
+    )
+
+    ok, report = run_daily_analysis._validate_beta6_runtime_activation_preflight("HK0011_jessica")
+
+    assert ok is False
+    assert report["reason"] == "runtime_policy_missing"
+    assert captured["elder_id"] == "HK0011_jessica"
+    assert captured["target_cohort"] == ["HK0011_jessica"]
+    assert str(captured["registry_root"]).endswith("registry_v2")
 
 
 def test_beta6_authority_default_evidence_profile_respects_explicit_env(monkeypatch):

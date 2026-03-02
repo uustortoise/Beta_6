@@ -60,6 +60,10 @@ from ml.beta6.contracts.events import DecisionEvent, EventType
 from ml.beta6.label_policy_consistency import validate_label_policy_consistency
 from ml.beta6.orchestrator import Beta6Orchestrator, PhaseGateError
 from ml.beta6.evaluation.runtime_eval_parity import DecoderPolicy
+from ml.beta6.serving.runtime_preflight import (
+    validate_beta6_phase4_runtime_preflight,
+    validate_beta6_phase4_runtime_preflight_cohort,
+)
 from ml.beta6.serving.serving_loader import run_daily_stability_certification
 from ml.evaluation import (
     TimeCheckpointedSplitter,
@@ -443,6 +447,61 @@ def _validate_beta6_training_preflight(elder_id: str, aggregate_files: list[Path
 
     report["reason"] = "ok"
     return True, report
+
+
+def _validate_beta6_runtime_activation_preflight(
+    elder_id: str,
+    *,
+    registry: ModelRegistry | None = None,
+) -> tuple[bool, dict]:
+    """
+    Run fail-closed runtime activation preflight when Beta 6 runtime flags are active.
+    """
+    runtime_flags = {
+        "BETA6_PHASE4_RUNTIME_ENABLED": _is_env_enabled("BETA6_PHASE4_RUNTIME_ENABLED", default=False),
+        "ENABLE_BETA6_HMM_RUNTIME": _is_env_enabled("ENABLE_BETA6_HMM_RUNTIME", default=False),
+        "ENABLE_BETA6_UNKNOWN_ABSTAIN_RUNTIME": _is_env_enabled(
+            "ENABLE_BETA6_UNKNOWN_ABSTAIN_RUNTIME", default=False
+        ),
+        "ENABLE_BETA6_CRF_RUNTIME": _is_env_enabled("ENABLE_BETA6_CRF_RUNTIME", default=False),
+    }
+    runtime_mode = str(os.getenv("BETA6_SEQUENCE_RUNTIME_MODE", "")).strip().lower()
+    runtime_flags_enabled = any(runtime_flags.values()) or runtime_mode in {"hmm", "crf"}
+
+    if not runtime_flags_enabled:
+        return True, {
+            "elder_id": str(elder_id),
+            "runtime_flags": runtime_flags,
+            "runtime_mode": runtime_mode or None,
+            "reason": "runtime_flags_disabled",
+        }
+
+    target_cohort = sorted(
+        {
+            str(item).strip()
+            for item in str(os.getenv("BETA6_RUNTIME_TARGET_COHORT", "")).split(",")
+            if str(item).strip()
+        }
+    )
+
+    registry_root = str(os.getenv("BETA6_REGISTRY_V2_ROOT", "")).strip()
+    if not registry_root and registry is not None:
+        backend_dir = getattr(registry, "backend_dir", None)
+        if backend_dir:
+            registry_root = str((Path(backend_dir).resolve() / "models_beta6_registry_v2").resolve())
+
+    ok, report = validate_beta6_phase4_runtime_preflight(
+        elder_id=str(elder_id),
+        target_cohort=target_cohort or None,
+        registry_root=registry_root or None,
+        require_target_cohort_for_runtime_flags=True,
+        allow_crf_canary=_is_env_enabled("BETA6_RUNTIME_ALLOW_CRF_CANARY", default=False),
+    )
+    if isinstance(report, dict):
+        report.setdefault("elder_id", str(elder_id))
+        report.setdefault("runtime_flags", runtime_flags)
+        report.setdefault("runtime_mode", runtime_mode or None)
+    return ok, report
 
 
 def _missing_activity_mask(series: pd.Series) -> pd.Series:
@@ -1797,6 +1856,33 @@ def _apply_beta6_gate_authority(
             )
     else:
         payload = phase4_gate_artifacts.get("run_decision", {}) if isinstance(phase4_gate_artifacts, dict) else {}
+        stage4_payload_valid = (
+            isinstance(phase4_gate_artifacts, dict)
+            and isinstance(payload, dict)
+            and isinstance(payload.get("details", {}), dict)
+            and "passed" in payload
+            and "reason_code" in payload
+        )
+        if not stage4_payload_valid:
+            phase4_gate_error = "RuntimeError: invalid_phase4_dynamic_gate_artifacts_payload"
+            logger.error(
+                "Beta 6 Phase 4 dynamic gate returned invalid payload for elder=%s run_id=%s: %s",
+                elder_id,
+                run_id,
+                phase4_gate_artifacts,
+            )
+            if run_decision.passed:
+                run_decision = run_decision.__class__(
+                    passed=False,
+                    reason_code=ReasonCode.FAIL_GATE_POLICY,
+                    room_decisions=list(run_decision.room_decisions),
+                    details={
+                        **dict(run_decision.details),
+                        "phase4_dynamic_gate_error": phase4_gate_error,
+                        "phase4_dynamic_gate_failed": True,
+                    },
+                )
+            payload = {}
         payload_reason = str(payload.get("reason_code") or run_decision.reason_code.value)
         try:
             resolved_reason = ReasonCode(payload_reason)
@@ -2899,6 +2985,7 @@ def train_files(file_paths: list[Path]):
         beta6_run_id = _build_beta6_run_id(elder_id)
         registry_v2 = _init_beta6_registry_v2(registry)
         beta6_authority_enabled = _is_beta6_authority_enabled()
+        runtime_activation_preflight_report: dict = {"pass": True, "reason": "disabled"}
         if beta6_authority_enabled:
             _ensure_beta6_authority_evidence_profile_default()
         policy = load_policy_from_env()
@@ -2913,6 +3000,24 @@ def train_files(file_paths: list[Path]):
                     elder_id,
                     preflight_report.get("reason"),
                     preflight_report,
+                )
+                for file_path in file_paths:
+                    archive_file(file_path, ARCHIVE_DATA_DIR)
+                return
+            runtime_preflight_ok, runtime_preflight_report = _validate_beta6_runtime_activation_preflight(
+                elder_id=elder_id,
+                registry=registry,
+            )
+            runtime_activation_preflight_report = {
+                "pass": bool(runtime_preflight_ok),
+                **(runtime_preflight_report if isinstance(runtime_preflight_report, dict) else {}),
+            }
+            if not runtime_preflight_ok:
+                logger.error(
+                    "Beta 6 runtime activation preflight failed for %s (reason=%s): %s",
+                    elder_id,
+                    runtime_preflight_report.get("reason") if isinstance(runtime_preflight_report, dict) else None,
+                    runtime_preflight_report,
                 )
                 for file_path in file_paths:
                     archive_file(file_path, ARCHIVE_DATA_DIR)
@@ -3337,6 +3442,7 @@ def train_files(file_paths: list[Path]):
                         "beta6_gate": beta6_gate_report,
                         "beta6_fallback": beta6_fallback_summary,
                         "beta6_phase4_runtime_policy": beta6_phase4_runtime_policy,
+                        "beta6_runtime_activation_preflight": runtime_activation_preflight_report,
                         "phase6_stability": phase6_stability_report,
                         "walk_forward_rolled_back_rooms": wf_rolled_back_rooms,
                         "walk_forward_deactivated_rooms": wf_deactivated_rooms,

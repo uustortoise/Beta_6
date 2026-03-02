@@ -5,3 +5,4 @@
 ### Policy
 - When adding or modifying any skill, follow `$skill-creator`.
 - Handoff summary frequency: provide one handoff summary for each commit pushed to GitHub.
+- Repo safety workflow override: concurrent background edits can occur; continue work when unexpected changes are in unrelated files, and only pause for user confirmation when the same files have conflicting edits or when a destructive operation is required.

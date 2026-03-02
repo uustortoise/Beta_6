@@ -171,6 +171,7 @@ def _friendly_gate_reason(reason_code: str) -> str:
         "gate_config_unavailable": "Safety settings are unavailable",
         "walk_forward_gate_failed": "Future-data safety check failed",
         "promotion_apply_failed": "Model passed checks but could not go live",
+        "routed_review_queue_uncertainty": "Routine uncertainty routed to Review Queue",
     }
     return reason_map.get(key, key.replace("_", " ").title() if key else "Unknown")
 
@@ -650,6 +651,27 @@ def fetch_active_system_banner() -> dict:
     }
 
 
+def render_active_system_banner(*, context_label: str = "", show_stage_details: bool = False) -> None:
+    """
+    Render active-system authority banner for Ops visibility.
+    """
+    banner = fetch_active_system_banner()
+    if not banner.get("visible", False):
+        return
+    banner_text = str(banner.get("text") or "").strip()
+    banner_level = str(banner.get("level") or "neutral")
+    started_at = banner.get("started_at")
+    if not banner_text:
+        return
+    context_prefix = f"{context_label} · " if str(context_label or "").strip() else ""
+    st.markdown(
+        _severity_badge(f"{context_prefix}Active System: {banner_text}", banner_level),
+        unsafe_allow_html=True,
+    )
+    if show_stage_details and started_at:
+        st.caption(f"Rollout stage: {banner.get('stage', 'unknown')} | Started: {started_at}")
+
+
 @st.cache_data(ttl=60)
 def fetch_shadow_divergence_monitor(elder_id: str, days: int = 30, limit: int = 60) -> dict:
     """
@@ -719,11 +741,16 @@ def render_ml_health_snapshot_panel(snapshot: dict, panel_scope: str = "weekly",
     generated_at = report.get("generated_at")
     primary = _ml_snapshot_primary_room(rooms)
 
-    st.markdown(
+    status_badges = (
         _severity_badge(f"Safety Status: {_ml_snapshot_label(overall_status)}", _ml_snapshot_level(overall_status))
-        + _severity_badge(f"Reason: {overall_reason}", _ml_snapshot_level(overall_status)),
-        unsafe_allow_html=True,
+        + _severity_badge(f"Reason: {overall_reason}", _ml_snapshot_level(overall_status))
     )
+    if str(status.get("reason_code") or "").strip().lower() == "routed_review_queue_uncertainty":
+        status_badges += _severity_badge(
+            "Routing: Review Queue (Not Today Clinical Alerts)",
+            "warn",
+        )
+    st.markdown(status_badges, unsafe_allow_html=True)
     if generated_at or freshness_hours is not None:
         freshness_text = "N/A" if freshness_hours is None else f"{float(freshness_hours):.1f}h"
         st.caption(f"Generated: {generated_at or 'N/A'} | Data freshness: {freshness_text}")
@@ -2619,15 +2646,7 @@ def load_adl_sensor_training_dataset(resident_id: str) -> pd.DataFrame:
 
 # --- UI ---
 st.title("🧠 Beta_5 Model Studio & Data Center")
-rollout_banner = fetch_active_system_banner()
-if rollout_banner.get("visible", False):
-    banner_text = str(rollout_banner.get("text") or "").strip()
-    banner_level = str(rollout_banner.get("level") or "neutral")
-    started_at = rollout_banner.get("started_at")
-    if banner_text:
-        st.markdown(_severity_badge(f"Active System: {banner_text}", banner_level), unsafe_allow_html=True)
-        if started_at:
-            st.caption(f"Rollout stage: {rollout_banner.get('stage', 'unknown')} | Started: {started_at}")
+render_active_system_banner(show_stage_details=True)
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(
     [
@@ -4254,6 +4273,7 @@ with tab3:
             index=available_residents.index(selected_resident) if 'selected_resident' in locals() and selected_resident in available_residents else 0,
             key="model_health_resident",
         )
+        render_active_system_banner(context_label="Weekly View", show_stage_details=False)
         st.markdown("#### 📋 Weekly Report: ML Health Snapshot")
         st.caption(
             "Read-only summary of balanced score, transition quality, safety thresholds, and confidence."
@@ -4266,6 +4286,7 @@ with tab3:
         render_ml_health_snapshot_panel(weekly_snapshot, panel_scope="weekly", compact=False)
         st.markdown("---")
 
+        render_active_system_banner(context_label="Shadow Comparison", show_stage_details=False)
         st.markdown("#### 🔍 Shadow Divergence Diagnostics")
         st.caption(
             "Compares legacy vs Beta 6 room-gate outcomes. Reason text is shown first; technical trace is expandable."
@@ -5054,6 +5075,7 @@ with tab4:
     st.header("🏠 Household Overview (Global Behavior)")
     
     st.info("This view aggregates data from ALL rooms to determine the overall state of the home (e.g. Empty, Active, Resting).")
+    render_active_system_banner(context_label="Today View", show_stage_details=False)
     st.markdown("#### 🩺 Today: ML Health Snapshot")
     today_snapshot_residents = get_ml_snapshot_residents()
     if today_snapshot_residents:

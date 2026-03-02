@@ -404,6 +404,37 @@ def test_beta6_authority_stage4_error_does_not_report_nonexistent_paths(monkeypa
     assert report["phase4_dynamic_gate"]["rejection_artifact_path"] is None
 
 
+def test_beta6_authority_stage4_invalid_payload_fails_closed(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr("run_daily_analysis._is_beta6_authority_enabled", lambda: True)
+    monkeypatch.setenv("BETA6_GATE_SIGNING_KEY", "test-live-key")
+    monkeypatch.setattr(
+        "run_daily_analysis._beta6_gate_artifact_output_dir",
+        lambda elder_id, run_id, registry_v2: tmp_path,  # noqa: ARG005
+    )
+
+    def _invalid_payload(self, **kwargs):  # noqa: ANN001, ARG001
+        return {"unexpected": "payload"}
+
+    monkeypatch.setattr(run_daily_analysis.Beta6Orchestrator, "run_phase4_dynamic_gate", _invalid_payload)
+    metrics = [{"room": "Bedroom", "gate_pass": True, "gate_reasons": []}]
+    registry = _RegistryV2Stub()
+
+    gate_pass, report = run_daily_analysis._apply_beta6_gate_authority(
+        metrics=metrics,
+        elder_id="HK001",
+        run_id="r_live_invalid_payload",
+        registry_v2=registry,
+    )
+
+    assert gate_pass is False
+    assert report["pass"] is False
+    assert report["reason_code"] == "fail_gate_policy"
+    assert report["phase4_dynamic_gate"]["status"] == "error"
+    assert "invalid_phase4_dynamic_gate_artifacts_payload" in str(report["phase4_dynamic_gate"]["error"])
+    assert report["phase4_dynamic_gate"]["evaluation_report_path"] is None
+    assert report["phase4_dynamic_gate"]["rejection_artifact_path"] is None
+
+
 def test_publish_runtime_policy_artifact_writes_room_activation(monkeypatch, tmp_path: Path):
     registry = run_daily_analysis.RegistryV2(root=tmp_path)
     elder_id = "HK001"

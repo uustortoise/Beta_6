@@ -206,3 +206,68 @@ def test_build_room_status_insufficient_evidence_from_gate_reason():
     )
     assert status == "action_needed"
     assert reason_code == "insufficient_evidence_gate"
+
+
+def test_build_room_status_routes_routine_uncertainty_to_watch():
+    payload = {
+        "room": "bedroom",
+        "last_check_time": "2026-02-27T12:00:00Z",
+        "fallback_active": False,
+        "metrics": {
+            "candidate_macro_f1_mean": 0.74,
+            "candidate_transition_macro_f1_mean": 0.88,
+            "candidate_stability_accuracy_mean": 0.995,
+        },
+        "thresholds": {
+            "min_transition_f1": {"value": 0.80},
+            "min_stability_accuracy": {"value": 0.99},
+            "max_transition_low_folds": {"value": 1},
+            "min_minority_support": {"value": 3},
+        },
+        "support": {
+            "fold_count": 5,
+            "candidate_low_support_folds": 0,
+            "candidate_low_transition_folds": 0,
+        },
+        "gate": {"pass": False, "reasons": ["beta6_reason:fail_uncertainty_low_confidence"]},
+    }
+    status, reason, reason_code = build_room_status(
+        payload,
+        global_release_threshold=0.65,
+        hours_since_fn=lambda _v: 1.0,
+    )
+    assert status == "watch"
+    assert reason_code == "routed_review_queue_uncertainty"
+    assert "Review Queue" in reason
+
+
+def test_build_room_status_keeps_action_needed_for_non_uncertainty_gate_failures():
+    payload = {
+        "room": "bedroom",
+        "last_check_time": "2026-02-27T12:00:00Z",
+        "fallback_active": False,
+        "metrics": {
+            "candidate_macro_f1_mean": 0.74,
+            "candidate_transition_macro_f1_mean": 0.88,
+            "candidate_stability_accuracy_mean": 0.995,
+        },
+        "thresholds": {
+            "min_transition_f1": {"value": 0.80},
+            "min_stability_accuracy": {"value": 0.99},
+            "max_transition_low_folds": {"value": 1},
+            "min_minority_support": {"value": 3},
+        },
+        "support": {
+            "fold_count": 5,
+            "candidate_low_support_folds": 0,
+            "candidate_low_transition_folds": 0,
+        },
+        "gate": {"pass": False, "reasons": ["transition_guard_failed:bedroom"]},
+    }
+    status, _, reason_code = build_room_status(
+        payload,
+        global_release_threshold=0.65,
+        hours_since_fn=lambda _v: 1.0,
+    )
+    assert status == "action_needed"
+    assert reason_code == "gate_failed"

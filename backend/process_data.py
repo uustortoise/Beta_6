@@ -4,6 +4,7 @@ import json
 import pandas as pd
 import logging
 import fcntl
+import numpy as np
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -109,6 +110,273 @@ def get_elder_id_from_filename(filename: str) -> str:
     )
     canonical = choose_canonical_elder_id(lineage_candidates)
     return apply_canonical_alias_map(canonical or parsed)
+
+
+def _env_enabled(var_name: str, default: bool = False) -> bool:
+    raw = os.getenv(var_name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def _normalize_activity_token(value) -> str:
+    return str(value or "").strip().lower()
+
+
+def _infer_occupancy_prob(activity_label: str, confidence: float) -> float:
+    label = _normalize_activity_token(activity_label)
+    try:
+        conf = float(confidence)
+    except (TypeError, ValueError):
+        conf = 0.5
+    conf = float(np.clip(conf, 0.0, 1.0))
+    if label in {"unoccupied", "inactive", "out"}:
+        return float(np.clip(1.0 - conf, 0.0, 1.0))
+    if label in {"unknown", "low_confidence"}:
+        return 0.5
+    return float(np.clip(max(conf, 0.5), 0.0, 1.0))
+
+
+def _pre_persistence_arbitration_enabled() -> bool:
+    if os.getenv("ENABLE_PRE_PERSISTENCE_ARBITRATION") is not None:
+        return _env_enabled("ENABLE_PRE_PERSISTENCE_ARBITRATION", default=False)
+    return _env_enabled("ENABLE_BETA6_AUTHORITY", default=False)
+
+
+def _apply_event_decoder_stability(room_name: str, pred_df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """
+    Optional room-level stability smoothing before cross-room arbitration.
+    """
+    if not _env_enabled("ENABLE_PRE_PERSISTENCE_EVENT_DECODER", default=False):
+        return pred_df, 0
+    if not {"timestamp", "predicted_activity"}.issubset(pred_df.columns):
+        return pred_df, 0
+    if "predicted_top1_label" not in pred_df.columns or "predicted_top1_prob" not in pred_df.columns:
+        return pred_df, 0
+
+    try:
+        from ml.event_decoder import DecoderConfig, EventDecoder
+
+        n = len(pred_df)
+        if n == 0:
+            return pred_df, 0
+
+        timestamps = pd.to_datetime(pred_df["timestamp"], errors="coerce")
+        if timestamps.isna().all():
+            return pred_df, 0
+
+        labels: set[str] = set(
+            _normalize_activity_token(x)
+            for x in pred_df.get("predicted_top1_label", [])
+            if _normalize_activity_token(x)
+        )
+        labels.update(
+            _normalize_activity_token(x)
+            for x in pred_df.get("predicted_top2_label", [])
+            if _normalize_activity_token(x)
+        )
+        labels.update(
+            _normalize_activity_token(x)
+            for x in pred_df.get("predicted_activity", [])
+            if _normalize_activity_token(x)
+        )
+        labels.discard("unoccupied")
+        if not labels:
+            return pred_df, 0
+
+        activity_probs: dict[str, np.ndarray] = {
+            label: np.zeros(n, dtype=float) for label in sorted(labels)
+        }
+        top1_prob = pd.to_numeric(pred_df.get("predicted_top1_prob"), errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        top2_prob = pd.to_numeric(pred_df.get("predicted_top2_prob"), errors="coerce").fillna(0.0).to_numpy(dtype=float)
+        confidence = pd.to_numeric(pred_df.get("confidence"), errors="coerce").fillna(0.5).to_numpy(dtype=float)
+
+        top1_label = pred_df.get("predicted_top1_label", pd.Series(index=pred_df.index, dtype=object)).astype(str).str.strip().str.lower()
+        top2_label = pred_df.get("predicted_top2_label", pd.Series(index=pred_df.index, dtype=object)).astype(str).str.strip().str.lower()
+        pred_label = pred_df.get("predicted_activity", pd.Series(index=pred_df.index, dtype=object)).astype(str).str.strip().str.lower()
+
+        for idx in range(n):
+            label1 = _normalize_activity_token(top1_label.iloc[idx])
+            label2 = _normalize_activity_token(top2_label.iloc[idx])
+            if label1 in activity_probs:
+                activity_probs[label1][idx] = max(activity_probs[label1][idx], float(np.clip(top1_prob[idx], 0.0, 1.0)))
+            if label2 in activity_probs:
+                activity_probs[label2][idx] = max(activity_probs[label2][idx], float(np.clip(top2_prob[idx], 0.0, 1.0)))
+            chosen = _normalize_activity_token(pred_label.iloc[idx])
+            if chosen in activity_probs:
+                activity_probs[chosen][idx] = max(activity_probs[chosen][idx], float(np.clip(confidence[idx], 0.0, 1.0)))
+
+        occupancy_probs = np.asarray(
+            [
+                _infer_occupancy_prob(activity_label=pred_label.iloc[idx], confidence=confidence[idx])
+                for idx in range(n)
+            ],
+            dtype=float,
+        )
+
+        decoder = EventDecoder(
+            DecoderConfig(
+                occupancy_on_threshold=float(os.getenv("PRE_PERSIST_DECODER_ON_THRESHOLD", "0.60")),
+                occupancy_off_threshold=float(os.getenv("PRE_PERSIST_DECODER_OFF_THRESHOLD", "0.40")),
+                hysteresis_min_windows=max(1, int(os.getenv("PRE_PERSIST_DECODER_MIN_WINDOWS", "2"))),
+                use_unknown_fallback=True,
+            )
+        )
+        decoded = decoder.decode_to_dataframe(
+            occupancy_probs=occupancy_probs,
+            activity_probs=activity_probs,
+            timestamps=[pd.Timestamp(ts).to_pydatetime() for ts in timestamps],
+            room_name=room_name,
+        )
+        if decoded.empty or "predicted_label" not in decoded.columns:
+            return pred_df, 0
+
+        out = pred_df.copy()
+        new_labels = decoded["predicted_label"].astype(str).to_numpy(dtype=object)
+        old_labels = out["predicted_activity"].astype(str).to_numpy(dtype=object)
+        if len(new_labels) != len(old_labels):
+            return pred_df, 0
+        out["predicted_activity"] = new_labels
+        if "confidence" in out.columns and "confidence" in decoded.columns:
+            out["confidence"] = pd.to_numeric(decoded["confidence"], errors="coerce").fillna(out["confidence"])
+        changes = int(np.sum(new_labels != old_labels))
+        return out, changes
+    except Exception as e:
+        logger.warning(f"Pre-persistence EventDecoder skipped for {room_name}: {e}")
+        return pred_df, 0
+
+
+def _apply_pre_persistence_arbitration(prediction_results: dict) -> tuple[dict, dict]:
+    """
+    Resolve cross-room contradictions before persisting ADL rows.
+    """
+    if not isinstance(prediction_results, dict) or not prediction_results:
+        return prediction_results, {"status": "skipped", "reason": "empty_prediction_results"}
+
+    adjusted: dict = {}
+    decoder_changes = 0
+    for room_name, pred_df in prediction_results.items():
+        if not isinstance(pred_df, pd.DataFrame):
+            adjusted[room_name] = pred_df
+            continue
+        if not {"timestamp", "predicted_activity"}.issubset(pred_df.columns):
+            adjusted[room_name] = pred_df
+            continue
+        room_df = pred_df.copy()
+        room_df["timestamp"] = pd.to_datetime(room_df["timestamp"], errors="coerce")
+        room_df = room_df[room_df["timestamp"].notna()].copy()
+        if room_df.empty:
+            adjusted[room_name] = room_df
+            continue
+        room_df, room_changes = _apply_event_decoder_stability(room_name, room_df)
+        decoder_changes += int(room_changes)
+        adjusted[room_name] = room_df
+
+    fusion_inputs: dict[str, pd.DataFrame] = {}
+    timestamp_set: set[pd.Timestamp] = set()
+    for room_name, room_df in adjusted.items():
+        if not isinstance(room_df, pd.DataFrame) or room_df.empty:
+            continue
+        if not {"timestamp", "predicted_activity"}.issubset(room_df.columns):
+            continue
+        confidence_series = pd.to_numeric(room_df.get("confidence"), errors="coerce").fillna(0.5)
+        fusion_df = pd.DataFrame(
+            {
+                "timestamp": pd.to_datetime(room_df["timestamp"], errors="coerce"),
+                "predicted_label": room_df["predicted_activity"].astype(str),
+                "confidence": confidence_series.astype(float),
+            }
+        ).dropna(subset=["timestamp"])
+        if fusion_df.empty:
+            continue
+        fusion_df["occupancy_prob"] = fusion_df.apply(
+            lambda row: _infer_occupancy_prob(row.get("predicted_label"), row.get("confidence")),
+            axis=1,
+        )
+        fusion_df = fusion_df.sort_values("timestamp", kind="stable").reset_index(drop=True)
+        fusion_inputs[room_name] = fusion_df
+        timestamp_set.update(pd.to_datetime(fusion_df["timestamp"], errors="coerce").dropna().tolist())
+
+    if len(fusion_inputs) < 2 or not timestamp_set:
+        return adjusted, {
+            "status": "skipped",
+            "reason": "insufficient_room_inputs",
+            "rooms": sorted(list(fusion_inputs.keys())),
+            "decoder_changes": int(decoder_changes),
+        }
+
+    try:
+        from ml.home_empty_fusion import HomeEmptyFusion
+
+        fusion = HomeEmptyFusion()
+        timestamps = sorted(pd.Timestamp(ts).to_pydatetime() for ts in timestamp_set)
+        fused_predictions = fusion.fuse(fusion_inputs, timestamps)
+    except Exception as e:
+        logger.warning(f"Pre-persistence HomeEmptyFusion skipped: {e}")
+        return adjusted, {
+            "status": "error",
+            "reason": "fusion_error",
+            "error": f"{type(e).__name__}: {e}",
+            "decoder_changes": int(decoder_changes),
+        }
+
+    non_exclusive_labels = {"inactive", "unoccupied", "out", "unknown", "low_confidence"}
+    contradictions = 0
+    adjustments = 0
+    alignment_seconds = max(1, int(os.getenv("PRE_PERSIST_ARBITRATION_ALIGNMENT_SECONDS", "15")))
+
+    for item in fused_predictions:
+        ts = pd.Timestamp(item.timestamp)
+        occupied_states = []
+        for state in item.room_states:
+            label = _normalize_activity_token(state.activity_label)
+            if not bool(state.is_occupied):
+                continue
+            if label in non_exclusive_labels:
+                continue
+            occupied_states.append(state)
+
+        if len(occupied_states) <= 1:
+            continue
+
+        contradictions += 1
+        winner = max(
+            occupied_states,
+            key=lambda state: (float(state.occupancy_prob), float(state.confidence)),
+        )
+
+        for state in occupied_states:
+            if state.room_name == winner.room_name:
+                continue
+            room_df = adjusted.get(state.room_name)
+            if not isinstance(room_df, pd.DataFrame) or room_df.empty:
+                continue
+            deltas = (pd.to_datetime(room_df["timestamp"], errors="coerce") - ts).abs()
+            if deltas.isna().all():
+                continue
+            nearest_idx = deltas.idxmin()
+            nearest_delta = deltas.loc[nearest_idx]
+            if pd.isna(nearest_delta) or nearest_delta > pd.Timedelta(seconds=alignment_seconds):
+                continue
+            current_label = _normalize_activity_token(room_df.at[nearest_idx, "predicted_activity"])
+            if current_label in non_exclusive_labels:
+                continue
+            room_df.at[nearest_idx, "predicted_activity"] = "unoccupied"
+            if "confidence" in room_df.columns:
+                room_df.at[nearest_idx, "confidence"] = min(
+                    float(pd.to_numeric(room_df.at[nearest_idx, "confidence"], errors="coerce") or 0.5),
+                    0.5,
+                )
+            adjustments += 1
+
+    return adjusted, {
+        "status": "ok",
+        "rooms": sorted(list(fusion_inputs.keys())),
+        "timestamps": int(len(timestamp_set)),
+        "contradiction_timestamps": int(contradictions),
+        "adjustments": int(adjustments),
+        "decoder_changes": int(decoder_changes),
+    }
 
 def generate_activity_segments(elder_id: str, prediction_results: dict):
     """
@@ -233,6 +501,28 @@ def process_file(file_path: Path):
         # 3. Save Predictions to DB as ADL Events
         if prediction_results:
             logger.info(f"Predictions generated for {len(prediction_results)} rooms")
+            if _pre_persistence_arbitration_enabled():
+                try:
+                    prediction_results, arbitration_report = _apply_pre_persistence_arbitration(
+                        prediction_results
+                    )
+                    logger.info(
+                        "Pre-persistence arbitration applied for %s: %s",
+                        elder_id,
+                        arbitration_report,
+                    )
+                except Exception as e:
+                    logger.exception(
+                        "Pre-persistence arbitration failed for %s: %s",
+                        elder_id,
+                        e,
+                    )
+                    if _env_enabled("PRE_PERSISTENCE_ARBITRATION_FAIL_CLOSED", default=False):
+                        raise
+                    logger.warning(
+                        "Continuing with original prediction persistence path because "
+                        "PRE_PERSISTENCE_ARBITRATION_FAIL_CLOSED=false."
+                    )
             
             # Save each room's predictions to adl_events table
             for room_name, pred_df in prediction_results.items():

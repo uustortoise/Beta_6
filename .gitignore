@@ -65,3 +65,7 @@ backend/logs/
 
 # Streamlit/cache
 backend/.streamlit/
+
+# Keep Beta6 source package tracked (excluded by broad data/ ignore above)
+!backend/ml/beta6/data/
+!backend/ml/beta6/data/*.py

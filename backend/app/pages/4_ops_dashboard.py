@@ -4,6 +4,7 @@ from pathlib import Path
 _backend = str(Path(__file__).resolve().parent.parent.parent)
 if _backend not in sys.path: sys.path.extend([_backend, str(Path(_backend).parent)])
 
+import altair as alt
 import pandas as pd
 import streamlit as st
 
@@ -19,6 +20,25 @@ def _format_metric(value) -> str:
         return f"{float(value):.3f}"
     except (TypeError, ValueError):
         return "N/A"
+
+
+def _friendly_gate_reason(raw: str) -> str:
+    txt = str(raw or "").strip()
+    if not txt:
+        return "None"
+    txt = txt.split(":")[0].replace("_", " ").replace(".", " ")
+    return " ".join(part for part in txt.split() if part)
+
+
+def _friendly_reasons_join(raw) -> str:
+    if not isinstance(raw, list) or not raw:
+        return "None"
+    parts = []
+    for item in raw:
+        reason = _friendly_gate_reason(str(item))
+        if reason:
+            parts.append(reason)
+    return "; ".join(parts) if parts else "None"
 
 
 def render():
@@ -136,8 +156,204 @@ def render():
                 room_texts.append(f"- **{str(r.get('room')).title()}**: {status_map.get(r_status, 'Unknown')}")
             for text in room_texts:
                 st.write(text)
-                
-                
+
+    if is_ml_mode:
+        st.markdown("---")
+        st.subheader("Section C2: Model Update Safety")
+        st.caption("Monitor pilot thresholds, gate blockers, and WF F1/accuracy progression over time.")
+
+        monitor_cfg1, monitor_cfg2 = st.columns([1, 1])
+        monitor_window_label = monitor_cfg1.selectbox(
+            "Time Window",
+            options=["Last 7 Days", "Last 30 Days", "Last 90 Days"],
+            index=1,
+            key="ops_promotion_gate_window",
+        )
+        monitor_days_map = {"Last 7 Days": 7, "Last 30 Days": 30, "Last 90 Days": 90}
+        monitor_days = monitor_days_map.get(monitor_window_label, 30)
+        monitor_limit = int(
+            monitor_cfg2.number_input(
+                "Recent Runs to Show",
+                min_value=10,
+                max_value=200,
+                value=60,
+                step=10,
+                key="ops_promotion_gate_max_runs",
+            )
+        )
+
+        with st.spinner("Fetching promotion safety trends..."):
+            monitor = ops_service.get_model_update_monitor(
+                elder_id=elder_id,
+                days=int(monitor_days),
+                limit=int(monitor_limit),
+            )
+
+        if monitor.get("total_runs", 0) == 0:
+            st.info("No recent training records found for this resident.")
+        else:
+            pass_rate_pct = monitor.get("wf_pass_rate_pct")
+            pass_rate_text = f"{pass_rate_pct:.1f}%" if pass_rate_pct is not None else "N/A"
+            top_reason = _friendly_gate_reason(monitor.get("top_failure_reason") or "")
+            blocked_runs = int(monitor.get("wf_fail_runs", 0))
+
+            latest_delta = monitor.get("latest_delta")
+            latest_delta_text = "No comparison yet"
+            if latest_delta and latest_delta.get("delta_vs_previous") is not None:
+                delta_value = float(latest_delta["delta_vs_previous"])
+                delta_room = latest_delta.get("room", "unknown")
+                if delta_value > 0:
+                    latest_delta_text = f"Improved ({delta_room})"
+                elif delta_value < 0:
+                    latest_delta_text = f"Dropped ({delta_room})"
+                else:
+                    latest_delta_text = f"No change ({delta_room})"
+
+            p1, p2, p3, p4 = st.columns(4)
+            p1.metric("Safe Update Rate", pass_rate_text)
+            p2.metric("Latest Change", latest_delta_text)
+            p3.metric("Most Common Blocker", top_reason)
+            p4.metric("Blocked Runs", blocked_runs)
+
+            latest_run = monitor.get("latest_run") or {}
+            if latest_run:
+                latest_accuracy = latest_run.get("accuracy")
+                latest_accuracy_txt = f"{float(latest_accuracy):.3f}" if latest_accuracy is not None else "N/A"
+                latest_run_id_txt = latest_run.get("run_id")
+                st.caption(
+                    f"Latest Run ID: {latest_run_id_txt if latest_run_id_txt is not None else 'N/A'} | "
+                    f"Latest run: {latest_run.get('training_date', 'N/A')} | "
+                    f"Result: {str(latest_run.get('status', 'N/A')).replace('_', ' ').title()} | "
+                    f"Run score: {latest_accuracy_txt}"
+                )
+
+            release_profile = monitor.get("release_gate_profile", {})
+            if isinstance(release_profile, dict) and release_profile:
+                st.markdown("#### Pilot Gate Profile")
+                rp1, rp2, rp3, rp4 = st.columns(4)
+                rp1.metric("WF Min Train Days", int(release_profile.get("wf_min_train_days", 7) or 7))
+                rp2.metric("WF Validation Days", int(release_profile.get("wf_valid_days", 1) or 1))
+                rp3.metric("Bootstrap Phase-1 Max Day", int(release_profile.get("bootstrap_phase1_max_days", 7) or 7))
+                rp4.metric("Bootstrap Max Day", int(release_profile.get("bootstrap_max_days", 14) or 14))
+
+                st.caption(
+                    f"Evidence profile: {release_profile.get('evidence_profile', 'unknown')} | "
+                    f"Strict prior drift max: {float(release_profile.get('strict_prior_drift_max', 0.10)):.2f}"
+                )
+
+                tracker_rows = release_profile.get("release_threshold_tracker", [])
+                if isinstance(tracker_rows, list) and tracker_rows:
+                    with st.expander("View Effective Release Thresholds", expanded=False):
+                        st.dataframe(pd.DataFrame(tracker_rows), hide_index=True, use_container_width=True)
+
+            room_trends = monitor.get("room_trends", [])
+            if room_trends:
+                trend_df = pd.DataFrame(room_trends)
+                trend_df["latest_reasons"] = trend_df["latest_reasons"].map(_friendly_reasons_join)
+                trend_df = trend_df.rename(
+                    columns={
+                        "room": "Room",
+                        "latest_run_id": "Run ID (Last Seen)",
+                        "latest_training_date": "Latest Training Time",
+                        "latest_pass": "Passed Safety Check",
+                        "latest_training_days": "Latest Training Days",
+                        "latest_required_threshold": "Required Threshold",
+                        "latest_threshold_day_bucket": "Threshold Day Bucket",
+                        "latest_candidate_macro_f1_mean": "Latest WF Candidate F1",
+                        "latest_candidate_accuracy_mean": "Latest WF Candidate Accuracy",
+                        "previous_candidate_macro_f1_mean": "Previous WF Candidate F1",
+                        "previous_candidate_accuracy_mean": "Previous WF Candidate Accuracy",
+                        "delta_vs_previous": "Change vs Previous",
+                        "latest_reasons": "Pause Reason",
+                    }
+                )
+                with st.expander("View Room-by-Room Details", expanded=False):
+                    st.dataframe(trend_df, hide_index=True, use_container_width=True)
+
+            room_history_points = monitor.get("room_history_points", [])
+            if isinstance(room_history_points, list) and room_history_points:
+                history_df = pd.DataFrame(room_history_points)
+                if "training_date" in history_df.columns:
+                    history_df["training_date"] = pd.to_datetime(history_df["training_date"], errors="coerce")
+                history_df = history_df.dropna(subset=["training_date"])
+                if not history_df.empty:
+                    st.markdown("#### F1/Accuracy Over Time")
+                    room_options = sorted(history_df["room"].dropna().astype(str).unique().tolist())
+                    selected_rooms = st.multiselect(
+                        "Rooms to Plot",
+                        options=room_options,
+                        default=room_options[: min(len(room_options), 6)],
+                        key="ops_promotion_trend_rooms",
+                    )
+                    if selected_rooms:
+                        history_df = history_df[history_df["room"].isin(selected_rooms)].copy()
+                    history_df = history_df.sort_values(["training_date", "run_id", "room"])
+
+                    f1_df = history_df[history_df["candidate_macro_f1_mean"].notna()].copy()
+                    acc_df = history_df[history_df["candidate_accuracy_mean"].notna()].copy()
+                    threshold_df = history_df[history_df["required_threshold"].notna()].copy()
+
+                    if not f1_df.empty:
+                        f1_chart = (
+                            alt.Chart(f1_df)
+                            .mark_line(point=True)
+                            .encode(
+                                x=alt.X("training_date:T", title="Training Time"),
+                                y=alt.Y("candidate_macro_f1_mean:Q", title="WF Candidate F1"),
+                                color=alt.Color("room:N", title="Room"),
+                                tooltip=[
+                                    alt.Tooltip("room:N", title="Room"),
+                                    alt.Tooltip("run_id:Q", title="Run ID"),
+                                    alt.Tooltip("training_date:T", title="Training Time"),
+                                    alt.Tooltip("candidate_macro_f1_mean:Q", title="WF Candidate F1", format=".3f"),
+                                    alt.Tooltip("required_threshold:Q", title="Required Threshold", format=".3f"),
+                                    alt.Tooltip("training_days:Q", title="Training Days", format=".1f"),
+                                ],
+                            )
+                            .properties(height=260)
+                        )
+                        if not threshold_df.empty:
+                            threshold_chart = (
+                                alt.Chart(threshold_df)
+                                .mark_line(point=False, strokeDash=[4, 4], opacity=0.55)
+                                .encode(
+                                    x=alt.X("training_date:T", title="Training Time"),
+                                    y=alt.Y("required_threshold:Q", title="WF Candidate F1"),
+                                    color=alt.Color("room:N", title="Room"),
+                                    tooltip=[
+                                        alt.Tooltip("room:N", title="Room"),
+                                        alt.Tooltip("run_id:Q", title="Run ID"),
+                                        alt.Tooltip("training_date:T", title="Training Time"),
+                                        alt.Tooltip("required_threshold:Q", title="Required Threshold", format=".3f"),
+                                        alt.Tooltip("training_days:Q", title="Training Days", format=".1f"),
+                                    ],
+                                )
+                                .properties(height=260)
+                            )
+                            st.altair_chart(f1_chart + threshold_chart, use_container_width=True)
+                        else:
+                            st.altair_chart(f1_chart, use_container_width=True)
+
+                    if not acc_df.empty:
+                        acc_chart = (
+                            alt.Chart(acc_df)
+                            .mark_line(point=True)
+                            .encode(
+                                x=alt.X("training_date:T", title="Training Time"),
+                                y=alt.Y("candidate_accuracy_mean:Q", title="WF Candidate Accuracy"),
+                                color=alt.Color("room:N", title="Room"),
+                                tooltip=[
+                                    alt.Tooltip("room:N", title="Room"),
+                                    alt.Tooltip("run_id:Q", title="Run ID"),
+                                    alt.Tooltip("training_date:T", title="Training Time"),
+                                    alt.Tooltip("candidate_accuracy_mean:Q", title="WF Candidate Accuracy", format=".3f"),
+                                    alt.Tooltip("training_days:Q", title="Training Days", format=".1f"),
+                                ],
+                            )
+                            .properties(height=260)
+                        )
+                        st.altair_chart(acc_chart, use_container_width=True)
+
     # 4. Hard Negatives
     st.markdown("---")
     st.subheader("Section D: Active Learning Queue")

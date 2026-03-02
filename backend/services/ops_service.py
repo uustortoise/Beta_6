@@ -1,5 +1,7 @@
 import json
 import logging
+import math
+import os
 import re
 import sys
 from datetime import datetime, timedelta
@@ -7,8 +9,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from config import get_room_config
+from config import get_release_gates_config, get_room_config
 from elderlycare_v1_16.config.settings import ARCHIVE_DATA_DIR
+from ml.release_gates import resolve_scheduled_threshold
 from utils.room_utils import normalize_room_name
 
 # Ensure backend and project root are in sys.path for health_server's backend.* imports
@@ -21,10 +24,497 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 from health_server import build_ml_snapshot_report
-from services.db_utils import get_dashboard_connection, parse_json_object, query_df
+from services.db_utils import coerce_bool, get_dashboard_connection, parse_json_object, query_df
 from utils.elder_id_utils import apply_canonical_alias_map, parse_elder_id_from_filename
 
 logger = logging.getLogger(__name__)
+
+
+def _to_float_or_none(value):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(parsed):
+        return None
+    return float(parsed)
+
+
+def _normalize_room_key(value: str) -> str:
+    normalized = normalize_room_name(value)
+    return normalized if isinstance(normalized, str) else ""
+
+
+def _resolve_schedule_day_bucket(schedule: list, training_days: float | None) -> str | None:
+    if training_days is None:
+        return None
+    for entry in schedule if isinstance(schedule, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        min_days = _to_float_or_none(entry.get("min_days"))
+        max_days = _to_float_or_none(entry.get("max_days"))
+        if min_days is None:
+            continue
+        in_bucket = float(training_days) >= float(min_days) and (
+            max_days is None or float(training_days) <= float(max_days)
+        )
+        if not in_bucket:
+            continue
+        if max_days is None:
+            return f"day_{int(min_days)}+"
+        return f"day_{int(min_days)}-{int(max_days)}"
+    return None
+
+
+def _derive_room_reports_from_metrics(metadata: dict, room_policy_map: dict) -> list[dict]:
+    metrics = metadata.get("metrics") if isinstance(metadata, dict) else None
+    if not isinstance(metrics, list):
+        return []
+
+    derived: list[dict] = []
+    for item in metrics:
+        if not isinstance(item, dict):
+            continue
+        room_name = str(item.get("room") or "").strip()
+        room_key = _normalize_room_key(room_name)
+        if not room_name or not room_key:
+            continue
+
+        candidate_macro = _to_float_or_none(item.get("macro_f1"))
+        candidate_acc = _to_float_or_none(item.get("accuracy"))
+        training_days = _to_float_or_none(item.get("training_days"))
+        room_schedule = (
+            room_policy_map.get(room_key, {}).get("schedule", [])
+            if isinstance(room_policy_map.get(room_key, {}), dict)
+            else []
+        )
+        threshold_required = (
+            resolve_scheduled_threshold(room_schedule, float(training_days))
+            if training_days is not None and isinstance(room_schedule, list)
+            else None
+        )
+
+        derived.append(
+            {
+                "room": room_name,
+                "pass": bool(item.get("gate_pass", False)),
+                "reasons": item.get("gate_reasons", []) if isinstance(item.get("gate_reasons"), list) else [],
+                "candidate_threshold_required": _to_float_or_none(threshold_required),
+                "training_days": training_days,
+                "candidate_summary": {
+                    "macro_f1_mean": candidate_macro,
+                    "accuracy_mean": candidate_acc,
+                    "stability_accuracy_mean": _to_float_or_none(item.get("candidate_stability_accuracy_mean")),
+                    "transition_macro_f1_mean": _to_float_or_none(item.get("candidate_transition_macro_f1_mean")),
+                },
+                "candidate_stability_accuracy_mean": _to_float_or_none(item.get("candidate_stability_accuracy_mean")),
+                "candidate_transition_macro_f1_mean": _to_float_or_none(item.get("candidate_transition_macro_f1_mean")),
+                "champion_macro_f1_mean": _to_float_or_none(item.get("champion_macro_f1_mean")),
+                "candidate_wf_config": item.get("candidate_wf_config", {})
+                if isinstance(item.get("candidate_wf_config"), dict)
+                else {},
+            }
+        )
+    return derived
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw in (None, ""):
+        return int(default)
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw in (None, ""):
+        return float(default)
+    try:
+        parsed = float(str(raw).strip())
+        return float(default) if math.isnan(parsed) else float(parsed)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _empty_model_update_monitor(error: str | None = None) -> dict:
+    payload = {
+        "total_runs": 0,
+        "wf_enabled_runs": 0,
+        "wf_pass_runs": 0,
+        "wf_fail_runs": 0,
+        "wf_pass_rate_pct": None,
+        "top_failure_reason": None,
+        "latest_delta": None,
+        "latest_run": None,
+        "room_trends": [],
+        "room_history_points": [],
+        "release_gate_profile": {},
+        "production_counters": {
+            "preprocessing_fail": 0,
+            "viability_fail": 0,
+            "statistical_validity_fail": 0,
+            "gate_fail": 0,
+            "promoted": 0,
+            "no_op_retrain_skip": 0,
+        },
+    }
+    if error:
+        payload["error"] = str(error)
+    return payload
+
+
+def get_model_update_monitor(elder_id: str, days: int = 30, limit: int = 60) -> dict:
+    """
+    Summarize promotion-gate outcomes and trend metrics for active Ops Dashboard monitoring.
+    """
+    elder_id = str(elder_id or "").strip()
+    if not elder_id:
+        return _empty_model_update_monitor()
+
+    days = max(1, int(days))
+    limit = max(1, min(int(limit), 200))
+    cutoff_date = datetime.now() - timedelta(days=days)
+
+    try:
+        history_df = query_df(
+            """
+            SELECT id, training_date, status, accuracy, metadata
+            FROM training_history
+            WHERE elder_id = ?
+              AND training_date >= ?
+            ORDER BY training_date DESC
+            LIMIT ?
+            """,
+            (elder_id, cutoff_date, limit),
+        )
+    except Exception as e:
+        logger.error(f"Failed to fetch model update monitor data for {elder_id}: {e}")
+        return _empty_model_update_monitor(error=str(e))
+
+    if history_df is None or history_df.empty:
+        return _empty_model_update_monitor()
+
+    total_runs = 0
+    wf_enabled_runs = 0
+    wf_pass_runs = 0
+    wf_fail_runs = 0
+    top_failure_counter: dict[str, int] = {}
+    latest_run = None
+    latest_run_id = None
+    room_history: dict[str, list[dict]] = {}
+    production_counters = {
+        "preprocessing_fail": 0,
+        "viability_fail": 0,
+        "statistical_validity_fail": 0,
+        "gate_fail": 0,
+        "promoted": 0,
+        "no_op_retrain_skip": 0,
+    }
+    latest_metadata: dict = {}
+    latest_training_days_by_room: dict[str, float] = {}
+    latest_training_days_global = None
+    try:
+        release_cfg = get_release_gates_config()
+    except Exception:
+        release_cfg = {}
+    release_gates_cfg = release_cfg.get("release_gates", {}) if isinstance(release_cfg, dict) else {}
+    room_policy_map = release_gates_cfg.get("rooms", {}) if isinstance(release_gates_cfg.get("rooms"), dict) else {}
+    global_schedule = (
+        release_gates_cfg.get("global", {}).get("schedule", [])
+        if isinstance(release_gates_cfg.get("global"), dict)
+        else []
+    )
+
+    for _, row in history_df.iterrows():
+        total_runs += 1
+        run_id = int(row.get("id")) if row.get("id") is not None else None
+        training_date = row.get("training_date")
+        run_status = str(row.get("status") or "")
+        run_accuracy = row.get("accuracy")
+        metadata = parse_json_object(row.get("metadata"))
+        gate_failed = False
+        if isinstance(metadata, dict):
+            run_failure_stage = str(metadata.get("run_failure_stage") or "").strip().lower()
+            if run_failure_stage == "preprocessing_contract_failed":
+                production_counters["preprocessing_fail"] += 1
+            elif run_failure_stage == "data_viability_failed":
+                production_counters["viability_fail"] += 1
+            elif run_failure_stage == "statistical_validity_failed":
+                production_counters["statistical_validity_fail"] += 1
+            elif run_failure_stage in {"global_gate_failed", "walk_forward_failed"}:
+                gate_failed = True
+        status_lower = run_status.strip().lower()
+        if status_lower in {"rejected_by_global_gate", "rejected_by_walk_forward_gate"}:
+            gate_failed = True
+        if gate_failed:
+            production_counters["gate_fail"] += 1
+        if status_lower == "no_op_same_fingerprint":
+            production_counters["no_op_retrain_skip"] += 1
+
+        metrics_list = metadata.get("metrics") if isinstance(metadata, dict) else None
+        if isinstance(metrics_list, list):
+            production_counters["promoted"] += int(
+                sum(1 for metric in metrics_list if bool((metric or {}).get("gate_pass", False)))
+            )
+
+        if latest_run is None:
+            latest_run_id = run_id
+            latest_metadata = metadata if isinstance(metadata, dict) else {}
+            latest_run = {
+                "run_id": run_id,
+                "training_date": str(training_date) if pd.notna(training_date) else None,
+                "status": run_status,
+                "accuracy": float(run_accuracy) if pd.notna(run_accuracy) else None,
+            }
+            if isinstance(metrics_list, list):
+                for metric in metrics_list:
+                    if not isinstance(metric, dict):
+                        continue
+                    room_name = str(metric.get("room") or "").strip()
+                    room_key = _normalize_room_key(room_name)
+                    training_days = _to_float_or_none(metric.get("training_days"))
+                    if room_key and training_days is not None:
+                        latest_training_days_by_room[room_key] = float(training_days)
+                if latest_training_days_by_room:
+                    latest_training_days_global = max(latest_training_days_by_room.values())
+
+        wf = metadata.get("walk_forward_gate", {}) if isinstance(metadata, dict) else {}
+        if not isinstance(wf, dict):
+            continue
+        if wf.get("reason") in (None, "disabled"):
+            continue
+
+        wf_enabled_runs += 1
+        if bool(wf.get("pass", False)):
+            wf_pass_runs += 1
+        else:
+            wf_fail_runs += 1
+
+        room_reports = wf.get("room_reports", [])
+        if not isinstance(room_reports, list) or len(room_reports) == 0:
+            room_reports = _derive_room_reports_from_metrics(metadata, room_policy_map)
+        if not isinstance(room_reports, list):
+            room_reports = []
+
+        for rr in room_reports:
+            if not isinstance(rr, dict):
+                continue
+            room_name = str(rr.get("room") or "").strip()
+            if not room_name:
+                continue
+            room_key = _normalize_room_key(room_name)
+
+            reasons = rr.get("reasons", [])
+            if isinstance(reasons, list):
+                for reason in reasons:
+                    reason_txt = str(reason or "").strip()
+                    if not reason_txt:
+                        continue
+                    reason_key = reason_txt.split(":")[0]
+                    top_failure_counter[reason_key] = top_failure_counter.get(reason_key, 0) + 1
+
+            candidate_summary = rr.get("candidate_summary", {})
+            candidate_f1 = None
+            candidate_accuracy = None
+            if isinstance(candidate_summary, dict):
+                candidate_f1 = candidate_summary.get("macro_f1_mean")
+                candidate_accuracy = candidate_summary.get("accuracy_mean")
+
+            threshold_required = _to_float_or_none(rr.get("candidate_threshold_required"))
+            training_days = _to_float_or_none(rr.get("training_days"))
+            room_schedule = (
+                room_policy_map.get(room_key, {}).get("schedule", [])
+                if isinstance(room_policy_map.get(room_key, {}), dict)
+                else []
+            )
+            if threshold_required is None and training_days is not None and isinstance(room_schedule, list):
+                threshold_required = _to_float_or_none(
+                    resolve_scheduled_threshold(room_schedule, float(training_days))
+                )
+            threshold_bucket = (
+                _resolve_schedule_day_bucket(room_schedule, training_days)
+                if isinstance(room_schedule, list)
+                else None
+            )
+
+            room_history.setdefault(room_name, []).append(
+                {
+                    "run_id": run_id,
+                    "training_date": str(training_date) if pd.notna(training_date) else None,
+                    "pass": bool(rr.get("pass", False)),
+                    "champion_version": int(rr.get("champion_version")) if rr.get("champion_version") is not None else None,
+                    "candidate_macro_f1_mean": float(candidate_f1) if candidate_f1 is not None else None,
+                    "candidate_accuracy_mean": float(candidate_accuracy) if candidate_accuracy is not None else None,
+                    "candidate_stability_accuracy_mean": (
+                        float(rr.get("candidate_stability_accuracy_mean"))
+                        if rr.get("candidate_stability_accuracy_mean") is not None
+                        else None
+                    ),
+                    "candidate_transition_macro_f1_mean": (
+                        float(rr.get("candidate_transition_macro_f1_mean"))
+                        if rr.get("candidate_transition_macro_f1_mean") is not None
+                        else None
+                    ),
+                    "champion_macro_f1_mean": (
+                        float(rr.get("champion_macro_f1_mean"))
+                        if rr.get("champion_macro_f1_mean") is not None
+                        else None
+                    ),
+                    "training_days": float(training_days) if training_days is not None else None,
+                    "required_threshold": float(threshold_required) if threshold_required is not None else None,
+                    "threshold_day_bucket": threshold_bucket,
+                    "reasons": reasons if isinstance(reasons, list) else [],
+                }
+            )
+
+    room_trends = []
+    room_history_points = []
+    for room_name, entries in room_history.items():
+        if not entries:
+            continue
+        for point in entries:
+            room_history_points.append(
+                {
+                    "room": room_name,
+                    "run_id": point.get("run_id"),
+                    "training_date": point.get("training_date"),
+                    "candidate_macro_f1_mean": point.get("candidate_macro_f1_mean"),
+                    "candidate_accuracy_mean": point.get("candidate_accuracy_mean"),
+                    "required_threshold": point.get("required_threshold"),
+                    "training_days": point.get("training_days"),
+                    "pass": bool(point.get("pass", False)),
+                }
+            )
+        latest = entries[0]
+        previous = entries[1] if len(entries) > 1 else None
+        latest_candidate = latest.get("candidate_macro_f1_mean")
+        previous_candidate = previous.get("candidate_macro_f1_mean") if previous else None
+        latest_candidate_accuracy = latest.get("candidate_accuracy_mean")
+        previous_candidate_accuracy = previous.get("candidate_accuracy_mean") if previous else None
+        delta = None
+        if latest_candidate is not None and previous_candidate is not None:
+            delta = float(latest_candidate) - float(previous_candidate)
+
+        evaluated_in_latest_run = bool(
+            latest_run_id is not None and latest.get("run_id") is not None and int(latest.get("run_id")) == int(latest_run_id)
+        )
+
+        room_trends.append(
+            {
+                "room": room_name,
+                "latest_run_id": latest.get("run_id"),
+                "latest_training_date": latest.get("training_date"),
+                "evaluated_in_latest_run": evaluated_in_latest_run,
+                "latest_pass": bool(latest.get("pass", False)),
+                "latest_candidate_macro_f1_mean": latest_candidate,
+                "latest_candidate_accuracy_mean": latest_candidate_accuracy,
+                "latest_candidate_stability_accuracy_mean": latest.get("candidate_stability_accuracy_mean"),
+                "latest_candidate_transition_macro_f1_mean": latest.get("candidate_transition_macro_f1_mean"),
+                "previous_candidate_macro_f1_mean": previous_candidate,
+                "previous_candidate_accuracy_mean": previous_candidate_accuracy,
+                "delta_vs_previous": delta,
+                "latest_training_days": latest.get("training_days"),
+                "latest_required_threshold": latest.get("required_threshold"),
+                "latest_threshold_day_bucket": latest.get("threshold_day_bucket"),
+                "latest_champion_version": latest.get("champion_version"),
+                "latest_champion_macro_f1_mean": latest.get("champion_macro_f1_mean"),
+                "latest_reasons": latest.get("reasons", []),
+            }
+        )
+
+    room_trends = sorted(room_trends, key=lambda x: x["room"])
+    room_history_points = sorted(
+        room_history_points,
+        key=lambda x: (
+            str(x.get("training_date") or ""),
+            int(x.get("run_id") or 0),
+            str(x.get("room") or ""),
+        ),
+    )
+    latest_delta = next((r for r in room_trends if r.get("delta_vs_previous") is not None), None)
+    top_failure_reason = None
+    if top_failure_counter:
+        top_failure_reason = sorted(top_failure_counter.items(), key=lambda x: (-x[1], x[0]))[0][0]
+
+    wf_pass_rate_pct = None
+    if wf_enabled_runs > 0:
+        wf_pass_rate_pct = (wf_pass_runs / wf_enabled_runs) * 100.0
+
+    global_required = None
+    global_bucket = None
+    latest_global_gate = (
+        latest_metadata.get("global_gate", {})
+        if isinstance(latest_metadata.get("global_gate"), dict)
+        else {}
+    )
+    if isinstance(latest_global_gate, dict):
+        global_required = _to_float_or_none(latest_global_gate.get("required"))
+    if global_required is None and latest_training_days_global is not None and isinstance(global_schedule, list):
+        global_required = _to_float_or_none(
+            resolve_scheduled_threshold(global_schedule, float(latest_training_days_global))
+        )
+    if isinstance(global_schedule, list):
+        global_bucket = _resolve_schedule_day_bucket(global_schedule, latest_training_days_global)
+
+    release_tracker_rows = []
+    release_tracker_rows.append(
+        {
+            "Scope": "Global",
+            "Training Days": latest_training_days_global,
+            "Required Threshold": global_required,
+            "Day Bucket": global_bucket,
+        }
+    )
+    for room_key in sorted(room_policy_map.keys()):
+        if not isinstance(room_policy_map.get(room_key), dict):
+            continue
+        room_schedule = room_policy_map.get(room_key, {}).get("schedule", [])
+        room_days = latest_training_days_by_room.get(_normalize_room_key(room_key))
+        room_required = (
+            _to_float_or_none(resolve_scheduled_threshold(room_schedule, float(room_days)))
+            if room_days is not None and isinstance(room_schedule, list)
+            else None
+        )
+        room_bucket = (
+            _resolve_schedule_day_bucket(room_schedule, room_days)
+            if isinstance(room_schedule, list)
+            else None
+        )
+        release_tracker_rows.append(
+            {
+                "Scope": str(room_key).title(),
+                "Training Days": room_days,
+                "Required Threshold": room_required,
+                "Day Bucket": room_bucket,
+            }
+        )
+
+    return {
+        "total_runs": int(total_runs),
+        "wf_enabled_runs": int(wf_enabled_runs),
+        "wf_pass_runs": int(wf_pass_runs),
+        "wf_fail_runs": int(wf_fail_runs),
+        "wf_pass_rate_pct": wf_pass_rate_pct,
+        "top_failure_reason": top_failure_reason,
+        "latest_delta": latest_delta,
+        "latest_run": latest_run,
+        "room_trends": room_trends,
+        "room_history_points": room_history_points,
+        "release_gate_profile": {
+            "evidence_profile": str(os.getenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")).strip() or "production",
+            "bootstrap_enabled": coerce_bool(os.getenv("RELEASE_GATE_BOOTSTRAP_ENABLED", False)),
+            "bootstrap_phase1_max_days": _env_int("RELEASE_GATE_BOOTSTRAP_PHASE1_MAX_DAYS", 7),
+            "bootstrap_max_days": _env_int("RELEASE_GATE_BOOTSTRAP_MAX_TRAINING_DAYS", 14),
+            "strict_prior_drift_max": _env_float("RELEASE_GATE_MAX_CLASS_PRIOR_DRIFT", 0.10),
+            "wf_min_train_days": _env_int("WF_MIN_TRAIN_DAYS", 7),
+            "wf_valid_days": _env_int("WF_VALID_DAYS", 1),
+            "release_threshold_tracker": release_tracker_rows,
+        },
+        "production_counters": production_counters,
+    }
 
 
 def _elder_id_from_training_filename(filename: str) -> str:

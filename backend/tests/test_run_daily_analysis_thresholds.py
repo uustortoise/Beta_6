@@ -840,6 +840,65 @@ def test_walk_forward_gate_marks_low_fold_support_watch_only_in_pilot(monkeypatc
     assert any("fold_support_failed:bedroom" in reason for reason in room_report["watch_reasons"])
 
 
+def test_walk_forward_gate_skips_training_low_support_rooms_in_pilot(monkeypatch):
+    monkeypatch.setenv("RELEASE_GATE_EVIDENCE_PROFILE", "pilot_stage_a")
+    monkeypatch.setattr(
+        "run_daily_analysis.get_release_gates_config",
+        lambda: {
+            "release_gates": {
+                "rooms": {"entrance": {"schedule": [{"min_days": 2, "max_days": None, "min_value": 0.65}]}},
+                "no_regress": {"max_drop_from_champion": 0.05, "exempt_rooms": []},
+            }
+        },
+    )
+
+    def _should_not_run(**kwargs):
+        raise AssertionError("walk-forward evaluation should be skipped for low-support pilot room")
+
+    monkeypatch.setattr("run_daily_analysis.load_room_training_dataframe", _should_not_run)
+    monkeypatch.setattr("run_daily_analysis._load_version_artifacts", _should_not_run)
+    monkeypatch.setattr("run_daily_analysis.evaluate_model_version", _should_not_run)
+
+    registry = MagicMock()
+    registry.get_current_version.return_value = 4
+    pipeline = MagicMock()
+    pipeline.room_config.calculate_seq_length.return_value = 5
+    pipeline.platform = MagicMock()
+
+    gate_pass, report = _evaluate_walk_forward_promotion_gate(
+        pipeline=pipeline,
+        registry=registry,
+        elder_id="elder_1",
+        metrics=[
+            {
+                "room": "Entrance",
+                "saved_version": 4,
+                "gate_pass": True,
+                "training_days": 7.0,
+                "gate_watch_reasons": [
+                    "insufficient_validation_support:entrance:3<10",
+                    "room_threshold_not_evaluable:entrance:support=3<required=10",
+                ],
+            }
+        ],
+        previous_versions={"Entrance": 3},
+    )
+
+    assert gate_pass is True
+    assert report["failed_rooms"] == []
+    room_report = next(r for r in report["room_reports"] if r["room"] == "Entrance")
+    assert room_report["pass"] is True
+    assert room_report["blocking_reasons"] == []
+    assert any(
+        "wf_skipped_low_support_from_training_gate:entrance" in reason
+        for reason in room_report["watch_reasons"]
+    )
+    assert any(
+        "insufficient_validation_support:entrance:3<10" in reason
+        for reason in room_report["watch_reasons"]
+    )
+
+
 def test_walk_forward_gate_rejects_split_metric_failures(monkeypatch):
     monkeypatch.setenv("WF_MIN_STABILITY_ACCURACY", "0.99")
     monkeypatch.setenv("WF_MAX_STABILITY_LOW_FOLDS", "0")

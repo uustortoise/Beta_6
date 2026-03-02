@@ -799,6 +799,11 @@ class TrainingPipeline:
             int(gate_policy.min_validation_class_support),
             max(0, int(required_minority_support)),
         )
+        pilot_relaxed_evidence = str(gate_policy.evidence_profile).strip().lower() in {
+            "pilot_stage_a",
+            "pilot_stage_b",
+        }
+        training_days_epsilon = 1e-3
         insufficient_validation_evidence = bool(candidate_metrics.get("insufficient_validation_evidence", False))
         validation_evaluable = (
             validation_min_support > 0
@@ -808,7 +813,7 @@ class TrainingPipeline:
 
         if isinstance(data_viability, dict) and not bool(data_viability.get("pass", True)):
             _add_blocking(f"data_viability_failed:{room_key}")
-        if training_days < float(gate_policy.min_training_days):
+        if training_days < (float(gate_policy.min_training_days) - training_days_epsilon):
             _add_blocking(
                 f"insufficient_training_days:{room_key}:{training_days:.4f}<{float(gate_policy.min_training_days):.4f}"
             )
@@ -892,12 +897,19 @@ class TrainingPipeline:
                     _add_watch(f"critical_label_recall_missing:{room_key}:{critical_label}")
                     continue
                 if support >= collapse_min_support and float(recall) <= collapse_recall_floor:
-                    _add_blocking(
+                    reason = (
                         f"critical_label_collapse:{room_key}:{critical_label}:{float(recall):.3f}"
                         f"<= {collapse_recall_floor:.3f}"
                     )
+                    if pilot_relaxed_evidence and not validation_evaluable:
+                        _add_watch(reason)
+                    else:
+                        _add_blocking(reason)
         promo_policy = self._active_policy().promotion_eligibility
-        if champion_meta is not None and training_days < float(promo_policy.min_training_days_with_champion):
+        if (
+            champion_meta is not None
+            and training_days < (float(promo_policy.min_training_days_with_champion) - training_days_epsilon)
+        ):
             _add_blocking(
                 f"promotion_ineligible_training_days:{room_key}:{training_days:.4f}<"
                 f"{float(promo_policy.min_training_days_with_champion):.4f}"

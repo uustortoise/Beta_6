@@ -2489,6 +2489,60 @@ def _evaluate_walk_forward_promotion_gate(
         training_days = float(metric.get("training_days", 0.0) or 0.0)
         reasons: list[str] = []
         watch_reasons: list[str] = []
+        metric_gate_watch_reasons = [str(r) for r in (metric.get("gate_watch_reasons") or [])]
+
+        metric_low_support_markers = (
+            "insufficient_validation_support:",
+            "room_threshold_not_evaluable:",
+            "insufficient_calibration_support:",
+            "calibration_low_support_fallback:",
+        )
+        metric_low_support_not_evaluable = any(
+            any(reason.startswith(prefix) for prefix in metric_low_support_markers)
+            for reason in metric_gate_watch_reasons
+        )
+
+        if pilot_relaxed_evidence and metric_low_support_not_evaluable:
+            skip_reason = f"wf_skipped_low_support_from_training_gate:{room_key}"
+            merged_watch = list(dict.fromkeys([skip_reason] + metric_gate_watch_reasons))
+            room_reports.append(
+                {
+                    "room": room,
+                    "candidate_version": candidate_version,
+                    "champion_version": previous_version,
+                    "candidate_summary": None,
+                    "candidate_low_folds": 0,
+                    "candidate_low_support_folds": 0,
+                    "candidate_low_stability_folds": 0,
+                    "candidate_low_transition_folds": 0,
+                    "candidate_transition_supported_folds": 0,
+                    "candidate_threshold_required": None,
+                    "candidate_wf_config": {
+                        "lookback_days": int(lookback_days),
+                        "step_days": int(room_step_days),
+                        "drift_threshold": float(room_drift_threshold),
+                        "max_low_folds": int(room_max_low_folds),
+                        "min_minority_support": int(room_min_minority_support),
+                        "min_stability_accuracy": float(room_min_stability_accuracy),
+                        "max_stability_low_folds": int(room_max_stability_low_folds),
+                        "min_transition_f1": float(room_min_transition_f1),
+                        "max_transition_low_folds": int(room_max_transition_low_folds),
+                        "observed_days": None,
+                        "required_days": None,
+                        "expected_folds": None,
+                    },
+                    "baseline_summary": None,
+                    "baseline_required_advantage": None,
+                    "champion_macro_f1_mean": None,
+                    "candidate_stability_accuracy_mean": None,
+                    "candidate_transition_macro_f1_mean": None,
+                    "pass": True,
+                    "reasons": list(merged_watch),
+                    "blocking_reasons": [],
+                    "watch_reasons": list(merged_watch),
+                }
+            )
+            continue
 
         def _add_reason(message: str, *, low_support: bool = False) -> None:
             if low_support and pilot_relaxed_evidence:

@@ -1002,6 +1002,82 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertTrue(any(r.startswith("critical_label_collapse:bedroom:unoccupied") for r in reasons))
 
     @patch('ml.training.get_release_gates_config')
+    def test_evaluate_release_gate_pilot_low_support_critical_collapse_is_watch_only(self, mock_get_policy):
+        mock_get_policy.return_value = {
+            "release_gates": {
+                "rooms": {
+                    "entrance": {
+                        "schedule": [
+                            {"min_days": 1, "max_days": None, "min_value": 0.2}
+                        ]
+                    }
+                },
+                "no_regress": {"max_drop_from_champion": 0.05, "exempt_rooms": []},
+            }
+        }
+        self.pipeline.policy.release_gate.evidence_profile = "pilot_stage_a"
+        self.pipeline._policy_snapshot = self.pipeline.policy
+        gate_pass, reasons = self.pipeline._evaluate_release_gate(
+            room_name="Entrance",
+            candidate_metrics={
+                "macro_f1": 0.9,
+                "training_days": 8.0,
+                "samples": 300,
+                "metric_source": "holdout_validation",
+                "validation_min_class_support": 3,
+                "required_minority_support": 10,
+                "per_label_recall": {
+                    "out": 1.0,
+                    "unoccupied": 0.0,
+                },
+                "per_label_support": {
+                    "out": 3,
+                    "unoccupied": 100,
+                },
+            },
+            champion_meta=None,
+        )
+        self.assertTrue(gate_pass)
+        self.assertFalse(any(r.startswith("critical_label_collapse:entrance:unoccupied") for r in reasons))
+        self.assertTrue(
+            any(
+                r.startswith("critical_label_collapse:entrance:unoccupied")
+                for r in self.pipeline._last_release_gate_watch_reasons
+            )
+        )
+
+    @patch('ml.training.get_release_gates_config')
+    def test_evaluate_release_gate_training_days_tolerance_avoids_false_promotion_block(self, mock_get_policy):
+        mock_get_policy.return_value = {
+            "release_gates": {
+                "rooms": {
+                    "room1": {
+                        "schedule": [
+                            {"min_days": 1, "max_days": None, "min_value": 0.2}
+                        ]
+                    }
+                },
+                "no_regress": {"max_drop_from_champion": 0.20, "exempt_rooms": []},
+            }
+        }
+        self.pipeline.policy.promotion_eligibility.min_training_days_with_champion = 7.0
+        self.pipeline.policy.release_gate.min_training_days = 7.0
+        self.pipeline._policy_snapshot = self.pipeline.policy
+        champion_meta = {"version": 2, "metrics": {"macro_f1": 0.8}}
+        gate_pass, reasons = self.pipeline._evaluate_release_gate(
+            room_name="room1",
+            candidate_metrics={
+                "macro_f1": 0.9,
+                "training_days": 6.9997,
+                "samples": 300,
+            },
+            champion_meta=champion_meta,
+        )
+        self.assertTrue(gate_pass)
+        self.assertFalse(any(r.startswith("insufficient_training_days:room1") for r in reasons))
+        self.assertFalse(any(r.startswith("promotion_ineligible_training_days:room1") for r in reasons))
+
+    @patch('ml.training.get_release_gates_config')
     def test_evaluate_release_gate_blocks_missing_critical_validation_support(self, mock_get_policy):
         mock_get_policy.return_value = {
             "release_gates": {

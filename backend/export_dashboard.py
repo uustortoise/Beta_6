@@ -17,6 +17,7 @@ from ml.pipeline import UnifiedPipeline
 from ml.registry import ModelRegistry
 from ml.evaluation import TimeCheckpointedSplitter, evaluate_model, load_room_training_dataframe
 from ml.policy_config import load_policy_from_env
+from ml.release_gates import resolve_scheduled_threshold
 from ml.household_analyzer import HouseholdAnalyzer
 from ml.hard_negative_mining import (
     ensure_hard_negative_table,
@@ -1590,6 +1591,89 @@ def fetch_correction_evaluation_history(elder_filter=None, days=ALL_TIME_DAYS):
         return pd.DataFrame()
 
 
+def _to_float_or_none(value):
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if np.isnan(parsed):
+        return None
+    return float(parsed)
+
+
+def _resolve_schedule_day_bucket(schedule: list, training_days: float | None) -> str | None:
+    if training_days is None:
+        return None
+    for entry in schedule if isinstance(schedule, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        min_days = _to_float_or_none(entry.get("min_days"))
+        max_days = _to_float_or_none(entry.get("max_days"))
+        if min_days is None:
+            continue
+        in_bucket = float(training_days) >= float(min_days) and (
+            max_days is None or float(training_days) <= float(max_days)
+        )
+        if not in_bucket:
+            continue
+        if max_days is None:
+            return f"day_{int(min_days)}+"
+        return f"day_{int(min_days)}-{int(max_days)}"
+    return None
+
+
+def _derive_room_reports_from_metrics(metadata: dict, room_policy_map: dict) -> list[dict]:
+    metrics = metadata.get("metrics") if isinstance(metadata, dict) else None
+    if not isinstance(metrics, list):
+        return []
+
+    derived: list[dict] = []
+    for item in metrics:
+        if not isinstance(item, dict):
+            continue
+        room_name = str(item.get("room") or "").strip()
+        room_key = _normalize_room_key(room_name)
+        if not room_name or not room_key:
+            continue
+
+        candidate_macro = _to_float_or_none(item.get("macro_f1"))
+        candidate_acc = _to_float_or_none(item.get("accuracy"))
+        training_days = _to_float_or_none(item.get("training_days"))
+        room_schedule = (
+            room_policy_map.get(room_key, {}).get("schedule", [])
+            if isinstance(room_policy_map.get(room_key, {}), dict)
+            else []
+        )
+        threshold_required = (
+            resolve_scheduled_threshold(room_schedule, float(training_days))
+            if training_days is not None and isinstance(room_schedule, list)
+            else None
+        )
+
+        derived.append(
+            {
+                "room": room_name,
+                "pass": bool(item.get("gate_pass", False)),
+                "reasons": item.get("gate_reasons", []) if isinstance(item.get("gate_reasons"), list) else [],
+                "candidate_threshold_required": _to_float_or_none(threshold_required),
+                "training_days": training_days,
+                "candidate_summary": {
+                    "macro_f1_mean": candidate_macro,
+                    "accuracy_mean": candidate_acc,
+                    "stability_accuracy_mean": _to_float_or_none(item.get("candidate_stability_accuracy_mean")),
+                    "transition_macro_f1_mean": _to_float_or_none(item.get("candidate_transition_macro_f1_mean")),
+                },
+                "candidate_stability_accuracy_mean": _to_float_or_none(item.get("candidate_stability_accuracy_mean")),
+                "candidate_transition_macro_f1_mean": _to_float_or_none(item.get("candidate_transition_macro_f1_mean")),
+                "champion_macro_f1_mean": _to_float_or_none(item.get("champion_macro_f1_mean")),
+                "candidate_wf_config": item.get("candidate_wf_config", {})
+                if isinstance(item.get("candidate_wf_config"), dict)
+                else {},
+            }
+        )
+    return derived
+
+
 @st.cache_data(ttl=60)
 def fetch_promotion_gate_monitor(elder_id: str, days: int = 30, limit: int = 60) -> dict:
     """
@@ -1695,6 +1779,20 @@ def fetch_promotion_gate_monitor(elder_id: str, days: int = 30, limit: int = 60)
         "promoted": 0,
         "no_op_retrain_skip": 0,
     }
+    latest_metadata: dict = {}
+    latest_training_days_by_room: dict[str, float] = {}
+    latest_training_days_global = None
+    try:
+        release_cfg = get_release_gates_config()
+    except Exception:
+        release_cfg = {}
+    release_gates_cfg = release_cfg.get("release_gates", {}) if isinstance(release_cfg, dict) else {}
+    room_policy_map = release_gates_cfg.get("rooms", {}) if isinstance(release_gates_cfg.get("rooms"), dict) else {}
+    global_schedule = (
+        release_gates_cfg.get("global", {}).get("schedule", [])
+        if isinstance(release_gates_cfg.get("global"), dict)
+        else []
+    )
 
     for _, row in history_df.iterrows():
         total_runs += 1
@@ -1729,12 +1827,24 @@ def fetch_promotion_gate_monitor(elder_id: str, days: int = 30, limit: int = 60)
 
         if latest_run is None:
             latest_run_id = run_id
+            latest_metadata = metadata if isinstance(metadata, dict) else {}
             latest_run = {
                 "run_id": run_id,
                 "training_date": str(training_date) if pd.notna(training_date) else None,
                 "status": run_status,
                 "accuracy": float(run_accuracy) if pd.notna(run_accuracy) else None,
             }
+            if isinstance(metrics_list, list):
+                for metric in metrics_list:
+                    if not isinstance(metric, dict):
+                        continue
+                    room_name = str(metric.get("room") or "").strip()
+                    room_key = _normalize_room_key(room_name)
+                    training_days = _to_float_or_none(metric.get("training_days"))
+                    if room_key and training_days is not None:
+                        latest_training_days_by_room[room_key] = float(training_days)
+                if latest_training_days_by_room:
+                    latest_training_days_global = max(latest_training_days_by_room.values())
 
         wf = metadata.get("walk_forward_gate", {}) if isinstance(metadata, dict) else {}
         if not isinstance(wf, dict):
@@ -1749,8 +1859,10 @@ def fetch_promotion_gate_monitor(elder_id: str, days: int = 30, limit: int = 60)
             wf_fail_runs += 1
 
         room_reports = wf.get("room_reports", [])
+        if not isinstance(room_reports, list) or len(room_reports) == 0:
+            room_reports = _derive_room_reports_from_metrics(metadata, room_policy_map)
         if not isinstance(room_reports, list):
-            continue
+            room_reports = []
 
         for rr in room_reports:
             if not isinstance(rr, dict):
@@ -1758,6 +1870,7 @@ def fetch_promotion_gate_monitor(elder_id: str, days: int = 30, limit: int = 60)
             room_name = str(rr.get("room") or "").strip()
             if not room_name:
                 continue
+            room_key = _normalize_room_key(room_name)
 
             reasons = rr.get("reasons", [])
             if isinstance(reasons, list):
@@ -1770,8 +1883,26 @@ def fetch_promotion_gate_monitor(elder_id: str, days: int = 30, limit: int = 60)
 
             candidate_summary = rr.get("candidate_summary", {})
             candidate_f1 = None
+            candidate_accuracy = None
             if isinstance(candidate_summary, dict):
                 candidate_f1 = candidate_summary.get("macro_f1_mean")
+                candidate_accuracy = candidate_summary.get("accuracy_mean")
+            threshold_required = _to_float_or_none(rr.get("candidate_threshold_required"))
+            training_days = _to_float_or_none(rr.get("training_days"))
+            room_schedule = (
+                room_policy_map.get(room_key, {}).get("schedule", [])
+                if isinstance(room_policy_map.get(room_key, {}), dict)
+                else []
+            )
+            if threshold_required is None and training_days is not None and isinstance(room_schedule, list):
+                threshold_required = _to_float_or_none(
+                    resolve_scheduled_threshold(room_schedule, float(training_days))
+                )
+            threshold_bucket = (
+                _resolve_schedule_day_bucket(room_schedule, training_days)
+                if isinstance(room_schedule, list)
+                else None
+            )
 
             room_history.setdefault(room_name, []).append(
                 {
@@ -1780,6 +1911,7 @@ def fetch_promotion_gate_monitor(elder_id: str, days: int = 30, limit: int = 60)
                     "pass": bool(rr.get("pass", False)),
                     "champion_version": int(rr.get("champion_version")) if rr.get("champion_version") is not None else None,
                     "candidate_macro_f1_mean": float(candidate_f1) if candidate_f1 is not None else None,
+                    "candidate_accuracy_mean": float(candidate_accuracy) if candidate_accuracy is not None else None,
                     "candidate_stability_accuracy_mean": (
                         float(rr.get("candidate_stability_accuracy_mean"))
                         if rr.get("candidate_stability_accuracy_mean") is not None
@@ -1795,18 +1927,37 @@ def fetch_promotion_gate_monitor(elder_id: str, days: int = 30, limit: int = 60)
                         if rr.get("champion_macro_f1_mean") is not None
                         else None
                     ),
+                    "training_days": float(training_days) if training_days is not None else None,
+                    "required_threshold": float(threshold_required) if threshold_required is not None else None,
+                    "threshold_day_bucket": threshold_bucket,
                     "reasons": reasons if isinstance(reasons, list) else [],
                 }
             )
 
     room_trends = []
+    room_history_points = []
     for room_name, entries in room_history.items():
         if not entries:
             continue
+        for point in entries:
+            room_history_points.append(
+                {
+                    "room": room_name,
+                    "run_id": point.get("run_id"),
+                    "training_date": point.get("training_date"),
+                    "candidate_macro_f1_mean": point.get("candidate_macro_f1_mean"),
+                    "candidate_accuracy_mean": point.get("candidate_accuracy_mean"),
+                    "required_threshold": point.get("required_threshold"),
+                    "training_days": point.get("training_days"),
+                    "pass": bool(point.get("pass", False)),
+                }
+            )
         latest = entries[0]
         previous = entries[1] if len(entries) > 1 else None
         latest_candidate = latest.get("candidate_macro_f1_mean")
         previous_candidate = previous.get("candidate_macro_f1_mean") if previous else None
+        latest_candidate_accuracy = latest.get("candidate_accuracy_mean")
+        previous_candidate_accuracy = previous.get("candidate_accuracy_mean") if previous else None
         delta = None
         if latest_candidate is not None and previous_candidate is not None:
             delta = float(latest_candidate) - float(previous_candidate)
@@ -1823,10 +1974,15 @@ def fetch_promotion_gate_monitor(elder_id: str, days: int = 30, limit: int = 60)
                 "evaluated_in_latest_run": evaluated_in_latest_run,
                 "latest_pass": bool(latest.get("pass", False)),
                 "latest_candidate_macro_f1_mean": latest_candidate,
+                "latest_candidate_accuracy_mean": latest_candidate_accuracy,
                 "latest_candidate_stability_accuracy_mean": latest.get("candidate_stability_accuracy_mean"),
                 "latest_candidate_transition_macro_f1_mean": latest.get("candidate_transition_macro_f1_mean"),
                 "previous_candidate_macro_f1_mean": previous_candidate,
+                "previous_candidate_accuracy_mean": previous_candidate_accuracy,
                 "delta_vs_previous": delta,
+                "latest_training_days": latest.get("training_days"),
+                "latest_required_threshold": latest.get("required_threshold"),
+                "latest_threshold_day_bucket": latest.get("threshold_day_bucket"),
                 "latest_champion_version": latest.get("champion_version"),
                 "latest_champion_macro_f1_mean": latest.get("champion_macro_f1_mean"),
                 "latest_reasons": latest.get("reasons", []),
@@ -1834,6 +1990,14 @@ def fetch_promotion_gate_monitor(elder_id: str, days: int = 30, limit: int = 60)
         )
 
     room_trends = sorted(room_trends, key=lambda x: x["room"])
+    room_history_points = sorted(
+        room_history_points,
+        key=lambda x: (
+            str(x.get("training_date") or ""),
+            int(x.get("run_id") or 0),
+            str(x.get("room") or ""),
+        ),
+    )
     latest_delta = next((r for r in room_trends if r.get("delta_vs_previous") is not None), None)
     top_failure_reason = None
     if top_failure_counter:
@@ -1842,6 +2006,55 @@ def fetch_promotion_gate_monitor(elder_id: str, days: int = 30, limit: int = 60)
     wf_pass_rate_pct = None
     if wf_enabled_runs > 0:
         wf_pass_rate_pct = (wf_pass_runs / wf_enabled_runs) * 100.0
+
+    global_required = None
+    global_bucket = None
+    latest_global_gate = (
+        latest_metadata.get("global_gate", {})
+        if isinstance(latest_metadata.get("global_gate"), dict)
+        else {}
+    )
+    if isinstance(latest_global_gate, dict):
+        global_required = _to_float_or_none(latest_global_gate.get("required"))
+    if global_required is None and latest_training_days_global is not None and isinstance(global_schedule, list):
+        global_required = _to_float_or_none(
+            resolve_scheduled_threshold(global_schedule, float(latest_training_days_global))
+        )
+    if isinstance(global_schedule, list):
+        global_bucket = _resolve_schedule_day_bucket(global_schedule, latest_training_days_global)
+
+    release_tracker_rows = []
+    release_tracker_rows.append(
+        {
+            "Scope": "Global",
+            "Training Days": latest_training_days_global,
+            "Required Threshold": global_required,
+            "Day Bucket": global_bucket,
+        }
+    )
+    for room_key in sorted(room_policy_map.keys()):
+        if not isinstance(room_policy_map.get(room_key), dict):
+            continue
+        room_schedule = room_policy_map.get(room_key, {}).get("schedule", [])
+        room_days = latest_training_days_by_room.get(_normalize_room_key(room_key))
+        room_required = (
+            _to_float_or_none(resolve_scheduled_threshold(room_schedule, float(room_days)))
+            if room_days is not None and isinstance(room_schedule, list)
+            else None
+        )
+        room_bucket = (
+            _resolve_schedule_day_bucket(room_schedule, room_days)
+            if isinstance(room_schedule, list)
+            else None
+        )
+        release_tracker_rows.append(
+            {
+                "Scope": str(room_key).title(),
+                "Training Days": room_days,
+                "Required Threshold": room_required,
+                "Day Bucket": room_bucket,
+            }
+        )
 
     return {
         "total_runs": int(total_runs),
@@ -1853,6 +2066,17 @@ def fetch_promotion_gate_monitor(elder_id: str, days: int = 30, limit: int = 60)
         "latest_delta": latest_delta,
         "latest_run": latest_run,
         "room_trends": room_trends,
+        "room_history_points": room_history_points,
+        "release_gate_profile": {
+            "evidence_profile": str(os.getenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")).strip() or "production",
+            "bootstrap_enabled": _coerce_bool(os.getenv("RELEASE_GATE_BOOTSTRAP_ENABLED", False)),
+            "bootstrap_phase1_max_days": _env_int("RELEASE_GATE_BOOTSTRAP_PHASE1_MAX_DAYS", 7),
+            "bootstrap_max_days": _env_int("RELEASE_GATE_BOOTSTRAP_MAX_TRAINING_DAYS", 14),
+            "strict_prior_drift_max": _env_float("RELEASE_GATE_MAX_CLASS_PRIOR_DRIFT", 0.10),
+            "wf_min_train_days": _env_int("WF_MIN_TRAIN_DAYS", 7),
+            "wf_valid_days": _env_int("WF_VALID_DAYS", 1),
+            "release_threshold_tracker": release_tracker_rows,
+        },
         "production_counters": production_counters,
     }
 
@@ -4418,6 +4642,36 @@ with tab3:
                     f"Run score: {latest_accuracy_txt}"
                 )
 
+            release_profile = monitor.get("release_gate_profile", {})
+            if isinstance(release_profile, dict):
+                st.markdown("#### 🧭 Pilot Gate Profile")
+                profile_level = "good" if str(release_profile.get("evidence_profile", "")).startswith("pilot") else "warn"
+                st.markdown(
+                    _severity_badge(f"Evidence Profile: {release_profile.get('evidence_profile', 'unknown')}", profile_level)
+                    + _severity_badge(
+                        f"Bootstrap: {'ON' if bool(release_profile.get('bootstrap_enabled', False)) else 'OFF'}",
+                        "good" if bool(release_profile.get("bootstrap_enabled", False)) else "warn",
+                    )
+                    + _severity_badge(
+                        f"Strict Prior Drift Max: {float(release_profile.get('strict_prior_drift_max', 0.10)):.2f}",
+                        "neutral",
+                    ),
+                    unsafe_allow_html=True,
+                )
+                rp1, rp2, rp3, rp4 = st.columns(4)
+                rp1.metric("WF Min Train Days", int(release_profile.get("wf_min_train_days", 7) or 7))
+                rp2.metric("WF Validation Days", int(release_profile.get("wf_valid_days", 1) or 1))
+                rp3.metric("Bootstrap Phase-1 Max Day", int(release_profile.get("bootstrap_phase1_max_days", 7) or 7))
+                rp4.metric("Bootstrap Max Day", int(release_profile.get("bootstrap_max_days", 14) or 14))
+
+                tracker_rows = release_profile.get("release_threshold_tracker", [])
+                if isinstance(tracker_rows, list) and tracker_rows:
+                    with st.expander("View Effective Release Thresholds", expanded=False):
+                        st.caption(
+                            "Computed from backend/config/release_gates.json using latest available training-days evidence."
+                        )
+                        st.dataframe(pd.DataFrame(tracker_rows), hide_index=True, use_container_width=True)
+
             room_trends = monitor.get("room_trends", [])
             blocked_cards_latest = [
                 row
@@ -4466,10 +4720,15 @@ with tab3:
                         "status_text": "Status",
                         "latest_training_date": "Latest Training Time",
                         "latest_pass": "Passed Safety Check",
+                        "latest_training_days": "Latest Training Days",
+                        "latest_required_threshold": "Required Threshold",
+                        "latest_threshold_day_bucket": "Threshold Day Bucket",
                         "latest_candidate_macro_f1_mean": "Latest WF Candidate F1",
+                        "latest_candidate_accuracy_mean": "Latest WF Candidate Accuracy",
                         "latest_candidate_stability_accuracy_mean": "Latest Stability Score",
                         "latest_candidate_transition_macro_f1_mean": "Latest Transition Score",
                         "previous_candidate_macro_f1_mean": "Previous WF Candidate F1",
+                        "previous_candidate_accuracy_mean": "Previous WF Candidate Accuracy",
                         "delta_vs_previous": "Change vs Previous",
                         "latest_champion_macro_f1_mean": "Current Champion WF F1",
                         "latest_reasons": "Pause Reason",
@@ -4483,6 +4742,93 @@ with tab3:
                         unsafe_allow_html=True,
                     )
                     st.dataframe(trend_df, hide_index=True, use_container_width=True)
+
+            room_history_points = monitor.get("room_history_points", [])
+            if isinstance(room_history_points, list) and room_history_points:
+                history_df = pd.DataFrame(room_history_points)
+                if "training_date" in history_df.columns:
+                    history_df["training_date"] = pd.to_datetime(history_df["training_date"], errors="coerce")
+                history_df = history_df.dropna(subset=["training_date"])
+                if not history_df.empty:
+                    st.markdown("#### 📈 F1/Accuracy Over Time")
+                    room_options = sorted(history_df["room"].dropna().astype(str).unique().tolist())
+                    default_rooms = room_options[: min(len(room_options), 6)]
+                    selected_trend_rooms = st.multiselect(
+                        "Rooms to Plot",
+                        options=room_options,
+                        default=default_rooms,
+                        key="promotion_trend_rooms",
+                    )
+                    if selected_trend_rooms:
+                        history_df = history_df[history_df["room"].isin(selected_trend_rooms)].copy()
+                    history_df = history_df.sort_values(["training_date", "run_id", "room"])
+
+                    f1_df = history_df[history_df["candidate_macro_f1_mean"].notna()].copy()
+                    acc_df = history_df[history_df["candidate_accuracy_mean"].notna()].copy()
+                    threshold_df = history_df[history_df["required_threshold"].notna()].copy()
+
+                    if not f1_df.empty:
+                        f1_chart = (
+                            alt.Chart(f1_df)
+                            .mark_line(point=True)
+                            .encode(
+                                x=alt.X("training_date:T", title="Training Time"),
+                                y=alt.Y("candidate_macro_f1_mean:Q", title="WF Candidate F1"),
+                                color=alt.Color("room:N", title="Room"),
+                                tooltip=[
+                                    alt.Tooltip("room:N", title="Room"),
+                                    alt.Tooltip("run_id:Q", title="Run ID"),
+                                    alt.Tooltip("training_date:T", title="Training Time"),
+                                    alt.Tooltip("candidate_macro_f1_mean:Q", title="WF Candidate F1", format=".3f"),
+                                    alt.Tooltip("required_threshold:Q", title="Required Threshold", format=".3f"),
+                                    alt.Tooltip("training_days:Q", title="Training Days", format=".1f"),
+                                    alt.Tooltip("pass:N", title="Passed"),
+                                ],
+                            )
+                            .properties(height=260)
+                        )
+                        if not threshold_df.empty:
+                            threshold_chart = (
+                                alt.Chart(threshold_df)
+                                .mark_line(point=False, strokeDash=[4, 4], opacity=0.55)
+                                .encode(
+                                    x=alt.X("training_date:T", title="Training Time"),
+                                    y=alt.Y("required_threshold:Q", title="WF Candidate F1"),
+                                    color=alt.Color("room:N", title="Room"),
+                                    tooltip=[
+                                        alt.Tooltip("room:N", title="Room"),
+                                        alt.Tooltip("run_id:Q", title="Run ID"),
+                                        alt.Tooltip("training_date:T", title="Training Time"),
+                                        alt.Tooltip("required_threshold:Q", title="Required Threshold", format=".3f"),
+                                        alt.Tooltip("training_days:Q", title="Training Days", format=".1f"),
+                                    ],
+                                )
+                                .properties(height=260)
+                            )
+                            st.altair_chart(f1_chart + threshold_chart, use_container_width=True)
+                        else:
+                            st.altair_chart(f1_chart, use_container_width=True)
+
+                    if not acc_df.empty:
+                        acc_chart = (
+                            alt.Chart(acc_df)
+                            .mark_line(point=True)
+                            .encode(
+                                x=alt.X("training_date:T", title="Training Time"),
+                                y=alt.Y("candidate_accuracy_mean:Q", title="WF Candidate Accuracy"),
+                                color=alt.Color("room:N", title="Room"),
+                                tooltip=[
+                                    alt.Tooltip("room:N", title="Room"),
+                                    alt.Tooltip("run_id:Q", title="Run ID"),
+                                    alt.Tooltip("training_date:T", title="Training Time"),
+                                    alt.Tooltip("candidate_accuracy_mean:Q", title="WF Candidate Accuracy", format=".3f"),
+                                    alt.Tooltip("training_days:Q", title="Training Days", format=".1f"),
+                                    alt.Tooltip("pass:N", title="Passed"),
+                                ],
+                            )
+                            .properties(height=260)
+                        )
+                        st.altair_chart(acc_chart, use_container_width=True)
 
         st.markdown("---")
         st.markdown("#### 🔧 Runtime Load Mode (Migration Coverage)")

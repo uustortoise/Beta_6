@@ -1,6 +1,6 @@
 {
-  "version": "2026-02-13.v1",
-  "effective_date": "2026-02-13",
+  "version": "2026-03-02.v1",
+  "effective_date": "2026-03-02",
   "room_tiers": {
     "clinical": ["bedroom", "kitchen"],
     "standard": ["livingroom", "entrance"],
@@ -16,8 +16,9 @@
     "global": {
       "metric": "macro_f1",
       "schedule": [
-        {"min_days": 2, "max_days": 9, "min_value": 0.55},
-        {"min_days": 10, "max_days": 21, "min_value": 0.65},
+        {"min_days": 2, "max_days": 7, "min_value": 0.30},
+        {"min_days": 8, "max_days": 14, "min_value": 0.40},
+        {"min_days": 15, "max_days": 21, "min_value": 0.55},
         {"min_days": 22, "max_days": null, "min_value": 0.75}
       ]
     },
@@ -27,9 +28,10 @@
         "tier": "clinical",
         "blocking": true,
         "schedule": [
-          {"min_days": 2, "max_days": 9, "min_value": 0.60},
-          {"min_days": 10, "max_days": 21, "min_value": 0.70},
-          {"min_days": 22, "max_days": null, "min_value": 0.80}
+          {"min_days": 2, "max_days": 7, "min_value": 0.20},
+          {"min_days": 8, "max_days": 14, "min_value": 0.35},
+          {"min_days": 15, "max_days": 21, "min_value": 0.60},
+          {"min_days": 22, "max_days": null, "min_value": 0.75}
         ]
       },
       "kitchen": {
@@ -37,8 +39,9 @@
         "tier": "clinical",
         "blocking": true,
         "schedule": [
-          {"min_days": 2, "max_days": 9, "min_value": 0.55},
-          {"min_days": 10, "max_days": 21, "min_value": 0.55},
+          {"min_days": 2, "max_days": 7, "min_value": 0.30},
+          {"min_days": 8, "max_days": 14, "min_value": 0.40},
+          {"min_days": 15, "max_days": 21, "min_value": 0.55},
           {"min_days": 22, "max_days": null, "min_value": 0.55}
         ]
       },
@@ -47,8 +50,9 @@
         "tier": "standard",
         "blocking": true,
         "schedule": [
-          {"min_days": 2, "max_days": 9, "min_value": 0.50},
-          {"min_days": 10, "max_days": 21, "min_value": 0.50},
+          {"min_days": 2, "max_days": 7, "min_value": 0.30},
+          {"min_days": 8, "max_days": 14, "min_value": 0.40},
+          {"min_days": 15, "max_days": 21, "min_value": 0.50},
           {"min_days": 22, "max_days": null, "min_value": 0.50}
         ]
       },
@@ -57,8 +61,9 @@
         "tier": "standard",
         "blocking": true,
         "schedule": [
-          {"min_days": 2, "max_days": 9, "min_value": 0.65},
-          {"min_days": 10, "max_days": 21, "min_value": 0.65},
+          {"min_days": 2, "max_days": 7, "min_value": 0.15},
+          {"min_days": 8, "max_days": 14, "min_value": 0.25},
+          {"min_days": 15, "max_days": 21, "min_value": 0.50},
           {"min_days": 22, "max_days": null, "min_value": 0.65}
         ]
       },

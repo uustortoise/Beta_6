@@ -91,6 +91,140 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertGreater(float(debug.get("transition_count", 0)), 0.0)
         self.assertGreater(float(np.max(weights)), 1.0)
 
+    @patch("ml.training.precision_recall_curve")
+    def test_calibrate_two_stage_stage_a_threshold_uses_stage_a_bounds(self, mock_pr_curve):
+        n = 80
+        occupied_probs = np.linspace(0.55, 0.16, 40, dtype=np.float32)
+        unoccupied_probs = np.linspace(0.33, 0.01, 40, dtype=np.float32)
+        p_occ = np.concatenate([occupied_probs, unoccupied_probs]).astype(np.float32)
+        stage_a_probs = np.stack([1.0 - p_occ, p_occ], axis=1).astype(np.float32)
+
+        stage_a_model = MagicMock()
+        stage_a_model.predict.return_value = stage_a_probs
+        X_calib = np.zeros((n, 5, 3), dtype=np.float32)
+        y_calib = np.concatenate([np.ones(40, dtype=np.int32), np.zeros(40, dtype=np.int32)])
+
+        # Force deterministic threshold selection (raw threshold=0.22).
+        mock_pr_curve.return_value = (
+            np.array([0.98, 0.90, 0.70], dtype=np.float32),
+            np.array([0.30, 0.60, 1.00], dtype=np.float32),
+            np.array([0.22, 0.12], dtype=np.float32),
+        )
+        two_stage_result = {
+            "enabled": True,
+            "stage_a_model": stage_a_model,
+            "occupied_class_ids": [1],
+        }
+        with patch.dict(
+            os.environ,
+            {
+                "THRESHOLD_FLOOR": "0.35",
+                "TWO_STAGE_CORE_STAGE_A_TARGET_PRECISION": "0.95",
+                "TWO_STAGE_CORE_STAGE_A_RECALL_FLOOR": "0.20",
+                "TWO_STAGE_CORE_STAGE_A_THRESHOLD_MIN": "0.00",
+                "TWO_STAGE_CORE_STAGE_A_THRESHOLD_MAX": "0.95",
+                "TWO_STAGE_CORE_STAGE_A_MIN_PRED_OCCUPIED_RATIO": "0.00",
+                "TWO_STAGE_CORE_STAGE_A_MIN_PRED_OCCUPIED_ABS": "0.00",
+            },
+            clear=False,
+        ):
+            result = self.pipeline._calibrate_two_stage_stage_a_threshold(
+                room_name="room1",
+                two_stage_result=two_stage_result,
+                calibration_data=(X_calib, y_calib),
+            )
+
+        self.assertEqual(result.get("source"), "calibration")
+        self.assertAlmostEqual(float(result.get("threshold", 0.0)), 0.22, places=6)
+        self.assertLess(float(result.get("threshold", 0.0)), 0.35)
+        self.assertEqual((result.get("threshold_bounds") or {}).get("min"), 0.0)
+        self.assertEqual((result.get("threshold_bounds") or {}).get("max"), 0.95)
+        self.assertFalse(bool(result.get("predicted_occupied_floor_adjusted", False)))
+
+    @patch("ml.training.precision_recall_curve")
+    def test_calibrate_two_stage_stage_a_threshold_applies_predicted_occupied_floor(self, mock_pr_curve):
+        n = 80
+        occupied_probs = np.linspace(0.95, 0.20, 40, dtype=np.float32)
+        unoccupied_probs = np.linspace(0.80, 0.05, 40, dtype=np.float32)
+        p_occ = np.concatenate([occupied_probs, unoccupied_probs]).astype(np.float32)
+        stage_a_probs = np.stack([1.0 - p_occ, p_occ], axis=1).astype(np.float32)
+
+        stage_a_model = MagicMock()
+        stage_a_model.predict.return_value = stage_a_probs
+        X_calib = np.zeros((n, 5, 3), dtype=np.float32)
+        y_calib = np.concatenate([np.ones(40, dtype=np.int32), np.zeros(40, dtype=np.int32)])
+
+        # Force high raw threshold selection (0.90) so occupancy-rate guardrail must adjust downward.
+        mock_pr_curve.return_value = (
+            np.array([1.00, 0.95, 0.70], dtype=np.float32),
+            np.array([0.20, 0.50, 1.00], dtype=np.float32),
+            np.array([0.90, 0.40], dtype=np.float32),
+        )
+        two_stage_result = {
+            "enabled": True,
+            "stage_a_model": stage_a_model,
+            "occupied_class_ids": [1],
+        }
+        with patch.dict(
+            os.environ,
+            {
+                "TWO_STAGE_CORE_STAGE_A_TARGET_PRECISION": "0.99",
+                "TWO_STAGE_CORE_STAGE_A_RECALL_FLOOR": "0.20",
+                "TWO_STAGE_CORE_STAGE_A_THRESHOLD_MIN": "0.00",
+                "TWO_STAGE_CORE_STAGE_A_THRESHOLD_MAX": "0.95",
+                "TWO_STAGE_CORE_STAGE_A_MIN_PRED_OCCUPIED_RATIO": "1.00",
+                "TWO_STAGE_CORE_STAGE_A_MIN_PRED_OCCUPIED_ABS": "0.80",
+            },
+            clear=False,
+        ):
+            result = self.pipeline._calibrate_two_stage_stage_a_threshold(
+                room_name="room1",
+                two_stage_result=two_stage_result,
+                calibration_data=(X_calib, y_calib),
+            )
+
+        self.assertEqual(result.get("source"), "calibration")
+        self.assertTrue(bool(result.get("predicted_occupied_floor_adjusted", False)))
+        self.assertIn("pred_occ_floor", str(result.get("status", "")))
+        self.assertLess(float(result.get("threshold", 1.0)), 0.90)
+        self.assertGreaterEqual(
+            float(result.get("predicted_occupied_rate", 0.0)),
+            float(result.get("min_predicted_occupied_rate", 0.0)) - 1e-6,
+        )
+
+    def test_summarize_gate_aligned_validation_detects_collapse(self):
+        self.mock_platform.label_encoders["room1"].classes_ = np.array(["unoccupied", "sleep"], dtype=object)
+        y_true = np.asarray(([0] * 40) + ([1] * 40), dtype=np.int32)
+        # Fully collapsed prediction to class-0.
+        y_pred_probs = np.tile(np.asarray([[0.99, 0.01]], dtype=np.float32), (len(y_true), 1))
+        with patch.object(self.pipeline, "_resolve_critical_labels", return_value=["sleep"]):
+            summary = self.pipeline._summarize_gate_aligned_validation(
+                room_name="room1",
+                y_true=y_true,
+                y_pred_probs=y_pred_probs,
+            )
+        self.assertTrue(bool(summary.get("collapsed")))
+        self.assertAlmostEqual(float(summary.get("dominant_class_share", 0.0)), 1.0, places=6)
+        self.assertEqual(str(summary.get("dominant_class_label")), "unoccupied")
+        self.assertLess(
+            float(summary.get("gate_aligned_score", 1.0)),
+            float(summary.get("macro_f1", 0.0)) + 1e-8,
+        )
+
+    def test_build_collapse_retry_class_weights_boosts_critical_minority(self):
+        self.mock_platform.label_encoders["room1"].classes_ = np.array(["unoccupied", "sleep"], dtype=object)
+        y_train = np.asarray(([0] * 90) + ([1] * 10), dtype=np.int32)
+        base = {0: 1.0, 1: 1.0}
+        with patch.object(self.pipeline, "_resolve_critical_labels", return_value=["sleep"]):
+            weights = self.pipeline._build_collapse_retry_class_weights(
+                room_name="room1",
+                y_train=y_train,
+                base_class_weights=base,
+            )
+        self.assertIn(0, weights)
+        self.assertIn(1, weights)
+        self.assertGreater(float(weights[1]), float(weights[0]))
+
     def test_write_decision_trace_persists_latest_and_versioned(self):
         with TemporaryDirectory() as tmp:
             models_dir = Path(tmp)
@@ -1308,6 +1442,166 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertFalse(any(r.startswith("label_recall_missing:bedroom:sleeping") for r in reasons))
         self.assertFalse(any(r.startswith("label_recall_failed:bedroom:sleeping") for r in reasons))
 
+    def test_compute_class_prior_drift_reports_max_abs_shift(self):
+        drift = self.pipeline._compute_class_prior_drift(
+            {
+                "train_class_support_pre_sampling": {"0": 200, "1": 800},
+                "minority_sampling": {
+                    "class_counts_after": {"0": 200, "1": 800},
+                },
+                "validation_class_support": {"0": 700, "1": 300},
+                "validation_min_class_support": 300,
+                "required_minority_support": 5,
+                "insufficient_validation_evidence": False,
+            }
+        )
+        self.assertTrue(drift["available"])
+        self.assertTrue(drift["evaluable"])
+        self.assertEqual(drift.get("drift_source"), "pre_sampling_train_vs_validation")
+        self.assertEqual(drift["max_drift_class"], "1")
+        self.assertAlmostEqual(float(drift["max_abs_drift"]), 0.5, places=6)
+        self.assertAlmostEqual(float(drift.get("sampled_max_abs_drift", 0.0)), 0.5, places=6)
+
+    def test_compute_class_prior_drift_prefers_pre_sampling_counts_over_sampled(self):
+        drift = self.pipeline._compute_class_prior_drift(
+            {
+                "train_class_support_pre_sampling": {"0": 800, "1": 200},
+                "train_class_support_post_minority_sampling": {"0": 500, "1": 500},
+                "validation_class_support": {"0": 500, "1": 500},
+                "validation_min_class_support": 300,
+                "required_minority_support": 5,
+            }
+        )
+        self.assertTrue(drift["available"])
+        self.assertEqual(drift.get("drift_source"), "pre_sampling_train_vs_validation")
+        self.assertAlmostEqual(float(drift.get("max_abs_drift", 0.0)), 0.3, places=6)
+        self.assertAlmostEqual(float(drift.get("sampled_max_abs_drift", 1.0)), 0.0, places=6)
+
+    @patch.dict(
+        os.environ,
+        {
+            "TEMPORAL_SPLIT_OPTIMIZE_DRIFT": "true",
+            "TEMPORAL_SPLIT_DRIFT_DISTANCE_PENALTY": "0.0",
+            "TEMPORAL_SPLIT_MAX_SHIFT_FRACTION": "0.20",
+            "TEMPORAL_SPLIT_MIN_HOLDOUT_FRACTION": "0.10",
+            "TEMPORAL_SPLIT_MIN_TRAIN_FRACTION": "0.60",
+        },
+        clear=False,
+    )
+    def test_select_temporal_split_can_shift_to_reduce_prior_drift(self):
+        y_seq = np.asarray(
+            [0] * 150 + [1] * 250 + [2] * 400 + [0] * 20 + [1] * 140 + [2] * 40,
+            dtype=np.int32,
+        )
+        def _max_abs_drift(split_idx: int) -> float:
+            train = y_seq[:split_idx]
+            holdout = y_seq[split_idx:]
+            values = []
+            for class_id in (0, 1, 2):
+                train_share = float(np.mean(train == class_id))
+                holdout_share = float(np.mean(holdout == class_id))
+                values.append(abs(train_share - holdout_share))
+            return float(max(values))
+
+        selected, debug = self.pipeline._select_temporal_split_index_with_support(
+            y_seq=y_seq,
+            default_split_idx=800,
+            required_class_ids=[0, 1, 2],
+            min_support=5,
+        )
+        self.assertNotEqual(int(selected), 800)
+        self.assertTrue(bool(debug.get("drift_optimization_enabled")))
+        self.assertIn("drift_objective", debug)
+        self.assertLess(_max_abs_drift(int(selected)), _max_abs_drift(800))
+        self.assertGreaterEqual(int(selected), int(debug.get("min_train_samples", 0)))
+        self.assertGreaterEqual(int(1000 - selected), int(debug.get("min_holdout_samples", 0)))
+
+    @patch.dict(os.environ, {"ENABLE_MINORITY_CLASS_SAMPLING": "false"}, clear=False)
+    def test_apply_minority_sampling_records_counts_even_when_disabled(self):
+        x = np.zeros((6, 5, 3), dtype=np.float32)
+        y = np.asarray([0, 0, 1, 1, 1, 0], dtype=np.int32)
+        x_out, y_out, stats = self.pipeline._apply_minority_class_sampling(
+            X_train=x,
+            y_train=y,
+            room_name="room1",
+        )
+        self.assertEqual(x_out.shape, x.shape)
+        np.testing.assert_array_equal(y_out, y)
+        self.assertFalse(bool(stats.get("enabled", True)))
+        self.assertEqual(stats.get("class_counts_before"), {0: 3, 1: 3})
+        self.assertEqual(stats.get("class_counts_after"), {0: 3, 1: 3})
+
+    @patch('ml.training.get_release_gates_config')
+    @patch.dict(os.environ, {"RELEASE_GATE_MAX_CLASS_PRIOR_DRIFT": "0.10"}, clear=False)
+    def test_evaluate_release_gate_blocks_on_excessive_class_prior_drift(self, mock_get_policy):
+        mock_get_policy.return_value = {
+            "release_gates": {
+                "rooms": {
+                    "room1": {
+                        "schedule": [{"min_days": 1, "max_days": None, "min_value": 0.2}]
+                    }
+                },
+                "no_regress": {"max_drop_from_champion": 0.2, "exempt_rooms": []},
+            }
+        }
+        gate_pass, reasons = self.pipeline._evaluate_release_gate(
+            room_name="room1",
+            candidate_metrics={
+                "macro_f1": 0.8,
+                "training_days": 8.0,
+                "samples": 2000,
+                "metric_source": "holdout_validation",
+                "validation_min_class_support": 100,
+                "required_minority_support": 5,
+                "minority_sampling": {
+                    "class_counts_after": {"0": 200, "1": 800},
+                },
+                "validation_class_support": {"0": 700, "1": 300},
+            },
+            champion_meta=None,
+        )
+        self.assertFalse(gate_pass)
+        self.assertTrue(any(r.startswith("class_prior_drift_failed:room1:") for r in reasons))
+
+    @patch('ml.training.get_release_gates_config')
+    @patch.dict(os.environ, {"RELEASE_GATE_MAX_CLASS_PRIOR_DRIFT": "0.10"}, clear=False)
+    def test_evaluate_release_gate_prior_drift_low_support_is_watch_only(self, mock_get_policy):
+        mock_get_policy.return_value = {
+            "release_gates": {
+                "rooms": {
+                    "room1": {
+                        "schedule": [{"min_days": 1, "max_days": None, "min_value": 0.2}]
+                    }
+                },
+                "no_regress": {"max_drop_from_champion": 0.2, "exempt_rooms": []},
+            }
+        }
+        gate_pass, reasons = self.pipeline._evaluate_release_gate(
+            room_name="room1",
+            candidate_metrics={
+                "macro_f1": 0.8,
+                "training_days": 8.0,
+                "samples": 2000,
+                "metric_source": "holdout_validation",
+                "validation_min_class_support": 2,
+                "required_minority_support": 5,
+                "insufficient_validation_evidence": True,
+                "minority_sampling": {
+                    "class_counts_after": {"0": 200, "1": 800},
+                },
+                "validation_class_support": {"0": 700, "1": 300},
+            },
+            champion_meta=None,
+        )
+        self.assertTrue(gate_pass)
+        self.assertFalse(any(r.startswith("class_prior_drift_failed:room1:") for r in reasons))
+        self.assertTrue(
+            any(
+                r.startswith("class_prior_drift_not_evaluable:room1:")
+                for r in self.pipeline._last_release_gate_watch_reasons
+            )
+        )
+
     def test_evaluate_lane_b_event_gates_blocks_bedroom_critical_collapse(self):
         gate_pass, reasons, report = self.pipeline._evaluate_lane_b_event_gates(
             room_name="Bedroom",
@@ -1319,6 +1613,91 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertFalse(gate_pass)
         self.assertTrue(any(r.startswith("lane_b_gate_failed:bedroom:") for r in reasons))
         self.assertEqual(report.get("overall_status"), "fail")
+
+    @patch.dict(
+        os.environ,
+        {
+            "RELEASE_GATE_BOOTSTRAP_ENABLED": "true",
+            "RELEASE_GATE_BOOTSTRAP_MAX_TRAINING_DAYS": "14",
+        },
+        clear=False,
+    )
+    def test_evaluate_release_gate_bootstrap_keeps_prior_drift_strict(self):
+        self.pipeline.policy.release_gate.evidence_profile = "pilot_stage_a"
+        with patch("ml.training.get_release_gates_config") as mock_get_policy:
+            mock_get_policy.return_value = {
+                "release_gates": {
+                    "rooms": {
+                        "room1": {
+                            "schedule": [{"min_days": 1, "max_days": None, "min_value": 0.2}]
+                        }
+                    },
+                    "no_regress": {"max_drop_from_champion": 0.2, "exempt_rooms": []},
+                }
+            }
+            gate_pass, reasons = self.pipeline._evaluate_release_gate(
+                room_name="room1",
+                candidate_metrics={
+                    "macro_f1": 0.8,
+                    "training_days": 6.0,
+                    "samples": 2000,
+                    "metric_source": "holdout_validation",
+                    "validation_min_class_support": 100,
+                    "required_minority_support": 5,
+                    "minority_sampling": {
+                        "class_counts_after": {"0": 200, "1": 800},
+                    },
+                    "validation_class_support": {"0": 700, "1": 300},
+                },
+                champion_meta=None,
+            )
+        self.assertFalse(gate_pass)
+        self.assertTrue(any(r.startswith("class_prior_drift_failed:room1:") for r in reasons))
+
+    @patch.dict(
+        os.environ,
+        {
+            "RELEASE_GATE_BOOTSTRAP_ENABLED": "true",
+            "RELEASE_GATE_BOOTSTRAP_MAX_TRAINING_DAYS": "14",
+        },
+        clear=False,
+    )
+    def test_evaluate_lane_b_event_gates_bootstrap_soft_fails_non_collapse(self):
+        self.pipeline.policy.release_gate.evidence_profile = "pilot_stage_a"
+        gate_pass, reasons, report = self.pipeline._evaluate_lane_b_event_gates(
+            room_name="Bedroom",
+            candidate_metrics={
+                "training_days": 6.0,
+                "per_label_recall": {"sleep": 0.30},
+                "per_label_support": {"sleep": 120, "unoccupied": 200},
+            },
+        )
+        self.assertTrue(gate_pass)
+        self.assertEqual(reasons, [])
+        self.assertEqual(report.get("enforcement"), "watch_only_bootstrap")
+        self.assertIn("recall_sleep_duration", report.get("soft_failed_critical_failures", []))
+
+    @patch.dict(
+        os.environ,
+        {
+            "RELEASE_GATE_BOOTSTRAP_ENABLED": "true",
+            "RELEASE_GATE_BOOTSTRAP_MAX_TRAINING_DAYS": "14",
+        },
+        clear=False,
+    )
+    def test_evaluate_lane_b_event_gates_bootstrap_still_blocks_collapse(self):
+        self.pipeline.policy.release_gate.evidence_profile = "pilot_stage_a"
+        gate_pass, reasons, report = self.pipeline._evaluate_lane_b_event_gates(
+            room_name="Bedroom",
+            candidate_metrics={
+                "training_days": 6.0,
+                "per_label_recall": {"sleep": 0.0},
+                "per_label_support": {"sleep": 120, "unoccupied": 200},
+            },
+        )
+        self.assertFalse(gate_pass)
+        self.assertTrue(any("collapse_sleep_duration" in r for r in reasons))
+        self.assertEqual(report.get("enforcement"), "hard_bootstrap_collapse_guard")
 
     def test_evaluate_lane_b_event_gates_warn_only_noncritical_room(self):
         gate_pass, reasons, report = self.pipeline._evaluate_lane_b_event_gates(

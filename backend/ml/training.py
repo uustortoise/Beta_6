@@ -4,6 +4,7 @@ import tensorflow as tf
 import os
 import json
 import hashlib
+import shutil
 import joblib
 import pandas as pd
 import re
@@ -20,7 +21,7 @@ except ImportError:
 else:
     adapter = LegacyDatabaseAdapter()
 from sklearn.utils.class_weight import compute_class_weight
-from sklearn.metrics import classification_report, precision_recall_curve
+from sklearn.metrics import classification_report, confusion_matrix, precision_recall_curve
 
 # Shared Utilities
 from ml.utils import calculate_sequence_length, fetch_golden_samples, fetch_sensor_windows_batch
@@ -71,6 +72,81 @@ logger = logging.getLogger(__name__)
 def _utc_now_iso_z() -> str:
     """Return timezone-aware UTC timestamp with Z suffix."""
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+class _GateAlignedCheckpointCallback(tf.keras.callbacks.Callback):
+    """
+    Restore weights from the epoch with the strongest gate-aligned validation score.
+
+    This prevents selecting checkpoints purely by loss when that checkpoint
+    collapses critical classes at holdout-time.
+    """
+
+    def __init__(
+        self,
+        *,
+        pipeline: "TrainingPipeline",
+        room_name: str,
+        X_val: np.ndarray,
+        y_val: np.ndarray,
+        timeline_multitask_enabled: bool,
+    ) -> None:
+        super().__init__()
+        self.pipeline = pipeline
+        self.room_name = room_name
+        self.X_val = np.asarray(X_val, dtype=np.float32)
+        self.y_val = np.asarray(y_val, dtype=np.int32)
+        self.timeline_multitask_enabled = bool(timeline_multitask_enabled)
+        self.best_score = float("-inf")
+        self.best_epoch = -1
+        self.best_weights = None
+        self.best_summary: Dict[str, Any] = {}
+        self.last_summary: Dict[str, Any] = {}
+        self.last_error: Optional[str] = None
+
+    def on_epoch_end(self, epoch, logs=None):
+        if self.X_val.size == 0 or self.y_val.size == 0:
+            return
+        try:
+            raw_pred = self.model.predict(self.X_val, verbose=0)
+            y_pred_probs = self.pipeline._extract_activity_probabilities(
+                raw_pred,
+                timeline_multitask_enabled=self.timeline_multitask_enabled,
+            )
+            summary = self.pipeline._summarize_gate_aligned_validation(
+                room_name=self.room_name,
+                y_true=self.y_val,
+                y_pred_probs=y_pred_probs,
+            )
+            score = float(summary.get("gate_aligned_score", float("-inf")))
+            self.last_summary = {
+                "epoch": int(epoch),
+                "score": score,
+                **summary,
+            }
+            if score > (self.best_score + 1e-8):
+                self.best_score = score
+                self.best_epoch = int(epoch)
+                self.best_weights = self.model.get_weights()
+                self.best_summary = dict(self.last_summary)
+        except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
+
+    def on_train_end(self, logs=None):
+        if self.best_weights is not None:
+            self.model.set_weights(self.best_weights)
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = {
+            "enabled": True,
+            "best_epoch": int(self.best_epoch),
+            "best_score": float(self.best_score) if np.isfinite(self.best_score) else None,
+            "best_summary": dict(self.best_summary),
+            "last_summary": dict(self.last_summary),
+        }
+        if self.last_error:
+            payload["error"] = self.last_error
+        return payload
 
 class TrainingPipeline:
     """
@@ -134,6 +210,112 @@ class TrainingPipeline:
         """Stable hash for an effective training policy."""
         payload = json.dumps(policy.to_dict(), sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _env_bool(name: str, default: bool) -> bool:
+        raw = os.getenv(name)
+        if raw is None:
+            return bool(default)
+        return str(raw).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+    @staticmethod
+    def _env_float(name: str, default: float, min_value: Optional[float] = None, max_value: Optional[float] = None) -> float:
+        raw = os.getenv(name)
+        try:
+            value = float(raw) if raw is not None else float(default)
+        except (TypeError, ValueError):
+            value = float(default)
+        if min_value is not None:
+            value = max(float(min_value), value)
+        if max_value is not None:
+            value = min(float(max_value), value)
+        return float(value)
+
+    def _resolve_gate_aligned_checkpoint_enabled(self) -> bool:
+        return self._env_bool("ENABLE_GATE_ALIGNED_CHECKPOINT", True)
+
+    def _resolve_gate_aligned_critical_support_floor(self) -> int:
+        raw = os.getenv("GATE_ALIGNED_CRITICAL_SUPPORT_FLOOR")
+        try:
+            value = int(raw) if raw is not None else 10
+        except (TypeError, ValueError):
+            value = 10
+        return max(1, int(value))
+
+    def _resolve_gate_aligned_critical_recall_floor(self) -> float:
+        return self._env_float(
+            "GATE_ALIGNED_CRITICAL_RECALL_FLOOR",
+            0.20,
+            min_value=0.0,
+            max_value=1.0,
+        )
+
+    def _resolve_gate_aligned_collapse_ratio(self) -> float:
+        return self._env_float(
+            "GATE_ALIGNED_COLLAPSE_RATIO",
+            0.95,
+            min_value=0.50,
+            max_value=1.0,
+        )
+
+    def _resolve_gate_aligned_critical_weight(self) -> float:
+        return self._env_float(
+            "GATE_ALIGNED_CRITICAL_WEIGHT",
+            0.35,
+            min_value=0.0,
+            max_value=2.0,
+        )
+
+    def _resolve_gate_aligned_collapse_penalty(self) -> float:
+        return self._env_float(
+            "GATE_ALIGNED_COLLAPSE_PENALTY",
+            0.45,
+            min_value=0.0,
+            max_value=2.0,
+        )
+
+    def _resolve_gate_aligned_floor_penalty(self) -> float:
+        return self._env_float(
+            "GATE_ALIGNED_CRITICAL_FLOOR_PENALTY",
+            0.25,
+            min_value=0.0,
+            max_value=2.0,
+        )
+
+    def _resolve_collapse_retry_enabled(self) -> bool:
+        return self._env_bool("ENABLE_COLLAPSE_AUTO_RETRY", True)
+
+    def _resolve_collapse_retry_lr_scale(self) -> float:
+        return self._env_float(
+            "COLLAPSE_RETRY_LR_SCALE",
+            0.60,
+            min_value=0.05,
+            max_value=1.0,
+        )
+
+    def _resolve_collapse_retry_rarity_power(self) -> float:
+        return self._env_float(
+            "COLLAPSE_RETRY_RARITY_POWER",
+            0.50,
+            min_value=0.0,
+            max_value=2.0,
+        )
+
+    def _resolve_collapse_retry_critical_boost(self) -> float:
+        return self._env_float(
+            "COLLAPSE_RETRY_CRITICAL_BOOST",
+            1.30,
+            min_value=1.0,
+            max_value=5.0,
+        )
+
+    def _resolve_collapse_retry_weight_cap(self) -> float:
+        return self._env_float(
+            "COLLAPSE_RETRY_WEIGHT_CAP",
+            24.0,
+            min_value=1.0,
+            max_value=100.0,
+        )
 
     def _get_label_name(self, room_name: str, class_id: int) -> str | None:
         """Resolve encoded class ID to label name for a given room."""
@@ -742,6 +924,266 @@ class TrainingPipeline:
             "parent_version_id": int(parent_version_id) if parent_version_id is not None else None,
         }
 
+    @staticmethod
+    def _read_float_env(name: str, default: float) -> float:
+        raw = os.getenv(name)
+        if raw is None:
+            return float(default)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return float(default)
+        if not np.isfinite(value):
+            return float(default)
+        return float(value)
+
+    @staticmethod
+    def _normalize_class_count_map(raw: Any) -> Dict[str, float]:
+        out: Dict[str, float] = {}
+        if not isinstance(raw, Mapping):
+            return out
+        for key, value in raw.items():
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite(numeric) or numeric < 0.0:
+                continue
+            key_txt = str(key).strip()
+            if not key_txt:
+                continue
+            try:
+                key_txt = str(int(float(key_txt)))
+            except (TypeError, ValueError):
+                pass
+            out[key_txt] = float(numeric)
+        return out
+
+    @staticmethod
+    def _build_class_support_map(y_values: Any) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        try:
+            arr = np.asarray(y_values, dtype=np.int64)
+        except Exception:
+            return out
+        if arr.size == 0:
+            return out
+        classes, counts = np.unique(arr, return_counts=True)
+        for class_id, count in zip(classes, counts):
+            out[str(int(class_id))] = int(count)
+        return out
+
+    def _compute_class_prior_drift(self, candidate_metrics: Mapping[str, Any]) -> Dict[str, Any]:
+        """
+        Compare train vs validation class priors for drift diagnostics.
+
+        Primary hard-gate source:
+        - pre-sampling train support (temporal train split before train-only rebalancing)
+        - full holdout support (validation + calibration), when available
+
+        Secondary diagnostic source:
+        - post-sampling train support (after downsampling/minority sampling)
+        """
+        result: Dict[str, Any] = {
+            "available": False,
+            "evaluable": False,
+            "reason": None,
+            "max_abs_drift": None,
+            "max_abs_drift_pp": None,
+            "max_drift_class": None,
+            "class_drift": {},
+            "train_total": 0.0,
+            "validation_total": 0.0,
+            "required_validation_support": 0,
+            "validation_min_support": 0,
+            "drift_source": "pre_sampling_train_vs_validation",
+            "sampled_available": False,
+            "sampled_max_abs_drift": None,
+            "sampled_max_abs_drift_pp": None,
+            "sampled_max_drift_class": None,
+            "sampled_class_drift": {},
+            "sampled_train_total": 0.0,
+        }
+
+        train_counts_raw: Any = candidate_metrics.get("train_class_support_pre_sampling") or {}
+        minority_stats = candidate_metrics.get("minority_sampling") or {}
+        sampled_counts_raw: Any = candidate_metrics.get("train_class_support_post_minority_sampling") or {}
+        if isinstance(minority_stats, Mapping):
+            sampled_counts_raw = sampled_counts_raw or minority_stats.get("class_counts_after") or {}
+        val_counts_raw: Any = (
+            candidate_metrics.get("holdout_class_support")
+            or candidate_metrics.get("validation_class_support")
+            or {}
+        )
+
+        train_counts = self._normalize_class_count_map(train_counts_raw)
+        sampled_counts = self._normalize_class_count_map(sampled_counts_raw)
+        val_counts = self._normalize_class_count_map(val_counts_raw)
+        if not train_counts and sampled_counts:
+            # Backward-compatible fallback for historical metrics without pre-sampling support map.
+            train_counts = dict(sampled_counts)
+            result["drift_source"] = "post_sampling_train_vs_validation_fallback"
+        if not train_counts:
+            result["reason"] = "missing_train_class_counts"
+            return result
+        if not val_counts:
+            result["reason"] = "missing_validation_class_counts"
+            return result
+
+        train_total = float(sum(train_counts.values()))
+        val_total = float(sum(val_counts.values()))
+        if train_total <= 0.0 or val_total <= 0.0:
+            result["reason"] = "non_positive_class_count_total"
+            return result
+
+        def _sort_key(token: str) -> Tuple[int, str]:
+            try:
+                return int(token), token
+            except (TypeError, ValueError):
+                return 10**9, token
+
+        class_ids = sorted(set(train_counts.keys()) | set(val_counts.keys()), key=_sort_key)
+        class_drift: Dict[str, Dict[str, float]] = {}
+        max_abs = -1.0
+        max_class: Optional[str] = None
+        for class_id in class_ids:
+            train_share = float(train_counts.get(class_id, 0.0)) / train_total
+            val_share = float(val_counts.get(class_id, 0.0)) / val_total
+            drift = float(train_share - val_share)
+            class_drift[class_id] = {
+                "train_share": float(train_share),
+                "validation_share": float(val_share),
+                "drift": float(drift),
+                "drift_pp": float(drift * 100.0),
+            }
+            abs_drift = abs(drift)
+            if abs_drift > max_abs:
+                max_abs = float(abs_drift)
+                max_class = class_id
+
+        required_support = int(max(1, candidate_metrics.get("required_minority_support", 1) or 1))
+        val_min_support = int(
+            candidate_metrics.get("holdout_min_class_support")
+            or candidate_metrics.get("validation_min_class_support", 0)
+            or 0
+        )
+        insufficient_validation_evidence = bool(candidate_metrics.get("insufficient_validation_evidence", False))
+        evaluable = bool(val_min_support >= required_support and not insufficient_validation_evidence)
+
+        result.update(
+            {
+                "available": True,
+                "evaluable": bool(evaluable),
+                "reason": None,
+                "max_abs_drift": float(max_abs if max_abs >= 0.0 else 0.0),
+                "max_abs_drift_pp": float((max_abs if max_abs >= 0.0 else 0.0) * 100.0),
+                "max_drift_class": max_class,
+                "class_drift": class_drift,
+                "train_total": float(train_total),
+                "validation_total": float(val_total),
+                "required_validation_support": int(required_support),
+                "validation_min_support": int(val_min_support),
+            }
+        )
+        if sampled_counts:
+            sampled_total = float(sum(sampled_counts.values()))
+            if sampled_total > 0.0:
+                sampled_class_ids = sorted(set(sampled_counts.keys()) | set(val_counts.keys()), key=_sort_key)
+                sampled_class_drift: Dict[str, Dict[str, float]] = {}
+                sampled_max_abs = -1.0
+                sampled_max_class: Optional[str] = None
+                for class_id in sampled_class_ids:
+                    sampled_train_share = float(sampled_counts.get(class_id, 0.0)) / sampled_total
+                    val_share = float(val_counts.get(class_id, 0.0)) / val_total
+                    drift = float(sampled_train_share - val_share)
+                    sampled_class_drift[class_id] = {
+                        "train_share": float(sampled_train_share),
+                        "validation_share": float(val_share),
+                        "drift": float(drift),
+                        "drift_pp": float(drift * 100.0),
+                    }
+                    abs_drift = abs(drift)
+                    if abs_drift > sampled_max_abs:
+                        sampled_max_abs = float(abs_drift)
+                        sampled_max_class = class_id
+                result.update(
+                    {
+                        "sampled_available": True,
+                        "sampled_max_abs_drift": float(sampled_max_abs if sampled_max_abs >= 0.0 else 0.0),
+                        "sampled_max_abs_drift_pp": float(
+                            (sampled_max_abs if sampled_max_abs >= 0.0 else 0.0) * 100.0
+                        ),
+                        "sampled_max_drift_class": sampled_max_class,
+                        "sampled_class_drift": sampled_class_drift,
+                        "sampled_train_total": float(sampled_total),
+                    }
+                )
+        return result
+
+    def _is_bootstrap_release_phase(self, candidate_metrics: Mapping[str, Any]) -> bool:
+        """
+        Return True when pilot evidence profile is active within the bootstrap window.
+        """
+        bootstrap_enabled = str(os.getenv("RELEASE_GATE_BOOTSTRAP_ENABLED", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+            "enabled",
+        }
+        if not bootstrap_enabled:
+            return False
+        gate_policy = self._active_policy().release_gate
+        evidence_profile = str(gate_policy.evidence_profile).strip().lower()
+        if evidence_profile not in {"pilot_stage_a", "pilot_stage_b"}:
+            return False
+        max_days = max(0.0, self._read_float_env("RELEASE_GATE_BOOTSTRAP_MAX_TRAINING_DAYS", 14.0))
+        try:
+            training_days = float(candidate_metrics.get("training_days", 0.0) or 0.0)
+        except Exception:
+            training_days = 0.0
+        return bool(training_days <= (max_days + 1e-3))
+
+    def _resolve_bootstrap_gate_overrides(
+        self,
+        candidate_metrics: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Resolve staged pilot gate overrides for days 1-7 and 8-14.
+        """
+        if not self._is_bootstrap_release_phase(candidate_metrics):
+            return {"active": False}
+        try:
+            training_days = float(candidate_metrics.get("training_days", 0.0) or 0.0)
+        except Exception:
+            training_days = 0.0
+        phase1_max_days = max(1.0, self._read_float_env("RELEASE_GATE_BOOTSTRAP_PHASE1_MAX_DAYS", 7.0))
+        phase2_max_days = max(phase1_max_days, self._read_float_env("RELEASE_GATE_BOOTSTRAP_MAX_TRAINING_DAYS", 14.0))
+
+        if training_days <= (phase1_max_days + 1e-3):
+            return {
+                "active": True,
+                "phase": "bootstrap",
+                "min_validation_class_support": 5,
+                "min_recall_support": 10,
+                "label_min_recall_by_room_label": {
+                    "bedroom.unoccupied": 0.35,
+                    "livingroom.unoccupied": 0.30,
+                },
+            }
+        if training_days <= (phase2_max_days + 1e-3):
+            return {
+                "active": True,
+                "phase": "stabilization",
+                "min_validation_class_support": 15,
+                "min_recall_support": 15,
+                "label_min_recall_by_room_label": {
+                    "bedroom.unoccupied": 0.45,
+                    "livingroom.unoccupied": 0.40,
+                },
+            }
+        return {"active": False}
+
     def _evaluate_release_gate(
         self,
         room_name: str,
@@ -794,9 +1236,25 @@ class TrainingPipeline:
         } if isinstance(raw_per_label_support, dict) else {}
         label_equivalents = self._resolve_room_label_equivalents(room_name)
         gate_policy = self._active_policy().release_gate
+        bootstrap_overrides = self._resolve_bootstrap_gate_overrides(candidate_metrics)
+        bootstrap_release_phase = bool(bootstrap_overrides.get("active", False))
+        effective_min_validation_support = int(
+            bootstrap_overrides.get("min_validation_class_support", gate_policy.min_validation_class_support)
+        )
+        effective_min_recall_support = int(
+            bootstrap_overrides.get("min_recall_support", gate_policy.min_recall_support)
+        )
+        effective_label_recall_by_room_label = dict(gate_policy.min_recall_by_room_label or {})
+        effective_label_recall_by_room_label.update(
+            {
+                str(k).strip().lower(): float(v)
+                for k, v in (bootstrap_overrides.get("label_min_recall_by_room_label") or {}).items()
+                if str(k).strip()
+            }
+        )
         required_minority_support = int(candidate_metrics.get("required_minority_support", 0) or 0)
         required_validation_support = max(
-            int(gate_policy.min_validation_class_support),
+            int(effective_min_validation_support),
             max(0, int(required_minority_support)),
         )
         pilot_relaxed_evidence = str(gate_policy.evidence_profile).strip().lower() in {
@@ -810,6 +1268,9 @@ class TrainingPipeline:
             and validation_min_support >= int(required_validation_support)
             and not insufficient_validation_evidence
         )
+        prior_drift_max = max(0.0, self._read_float_env("RELEASE_GATE_MAX_CLASS_PRIOR_DRIFT", 0.10))
+        class_prior_drift = self._compute_class_prior_drift(candidate_metrics)
+        candidate_metrics["class_prior_drift"] = class_prior_drift
 
         if isinstance(data_viability, dict) and not bool(data_viability.get("pass", True)):
             _add_blocking(f"data_viability_failed:{room_key}")
@@ -854,7 +1315,35 @@ class TrainingPipeline:
             )
         if bool(gate_policy.block_on_train_fallback_metrics) and metric_source == "train_fallback_small_dataset":
             _add_watch(f"train_metric_fallback_blocked:{room_key}")
-        for key, threshold in (gate_policy.min_recall_by_room_label or {}).items():
+        if bool(class_prior_drift.get("available")):
+            if str(class_prior_drift.get("drift_source", "")).strip().lower() == (
+                "post_sampling_train_vs_validation_fallback"
+            ):
+                _add_watch(f"class_prior_drift_source_fallback:{room_key}:post_sampling")
+            if bool(class_prior_drift.get("evaluable")):
+                max_abs_drift = class_prior_drift.get("max_abs_drift")
+                if max_abs_drift is not None and float(max_abs_drift) > float(prior_drift_max):
+                    max_class = class_prior_drift.get("max_drift_class") or "unknown"
+                    _add_blocking(
+                        f"class_prior_drift_failed:{room_key}:{max_class}:{float(max_abs_drift):.3f}>"
+                        f"{float(prior_drift_max):.3f}"
+                    )
+            else:
+                _add_watch(
+                    f"class_prior_drift_not_evaluable:{room_key}:support={validation_min_support}<"
+                    f"required={int(required_validation_support)}"
+                )
+            sampled_max_abs_drift = class_prior_drift.get("sampled_max_abs_drift")
+            if (
+                sampled_max_abs_drift is not None
+                and float(sampled_max_abs_drift) > float(prior_drift_max)
+            ):
+                sampled_max_class = class_prior_drift.get("sampled_max_drift_class") or "unknown"
+                _add_watch(
+                    f"class_prior_drift_sampled_watch:{room_key}:{sampled_max_class}:"
+                    f"{float(sampled_max_abs_drift):.3f}>{float(prior_drift_max):.3f}"
+                )
+        for key, threshold in effective_label_recall_by_room_label.items():
             key_txt = str(key).strip().lower()
             if not key_txt.startswith(f"{room_key}."):
                 continue
@@ -868,10 +1357,10 @@ class TrainingPipeline:
             if label_recall is None:
                 _add_watch(f"label_recall_missing:{room_key}:{label_name}")
                 continue
-            if label_support < int(gate_policy.min_recall_support):
+            if label_support < int(effective_min_recall_support):
                 _add_watch(
                     f"label_recall_insufficient_support:{room_key}:{label_name}:{label_support}"
-                    f"<{int(gate_policy.min_recall_support)}"
+                    f"<{int(effective_min_recall_support)}"
                 )
                 continue
             if float(label_recall) < float(threshold):
@@ -881,7 +1370,7 @@ class TrainingPipeline:
                 )
         if metric_source == "holdout_validation":
             critical_labels = self._resolve_critical_labels(room_name)
-            collapse_min_support = max(5, int(gate_policy.min_recall_support // 2))
+            collapse_min_support = max(5, int(effective_min_recall_support // 2))
             collapse_recall_floor = 0.02
             for critical_label in critical_labels:
                 _, support, recall = self._select_best_label_variant(
@@ -1080,6 +1569,7 @@ class TrainingPipeline:
         report_dict["derived_gate_metrics"] = gate_metrics
 
         if report.is_promotable:
+            report_dict["enforcement"] = "hard"
             return True, [], report_dict
 
         room_key = normalize_room_name(room_name)
@@ -1087,6 +1577,23 @@ class TrainingPipeline:
         if not failures:
             failures = ["critical_failure"]
         reasons = [f"lane_b_gate_failed:{room_key}:{name}" for name in failures]
+        if self._is_bootstrap_release_phase(candidate_metrics):
+            collapse_failures = [name for name in failures if str(name).startswith("collapse_")]
+            if collapse_failures:
+                report_dict["enforcement"] = "hard_bootstrap_collapse_guard"
+                collapse_reasons = [f"lane_b_gate_failed:{room_key}:{name}" for name in collapse_failures]
+                return False, collapse_reasons, report_dict
+            report_dict["enforcement"] = "watch_only_bootstrap"
+            report_dict["soft_failed_critical_failures"] = list(failures)
+            report_dict["soft_failed_reasons"] = list(reasons)
+            logger.warning(
+                "Lane B gate soft-fail during bootstrap for %s/%s; failures=%s",
+                room_key,
+                str(candidate_metrics.get("elder_id") or "unknown"),
+                failures,
+            )
+            return True, [], report_dict
+        report_dict["enforcement"] = "hard"
         return False, reasons, report_dict
 
     def _decode_label_ids(self, room_name: str, label_ids: np.ndarray) -> List[str]:
@@ -1525,6 +2032,839 @@ class TrainingPipeline:
         return result
 
     @staticmethod
+    def _extract_activity_probabilities(raw_pred: Any, *, timeline_multitask_enabled: bool) -> np.ndarray:
+        if isinstance(raw_pred, dict):
+            raw_pred = raw_pred.get("activity_logits")
+        if raw_pred is None:
+            raise ValueError("missing_activity_logits")
+        y_pred = np.asarray(raw_pred, dtype=np.float32)
+        if y_pred.ndim == 0:
+            y_pred = np.zeros((0, 1), dtype=np.float32)
+        elif y_pred.ndim == 1:
+            y_pred = np.reshape(y_pred, (-1, 1))
+        elif y_pred.ndim > 2:
+            y_pred = np.reshape(y_pred, (y_pred.shape[0], -1))
+        if bool(timeline_multitask_enabled):
+            y_pred = tf.nn.softmax(y_pred, axis=1).numpy()
+        return np.asarray(y_pred, dtype=np.float32)
+
+    def _summarize_gate_aligned_validation(
+        self,
+        *,
+        room_name: str,
+        y_true: np.ndarray,
+        y_pred_probs: np.ndarray,
+    ) -> Dict[str, Any]:
+        y_true_arr = np.asarray(y_true, dtype=np.int32)
+        y_pred_arr = np.asarray(y_pred_probs, dtype=np.float32)
+        if y_pred_arr.ndim != 2:
+            raise ValueError(f"unexpected_prediction_shape:{getattr(y_pred_arr, 'shape', None)}")
+        if int(y_pred_arr.shape[0]) != int(len(y_true_arr)):
+            raise ValueError(
+                f"prediction_length_mismatch:{int(y_pred_arr.shape[0])}!={int(len(y_true_arr))}"
+            )
+
+        y_pred_classes = np.argmax(y_pred_arr, axis=1).astype(np.int32)
+        report = classification_report(y_true_arr, y_pred_classes, output_dict=True, zero_division=0)
+        macro_f1 = float(report.get("macro avg", {}).get("f1-score", 0.0) or 0.0)
+
+        label_encoder = self.platform.label_encoders.get(room_name)
+        classes = getattr(label_encoder, "classes_", None) if label_encoder is not None else None
+        per_label_recall: Dict[str, float] = {}
+        per_label_support: Dict[str, int] = {}
+        if classes is not None:
+            for class_id in range(len(classes)):
+                class_key = str(int(class_id))
+                label_name = str(classes[int(class_id)]).strip().lower()
+                class_metrics = report.get(class_key, {})
+                per_label_recall[label_name] = float(class_metrics.get("recall", 0.0) or 0.0)
+                per_label_support[label_name] = int(class_metrics.get("support", 0) or 0)
+
+        equivalents = self._resolve_room_label_equivalents(room_name)
+        critical_labels = list(self._resolve_critical_labels(room_name))
+        critical_support_floor = self._resolve_gate_aligned_critical_support_floor()
+        critical_recall_floor = self._resolve_gate_aligned_critical_recall_floor()
+
+        critical_stats: Dict[str, Dict[str, Any]] = {}
+        critical_recalls: List[float] = []
+        critical_floor_failures: List[str] = []
+        for label in critical_labels:
+            selected_label, support, recall = self._select_best_label_variant(
+                label,
+                per_label_support=per_label_support,
+                per_label_recall=per_label_recall,
+                equivalents=equivalents,
+            )
+            recall_value = float(recall) if recall is not None else 0.0
+            eligible = int(support) >= int(critical_support_floor)
+            critical_stats[str(label)] = {
+                "selected_label": str(selected_label),
+                "support": int(support),
+                "recall": float(recall_value),
+                "eligible_for_floor": bool(eligible),
+            }
+            if eligible:
+                critical_recalls.append(float(recall_value))
+                if float(recall_value) < float(critical_recall_floor):
+                    critical_floor_failures.append(str(selected_label))
+
+        critical_recall_mean = float(np.mean(critical_recalls)) if critical_recalls else 0.0
+        critical_recall_min = float(np.min(critical_recalls)) if critical_recalls else 0.0
+
+        dominant_class_id = -1
+        dominant_class_count = 0
+        dominant_class_share = 0.0
+        predicted_distribution: Dict[str, int] = {}
+        if len(y_pred_classes) > 0:
+            pred_ids, pred_counts = np.unique(y_pred_classes, return_counts=True)
+            idx = int(np.argmax(pred_counts))
+            dominant_class_id = int(pred_ids[idx])
+            dominant_class_count = int(pred_counts[idx])
+            dominant_class_share = float(dominant_class_count) / float(len(y_pred_classes))
+            for class_id, count in zip(pred_ids, pred_counts):
+                label_name = self._get_label_name(room_name, int(class_id))
+                key = str(label_name).strip().lower() if label_name else f"class_{int(class_id)}"
+                predicted_distribution[key] = int(count)
+
+        collapse_ratio = self._resolve_gate_aligned_collapse_ratio()
+        collapsed = bool(dominant_class_share >= float(collapse_ratio))
+        critical_floor_failed = bool(len(critical_floor_failures) > 0)
+
+        score = float(macro_f1)
+        score += float(self._resolve_gate_aligned_critical_weight()) * float(critical_recall_mean)
+        if collapsed:
+            score -= float(self._resolve_gate_aligned_collapse_penalty())
+        if critical_floor_failed:
+            score -= float(self._resolve_gate_aligned_floor_penalty())
+
+        dominant_label = self._get_label_name(room_name, dominant_class_id)
+        return {
+            "macro_f1": float(macro_f1),
+            "critical_labels": critical_labels,
+            "critical_support_floor": int(critical_support_floor),
+            "critical_recall_floor": float(critical_recall_floor),
+            "critical_recall_mean": float(critical_recall_mean),
+            "critical_recall_min": float(critical_recall_min),
+            "critical_floor_failures": critical_floor_failures,
+            "critical_stats": critical_stats,
+            "dominant_class_id": int(dominant_class_id),
+            "dominant_class_label": (
+                str(dominant_label).strip().lower()
+                if dominant_label is not None else f"class_{int(dominant_class_id)}"
+            ),
+            "dominant_class_count": int(dominant_class_count),
+            "dominant_class_share": float(dominant_class_share),
+            "collapse_ratio": float(collapse_ratio),
+            "collapsed": bool(collapsed),
+            "predicted_class_distribution": predicted_distribution,
+            "gate_aligned_score": float(score),
+        }
+
+    def _build_collapse_retry_class_weights(
+        self,
+        *,
+        room_name: str,
+        y_train: np.ndarray,
+        base_class_weights: Mapping[int, float],
+    ) -> Dict[int, float]:
+        y_arr = np.asarray(y_train, dtype=np.int32)
+        unique_classes, class_counts = np.unique(y_arr, return_counts=True)
+        if len(unique_classes) <= 1:
+            return {int(k): float(v) for k, v in base_class_weights.items()}
+
+        majority_count = float(np.max(class_counts))
+        rarity_power = self._resolve_collapse_retry_rarity_power()
+        critical_boost = self._resolve_collapse_retry_critical_boost()
+        weight_cap = self._resolve_collapse_retry_weight_cap()
+        critical_labels = set(self._resolve_critical_labels(room_name))
+        equivalents = self._resolve_room_label_equivalents(room_name)
+
+        boosted: Dict[int, float] = {}
+        for class_id, count in zip(unique_classes, class_counts):
+            cid = int(class_id)
+            base = float(base_class_weights.get(cid, 1.0))
+            support = max(1.0, float(count))
+            rarity_ratio = max(1.0, majority_count / support)
+            value = base * float(rarity_ratio ** float(rarity_power))
+
+            label_name = self._get_label_name(room_name, cid)
+            label_key = str(label_name).strip().lower() if label_name is not None else ""
+            candidate_keys = {label_key} if label_key else set()
+            if label_key:
+                candidate_keys.update(str(item).strip().lower() for item in equivalents.get(label_key, []))
+            if candidate_keys and (candidate_keys & critical_labels):
+                value *= float(critical_boost)
+
+            value = max(0.01, min(float(weight_cap), float(value)))
+            boosted[cid] = float(value)
+
+        # Preserve any precomputed class IDs not present in this train fold.
+        for class_id, weight in base_class_weights.items():
+            boosted.setdefault(int(class_id), float(weight))
+        return boosted
+
+    @staticmethod
+    def _resolve_two_stage_core_rooms() -> set[str]:
+        default_rooms = "bathroom,bedroom,kitchen,livingroom"
+        raw = str(os.getenv("TWO_STAGE_CORE_ROOMS", default_rooms))
+        return {
+            normalize_room_name(token)
+            for token in raw.split(",")
+            if str(token).strip()
+        }
+
+    @staticmethod
+    def _resolve_two_stage_gate_mode() -> str:
+        raw = str(os.getenv("TWO_STAGE_CORE_GATE_MODE", "primary")).strip().lower()
+        if raw in {"primary", "shadow"}:
+            return raw
+        return "primary"
+
+    @staticmethod
+    def _resolve_two_stage_stage_a_default_threshold() -> float:
+        raw = os.getenv("TWO_STAGE_CORE_STAGE_A_OCCUPIED_THRESHOLD", "0.5")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = 0.5
+        return float(np.clip(value, 0.0, 1.0))
+
+    @staticmethod
+    def _resolve_two_stage_stage_a_threshold_bounds() -> Tuple[float, float]:
+        """
+        Resolve stage-A occupancy threshold bounds.
+
+        Keep these independent from generic per-class calibration floor/cap
+        because stage-A (occupied-vs-unoccupied) needs room to lower threshold
+        aggressively when collapse pressure is high.
+        """
+        raw_min = os.getenv("TWO_STAGE_CORE_STAGE_A_THRESHOLD_MIN", "0.00")
+        raw_max = os.getenv("TWO_STAGE_CORE_STAGE_A_THRESHOLD_MAX", "0.95")
+        try:
+            min_thr = float(raw_min)
+        except (TypeError, ValueError):
+            min_thr = 0.00
+        try:
+            max_thr = float(raw_max)
+        except (TypeError, ValueError):
+            max_thr = 0.95
+        min_thr = float(np.clip(min_thr, 0.0, 1.0))
+        max_thr = float(np.clip(max_thr, 0.0, 1.0))
+        if min_thr > max_thr:
+            min_thr, max_thr = max_thr, min_thr
+        return min_thr, max_thr
+
+    @staticmethod
+    def _resolve_two_stage_stage_a_min_predicted_occupied_floor() -> Tuple[float, float]:
+        """
+        Resolve safeguards for minimum predicted occupied rate on calibration.
+
+        Returns:
+            (relative_ratio, absolute_floor)
+        where:
+            min_pred_rate = max(absolute_floor, true_occupied_rate * relative_ratio)
+        """
+        raw_ratio = os.getenv("TWO_STAGE_CORE_STAGE_A_MIN_PRED_OCCUPIED_RATIO", "0.50")
+        raw_abs = os.getenv("TWO_STAGE_CORE_STAGE_A_MIN_PRED_OCCUPIED_ABS", "0.05")
+        try:
+            ratio = float(raw_ratio)
+        except (TypeError, ValueError):
+            ratio = 0.50
+        try:
+            abs_floor = float(raw_abs)
+        except (TypeError, ValueError):
+            abs_floor = 0.05
+        ratio = float(np.clip(ratio, 0.0, 1.0))
+        abs_floor = float(np.clip(abs_floor, 0.0, 1.0))
+        return ratio, abs_floor
+
+    def _two_stage_core_enabled_for_room(self, room_name: str) -> bool:
+        enabled = str(os.getenv("ENABLE_TWO_STAGE_CORE_MODELING", "true")).strip().lower() in {
+            "1", "true", "yes", "on", "enabled"
+        }
+        if not enabled:
+            return False
+        return normalize_room_name(room_name) in self._resolve_two_stage_core_rooms()
+
+    def _resolve_two_stage_class_profile(self, room_name: str) -> Dict[str, Any]:
+        """
+        Resolve class-role mapping for two-stage occupancy modeling.
+        """
+        result: Dict[str, Any] = {
+            "available": False,
+            "reason": "missing_label_encoder_classes",
+            "classes": [],
+            "excluded_class_ids": [],
+            "occupied_class_ids": [],
+            "primary_occupied_class_id": None,
+        }
+        label_encoder = self.platform.label_encoders.get(room_name)
+        classes = getattr(label_encoder, "classes_", None) if label_encoder is not None else None
+        if classes is None or len(classes) == 0:
+            return result
+        labels = [str(item).strip().lower() for item in classes]
+        excluded_ids = [idx for idx, label in enumerate(labels) if label in {"unoccupied", "unknown"}]
+        occupied_ids = [idx for idx in range(len(labels)) if idx not in set(excluded_ids)]
+        if len(excluded_ids) == 0:
+            result["reason"] = "missing_unoccupied_class"
+            return result
+        if len(occupied_ids) == 0:
+            result["reason"] = "missing_occupied_class"
+            return result
+        result.update(
+            {
+                "available": True,
+                "reason": "ok",
+                "classes": labels,
+                "excluded_class_ids": [int(v) for v in excluded_ids],
+                "occupied_class_ids": [int(v) for v in occupied_ids],
+                "primary_occupied_class_id": int(occupied_ids[0]),
+            }
+        )
+        return result
+
+    @staticmethod
+    def _to_probability_matrix(raw: Any) -> np.ndarray:
+        arr = np.asarray(raw, dtype=np.float32)
+        if arr.ndim != 2:
+            raise ValueError(f"expected rank-2 probabilities, got shape={arr.shape}")
+        row_sums = np.sum(arr, axis=1, keepdims=True)
+        is_prob_like = (
+            np.all(np.isfinite(arr))
+            and np.min(arr) >= -1e-6
+            and np.max(arr) <= 1.0 + 1e-6
+            and np.all(np.isfinite(row_sums))
+            and float(np.mean(np.abs(row_sums - 1.0))) <= 1e-2
+        )
+        if is_prob_like:
+            return np.clip(arr, 0.0, 1.0)
+        logits = arr.astype(np.float64, copy=False)
+        logits = logits - np.max(logits, axis=1, keepdims=True)
+        exp = np.exp(logits)
+        denom = np.sum(exp, axis=1, keepdims=True)
+        denom = np.clip(denom, 1e-12, None)
+        probs = exp / denom
+        return probs.astype(np.float32, copy=False)
+
+    @staticmethod
+    def _balanced_class_weight_dict(labels: np.ndarray) -> Optional[Dict[int, float]]:
+        unique_classes = np.unique(labels)
+        if len(unique_classes) <= 1:
+            return None
+        class_weights = compute_class_weight(
+            class_weight="balanced",
+            classes=unique_classes.astype(np.int32, copy=False),
+            y=labels.astype(np.int32, copy=False),
+        )
+        return {
+            int(cls): float(weight)
+            for cls, weight in zip(unique_classes.astype(np.int32, copy=False), class_weights)
+        }
+
+    def _train_two_stage_core_models(
+        self,
+        *,
+        room_name: str,
+        seq_length: int,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        validation_data: Optional[Tuple[np.ndarray, np.ndarray]],
+        max_epochs: int,
+    ) -> Dict[str, Any]:
+        """
+        Train occupancy-first two-stage models for core rooms.
+        """
+        result: Dict[str, Any] = {
+            "enabled": False,
+            "reason": "disabled",
+            "gate_mode": self._resolve_two_stage_gate_mode(),
+            "room": normalize_room_name(room_name),
+            "stage_a_occupied_threshold": self._resolve_two_stage_stage_a_default_threshold(),
+            "stage_a_threshold_source": "env_default",
+        }
+        if not self._two_stage_core_enabled_for_room(room_name):
+            return result
+
+        class_profile = self._resolve_two_stage_class_profile(room_name)
+        if not bool(class_profile.get("available", False)):
+            result["reason"] = str(class_profile.get("reason") or "invalid_class_profile")
+            result["class_profile"] = class_profile
+            return result
+
+        occupied_class_ids = [int(v) for v in class_profile.get("occupied_class_ids", [])]
+        excluded_class_ids = [int(v) for v in class_profile.get("excluded_class_ids", [])]
+        y_train_arr = np.asarray(y_train, dtype=np.int32)
+        occupied_mask_train = np.isin(y_train_arr, occupied_class_ids)
+        y_train_stage_a = occupied_mask_train.astype(np.int32)
+        if len(np.unique(y_train_stage_a)) <= 1:
+            result["reason"] = "insufficient_stage_a_class_diversity"
+            result["class_profile"] = class_profile
+            return result
+
+        input_shape = (int(seq_length), int(len(self.platform.sensor_columns)))
+        stage_a_model = build_transformer_model(
+            input_shape=input_shape,
+            num_classes=2,
+            dropout_rate=DEFAULT_DROPOUT_RATE,
+        )
+        stage_a_model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+            loss="sparse_categorical_crossentropy",
+            metrics=["accuracy"],
+            jit_compile=False,
+        )
+
+        X_val = None
+        y_val = None
+        if validation_data is not None:
+            X_val = np.asarray(validation_data[0], dtype=np.float32)
+            y_val = np.asarray(validation_data[1], dtype=np.int32)
+        y_val_stage_a = None
+        validation_stage_a = None
+        if X_val is not None and y_val is not None and len(y_val) > 0:
+            y_val_stage_a = np.isin(y_val, occupied_class_ids).astype(np.int32)
+            validation_stage_a = (X_val, y_val_stage_a)
+
+        stage_a_callbacks = [
+            tf.keras.callbacks.EarlyStopping(
+                monitor="val_loss" if validation_stage_a is not None else "loss",
+                patience=2,
+                restore_best_weights=True,
+                verbose=0,
+            )
+        ]
+        stage_a_model.fit(
+            np.asarray(X_train, dtype=np.float32),
+            y_train_stage_a,
+            epochs=max(1, int(max_epochs)),
+            batch_size=32,
+            validation_data=validation_stage_a,
+            shuffle=False,
+            verbose=0,
+            class_weight=self._balanced_class_weight_dict(y_train_stage_a),
+            callbacks=stage_a_callbacks,
+        )
+
+        stage_b_model = None
+        stage_b_enabled = False
+        stage_b_reason = "single_occupied_class"
+        occupied_label_to_stage_idx = {int(class_id): idx for idx, class_id in enumerate(occupied_class_ids)}
+        primary_occupied_class_id = int(class_profile.get("primary_occupied_class_id", occupied_class_ids[0]))
+
+        if len(occupied_class_ids) >= 2 and int(np.sum(occupied_mask_train)) > 0:
+            X_train_stage_b = np.asarray(X_train[occupied_mask_train], dtype=np.float32)
+            y_train_stage_b = np.asarray(
+                [occupied_label_to_stage_idx[int(item)] for item in y_train_arr[occupied_mask_train]],
+                dtype=np.int32,
+            )
+            if len(np.unique(y_train_stage_b)) > 1:
+                stage_b_model = build_transformer_model(
+                    input_shape=input_shape,
+                    num_classes=len(occupied_class_ids),
+                    dropout_rate=DEFAULT_DROPOUT_RATE,
+                )
+                stage_b_model.compile(
+                    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+                    loss="sparse_categorical_crossentropy",
+                    metrics=["accuracy"],
+                    jit_compile=False,
+                )
+                validation_stage_b = None
+                if X_val is not None and y_val is not None and len(y_val) > 0:
+                    occupied_mask_val = np.isin(y_val, occupied_class_ids)
+                    if int(np.sum(occupied_mask_val)) > 0:
+                        y_val_stage_b = np.asarray(
+                            [occupied_label_to_stage_idx[int(item)] for item in y_val[occupied_mask_val]],
+                            dtype=np.int32,
+                        )
+                        validation_stage_b = (
+                            np.asarray(X_val[occupied_mask_val], dtype=np.float32),
+                            y_val_stage_b,
+                        )
+                stage_b_callbacks = [
+                    tf.keras.callbacks.EarlyStopping(
+                        monitor="val_loss" if validation_stage_b is not None else "loss",
+                        patience=2,
+                        restore_best_weights=True,
+                        verbose=0,
+                    )
+                ]
+                stage_b_model.fit(
+                    X_train_stage_b,
+                    y_train_stage_b,
+                    epochs=max(1, int(max_epochs)),
+                    batch_size=32,
+                    validation_data=validation_stage_b,
+                    shuffle=False,
+                    verbose=0,
+                    class_weight=self._balanced_class_weight_dict(y_train_stage_b),
+                    callbacks=stage_b_callbacks,
+                )
+                stage_b_enabled = True
+                stage_b_reason = "trained"
+                occupied_counts = {
+                    int(class_id): int(np.sum(y_train_arr == int(class_id)))
+                    for class_id in occupied_class_ids
+                }
+                primary_occupied_class_id = max(
+                    occupied_counts.keys(),
+                    key=lambda key: occupied_counts[key],
+                )
+            else:
+                stage_b_reason = "insufficient_stage_b_class_diversity"
+
+        result.update(
+            {
+                "enabled": True,
+                "reason": "ok",
+                "class_profile": class_profile,
+                "excluded_class_ids": excluded_class_ids,
+                "occupied_class_ids": occupied_class_ids,
+                "primary_occupied_class_id": int(primary_occupied_class_id),
+                "num_classes": int(len(class_profile.get("classes", []))),
+                "stage_a_model": stage_a_model,
+                "stage_b_model": stage_b_model,
+                "stage_b_enabled": bool(stage_b_enabled),
+                "stage_b_reason": str(stage_b_reason),
+            }
+        )
+        return result
+
+    def _calibrate_two_stage_stage_a_threshold(
+        self,
+        *,
+        room_name: str,
+        two_stage_result: Mapping[str, Any],
+        calibration_data: Optional[Tuple[np.ndarray, np.ndarray]],
+    ) -> Dict[str, Any]:
+        """
+        Calibrate occupancy threshold for stage-A of two-stage core modeling.
+
+        Uses holdout/calibration probabilities for occupied-vs-unoccupied labels.
+        """
+        default_thr = self._resolve_two_stage_stage_a_default_threshold()
+        result: Dict[str, Any] = {
+            "threshold": float(default_thr),
+            "status": "fallback_default",
+            "source": "env_default",
+            "support_occupied": 0,
+            "samples": 0,
+            "target_precision": None,
+            "recall_floor": None,
+            "true_occupied_rate": None,
+            "predicted_occupied_rate": None,
+            "min_predicted_occupied_rate": None,
+        }
+        if not bool(two_stage_result.get("enabled", False)):
+            result["status"] = "disabled"
+            return result
+        if calibration_data is None:
+            result["status"] = "missing_calibration_data"
+            return result
+
+        X_calib, y_calib = calibration_data
+        if X_calib is None or y_calib is None or len(X_calib) == 0 or len(y_calib) == 0:
+            result["status"] = "empty_calibration_data"
+            return result
+
+        stage_a_model = two_stage_result.get("stage_a_model")
+        if stage_a_model is None:
+            result["status"] = "missing_stage_a_model"
+            return result
+
+        occupied_ids = [int(v) for v in (two_stage_result.get("occupied_class_ids") or [])]
+        if not occupied_ids:
+            result["status"] = "invalid_class_profile"
+            return result
+
+        y_calib_arr = np.asarray(y_calib, dtype=np.int32)
+        y_occ_true = np.isin(y_calib_arr, occupied_ids).astype(np.int32)
+        support = int(np.sum(y_occ_true))
+        result["support_occupied"] = support
+        result["samples"] = int(len(y_occ_true))
+        true_occupied_rate = float(np.mean(y_occ_true))
+        result["true_occupied_rate"] = true_occupied_rate
+        if len(np.unique(y_occ_true)) <= 1:
+            result["status"] = "insufficient_stage_a_class_diversity"
+            return result
+
+        min_support = int(max(10, self._active_policy().calibration.min_support_per_class))
+        if support < min_support:
+            result["status"] = f"fallback_low_support:{support}<{min_support}"
+            return result
+
+        try:
+            raw_stage_a = stage_a_model.predict(np.asarray(X_calib, dtype=np.float32), verbose=0)
+            if isinstance(raw_stage_a, dict):
+                raw_stage_a = raw_stage_a.get("activity_logits")
+            stage_a_probs = self._to_probability_matrix(raw_stage_a)
+            if stage_a_probs.shape[1] < 2:
+                result["status"] = f"invalid_stage_a_width:{stage_a_probs.shape}"
+                return result
+            p_occ = np.asarray(stage_a_probs[:, 1], dtype=np.float32)
+        except Exception as e:
+            result["status"] = f"prediction_error:{type(e).__name__}"
+            result["error"] = str(e)
+            return result
+
+        precision, recall, thresholds = precision_recall_curve(y_occ_true, p_occ)
+        if len(thresholds) == 0:
+            result["status"] = "fallback_no_curve"
+            return result
+
+        calibration_policy = self._active_policy().calibration
+        raw_target_precision = os.getenv(
+            "TWO_STAGE_CORE_STAGE_A_TARGET_PRECISION",
+            str(calibration_policy.default_precision_target),
+        )
+        raw_recall_floor = os.getenv("TWO_STAGE_CORE_STAGE_A_RECALL_FLOOR", "0.20")
+        try:
+            target_precision = float(raw_target_precision)
+        except (TypeError, ValueError):
+            target_precision = float(calibration_policy.default_precision_target)
+        try:
+            recall_floor = float(raw_recall_floor)
+        except (TypeError, ValueError):
+            recall_floor = 0.20
+        result["target_precision"] = target_precision
+        result["recall_floor"] = recall_floor
+
+        p = precision[:-1]
+        r = recall[:-1]
+        valid = np.where((p >= target_precision) & (r >= recall_floor))[0]
+        threshold_min, threshold_max = self._resolve_two_stage_stage_a_threshold_bounds()
+        if len(valid) > 0:
+            raw_threshold = float(np.min(thresholds[valid]))
+            base_status = "target_met"
+        else:
+            # If precision target is unattainable, keep recall-floor first.
+            valid_recall = np.where(r >= recall_floor)[0]
+            if len(valid_recall) > 0:
+                raw_threshold = float(np.min(thresholds[valid_recall]))
+                base_status = "fallback_recall_floor"
+            else:
+                f1 = (2.0 * p * r) / np.maximum(p + r, 1e-9)
+                best_idx = int(np.nanargmax(f1))
+                raw_threshold = float(thresholds[best_idx])
+                base_status = "fallback_best_f1"
+
+        final_threshold = float(np.clip(raw_threshold, threshold_min, threshold_max))
+
+        # Guardrail: prevent stage-A threshold from collapsing to near-zero occupied
+        # predictions on calibration when true occupied support is substantial.
+        min_ratio, min_abs_floor = self._resolve_two_stage_stage_a_min_predicted_occupied_floor()
+        min_pred_rate = float(np.clip(max(min_abs_floor, true_occupied_rate * min_ratio), 0.0, 1.0))
+        predicted_occ_rate = float(np.mean(p_occ >= final_threshold))
+        adjusted_for_pred_rate = False
+        if min_pred_rate > 0.0 and predicted_occ_rate + 1e-9 < min_pred_rate:
+            quantile_level = float(np.clip(1.0 - min_pred_rate, 0.0, 1.0))
+            candidate_threshold = float(np.quantile(p_occ, quantile_level))
+            adjusted_threshold = float(
+                np.clip(min(final_threshold, candidate_threshold), threshold_min, threshold_max)
+            )
+            if adjusted_threshold + 1e-9 < final_threshold:
+                final_threshold = adjusted_threshold
+                predicted_occ_rate = float(np.mean(p_occ >= final_threshold))
+                adjusted_for_pred_rate = True
+
+        status = str(base_status)
+        if adjusted_for_pred_rate:
+            status = f"{base_status}+pred_occ_floor"
+
+        result.update(
+            {
+                "threshold": final_threshold,
+                "status": status,
+                "source": "calibration",
+                "raw_threshold": raw_threshold,
+                "threshold_bounds": {
+                    "min": float(threshold_min),
+                    "max": float(threshold_max),
+                },
+                "predicted_occupied_rate": predicted_occ_rate,
+                "min_predicted_occupied_rate": min_pred_rate,
+                "predicted_occupied_floor_adjusted": bool(adjusted_for_pred_rate),
+            }
+        )
+        logger.info(
+            "Two-stage stage-A occupancy threshold for %s: %.4f (%s, support=%d)",
+            room_name,
+            final_threshold,
+            status,
+            support,
+        )
+        return result
+
+    def _predict_two_stage_core_probabilities(
+        self,
+        *,
+        two_stage_result: Mapping[str, Any],
+        X: np.ndarray,
+    ) -> np.ndarray:
+        stage_a_model = two_stage_result.get("stage_a_model")
+        if stage_a_model is None:
+            raise ValueError("missing_stage_a_model")
+        raw_stage_a = stage_a_model.predict(X, verbose=0)
+        if isinstance(raw_stage_a, dict):
+            raw_stage_a = raw_stage_a.get("activity_logits")
+        stage_a_probs = self._to_probability_matrix(raw_stage_a)
+        if stage_a_probs.shape[1] < 2:
+            raise ValueError(f"invalid_stage_a_width:{stage_a_probs.shape}")
+
+        n_samples = int(stage_a_probs.shape[0])
+        n_classes = int(two_stage_result.get("num_classes", 0) or 0)
+        if n_classes <= 1:
+            raise ValueError(f"invalid_two_stage_num_classes:{n_classes}")
+
+        excluded_ids = [int(v) for v in (two_stage_result.get("excluded_class_ids") or []) if int(v) < n_classes]
+        occupied_ids = [int(v) for v in (two_stage_result.get("occupied_class_ids") or []) if int(v) < n_classes]
+        if not excluded_ids or not occupied_ids:
+            raise ValueError("invalid_two_stage_class_mapping")
+
+        raw_stage_a_threshold = two_stage_result.get(
+            "stage_a_occupied_threshold",
+            self._resolve_two_stage_stage_a_default_threshold(),
+        )
+        try:
+            parsed_stage_a_threshold = float(raw_stage_a_threshold)
+        except (TypeError, ValueError):
+            parsed_stage_a_threshold = self._resolve_two_stage_stage_a_default_threshold()
+        stage_a_threshold = float(np.clip(parsed_stage_a_threshold, 0.0, 1.0))
+        p_occ = stage_a_probs[:, 1]
+        p_unocc = stage_a_probs[:, 0]
+        occupied_mask = p_occ >= stage_a_threshold
+        out = np.zeros(shape=(n_samples, n_classes), dtype=np.float32)
+        non_occ_indices = np.where(~occupied_mask)[0]
+        if non_occ_indices.size > 0:
+            out[np.ix_(non_occ_indices, np.asarray(excluded_ids, dtype=np.int32))] = (
+                1.0 / float(len(excluded_ids))
+            )
+
+        if np.any(occupied_mask):
+            occ_indices = np.where(occupied_mask)[0]
+            p_occ_active = p_occ[occupied_mask]
+            p_unocc_active = p_unocc[occupied_mask]
+            out[np.ix_(occ_indices, np.asarray(excluded_ids, dtype=np.int32))] = (
+                (p_unocc_active / float(len(excluded_ids)))[:, None]
+            )
+
+            stage_b_model = two_stage_result.get("stage_b_model")
+            if stage_b_model is not None:
+                raw_stage_b = stage_b_model.predict(X, verbose=0)
+                if isinstance(raw_stage_b, dict):
+                    raw_stage_b = raw_stage_b.get("activity_logits")
+                stage_b_probs = self._to_probability_matrix(raw_stage_b)
+                if stage_b_probs.shape[1] != len(occupied_ids):
+                    raise ValueError(
+                        f"invalid_stage_b_width:{stage_b_probs.shape[1]}!=expected:{len(occupied_ids)}"
+                    )
+                stage_b_probs = stage_b_probs[occupied_mask]
+                for idx, class_id in enumerate(occupied_ids):
+                    out[occ_indices, int(class_id)] = p_occ_active * stage_b_probs[:, idx]
+            else:
+                primary_occupied_class_id = int(
+                    two_stage_result.get("primary_occupied_class_id", occupied_ids[0])
+                )
+                if primary_occupied_class_id not in occupied_ids:
+                    primary_occupied_class_id = occupied_ids[0]
+                out[occ_indices, int(primary_occupied_class_id)] = p_occ_active
+
+        row_sums = np.sum(out, axis=1, keepdims=True)
+        invalid_rows = row_sums[:, 0] <= 1e-8
+        if np.any(invalid_rows):
+            out[invalid_rows, :] = 0.0
+            out[invalid_rows, excluded_ids[0]] = 1.0
+            row_sums = np.sum(out, axis=1, keepdims=True)
+        out = out / np.clip(row_sums, 1e-8, None)
+        return out.astype(np.float32, copy=False)
+
+    def _write_two_stage_core_artifacts(
+        self,
+        *,
+        elder_id: str,
+        room_name: str,
+        saved_version: int,
+        two_stage_result: Mapping[str, Any],
+        promote_to_latest: bool,
+    ) -> Dict[str, str]:
+        """
+        Persist two-stage core-room artifacts as versioned files and latest aliases.
+        """
+        if not bool(two_stage_result.get("enabled", False)):
+            return {}
+        stage_a_model = two_stage_result.get("stage_a_model")
+        if stage_a_model is None:
+            return {}
+
+        models_dir = self.registry.get_models_dir(elder_id)
+        stage_a_versioned = models_dir / f"{room_name}_v{int(saved_version)}_two_stage_stage_a_model.keras"
+        stage_b_versioned = models_dir / f"{room_name}_v{int(saved_version)}_two_stage_stage_b_model.keras"
+        meta_versioned = models_dir / f"{room_name}_v{int(saved_version)}_two_stage_meta.json"
+
+        stage_a_model.save(str(stage_a_versioned))
+        stage_b_model = two_stage_result.get("stage_b_model")
+        stage_b_enabled = bool(two_stage_result.get("stage_b_enabled", False) and stage_b_model is not None)
+        if stage_b_enabled:
+            stage_b_model.save(str(stage_b_versioned))
+
+        meta_payload = {
+            "schema_version": "beta6.two_stage_core.v1",
+            "created_at_utc": _utc_now_iso_z(),
+            "elder_id": str(elder_id),
+            "room": str(room_name),
+            "saved_version": int(saved_version),
+            "gate_mode": str(two_stage_result.get("gate_mode") or self._resolve_two_stage_gate_mode()),
+            "stage_b_enabled": bool(stage_b_enabled),
+            "stage_b_reason": str(two_stage_result.get("stage_b_reason") or ""),
+            "stage_a_occupied_threshold": float(
+                two_stage_result.get(
+                    "stage_a_occupied_threshold",
+                    self._resolve_two_stage_stage_a_default_threshold(),
+                )
+            ),
+            "stage_a_threshold_source": str(two_stage_result.get("stage_a_threshold_source") or "env_default"),
+            "stage_a_calibration": dict(two_stage_result.get("stage_a_calibration") or {}),
+            "num_classes": int(two_stage_result.get("num_classes", 0) or 0),
+            "classes": list((two_stage_result.get("class_profile") or {}).get("classes", [])),
+            "excluded_class_ids": [int(v) for v in (two_stage_result.get("excluded_class_ids") or [])],
+            "occupied_class_ids": [int(v) for v in (two_stage_result.get("occupied_class_ids") or [])],
+            "primary_occupied_class_id": int(
+                two_stage_result.get("primary_occupied_class_id", -1) or -1
+            ),
+        }
+        meta_versioned.write_text(json.dumps(meta_payload, indent=2))
+
+        artifact_paths = {
+            "stage_a_model_versioned": str(stage_a_versioned),
+            "meta_versioned": str(meta_versioned),
+        }
+        if stage_b_enabled:
+            artifact_paths["stage_b_model_versioned"] = str(stage_b_versioned)
+
+        if promote_to_latest:
+            stage_a_latest = models_dir / f"{room_name}_two_stage_stage_a_model.keras"
+            stage_b_latest = models_dir / f"{room_name}_two_stage_stage_b_model.keras"
+            meta_latest = models_dir / f"{room_name}_two_stage_meta.json"
+            shutil.copy2(stage_a_versioned, stage_a_latest)
+            if stage_b_enabled:
+                shutil.copy2(stage_b_versioned, stage_b_latest)
+            else:
+                try:
+                    stage_b_latest.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            meta_latest.write_text(json.dumps(meta_payload, indent=2))
+            artifact_paths.update(
+                {
+                    "stage_a_model_latest": str(stage_a_latest),
+                    "meta_latest": str(meta_latest),
+                }
+            )
+            if stage_b_enabled:
+                artifact_paths["stage_b_model_latest"] = str(stage_b_latest)
+        return artifact_paths
+
+    @staticmethod
     def _build_class_prefix_counts(y_seq: np.ndarray, class_ids: List[int]) -> Dict[int, np.ndarray]:
         """
         Build cumulative counts per class for O(1) range support queries.
@@ -1556,6 +2896,11 @@ class TrainingPipeline:
             "required_class_ids": sorted(set(int(v) for v in required_class_ids)),
             "min_support": int(max(1, min_support)),
             "search_radius": 0,
+            "drift_optimization_enabled": True,
+            "drift_distance_penalty": 0.0,
+            "drift_max_shift_fraction": 0.0,
+            "min_holdout_samples": 0,
+            "min_train_samples": 0,
         }
         required = sorted(set(int(v) for v in required_class_ids))
         if n < 2 or len(required) == 0:
@@ -1575,7 +2920,7 @@ class TrainingPipeline:
             if radius > 0 and right <= n - 1:
                 candidates.append(int(right))
 
-        for radius, split_idx in enumerate(candidates):
+        def _support_ok(split_idx: int) -> bool:
             ok = True
             for class_id in required:
                 train_count = int(prefixes[class_id][split_idx])
@@ -1588,22 +2933,119 @@ class TrainingPipeline:
                 if totals[class_id] >= (2 * min_support) and train_count < min_support:
                     ok = False
                     break
-            if not ok:
-                continue
-            debug["selected_split_idx"] = int(split_idx)
-            debug["search_radius"] = int(radius)
-            debug["holdout_support_by_class"] = {
+            return bool(ok)
+
+        def _holdout_support(split_idx: int) -> Dict[str, int]:
+            return {
                 str(class_id): int(totals[class_id] - int(prefixes[class_id][split_idx]))
                 for class_id in required
             }
+
+        def _drift_summary(split_idx: int) -> Dict[str, Any]:
+            train_total = float(max(1, split_idx))
+            holdout_total = float(max(1, n - split_idx))
+            max_abs = -1.0
+            max_class = None
+            class_drift: Dict[str, Dict[str, float]] = {}
+            for class_id in required:
+                train_count = int(prefixes[class_id][split_idx])
+                holdout_count = int(totals[class_id] - train_count)
+                train_share = float(train_count) / train_total
+                holdout_share = float(holdout_count) / holdout_total
+                drift = float(train_share - holdout_share)
+                class_drift[str(class_id)] = {
+                    "train_share": float(train_share),
+                    "holdout_share": float(holdout_share),
+                    "drift": float(drift),
+                    "drift_pp": float(drift * 100.0),
+                }
+                abs_drift = abs(drift)
+                if abs_drift > max_abs:
+                    max_abs = float(abs_drift)
+                    max_class = int(class_id)
+            return {
+                "max_abs_drift": float(max_abs if max_abs >= 0.0 else 0.0),
+                "max_drift_class": max_class,
+                "class_drift": class_drift,
+            }
+
+        fallback_split_idx: Optional[int] = None
+        fallback_radius: int = 0
+        for radius, split_idx in enumerate(candidates):
+            if not _support_ok(split_idx):
+                continue
+            fallback_split_idx = int(split_idx)
+            fallback_radius = int(radius)
+            break
+
+        if fallback_split_idx is None:
+            debug["found"] = False
+            debug["holdout_support_by_class"] = _holdout_support(default_split_idx)
+            return int(default_split_idx), debug
+
+        optimize_drift = str(os.getenv("TEMPORAL_SPLIT_OPTIMIZE_DRIFT", "true")).strip().lower() in {
+            "1", "true", "yes", "on", "enabled",
+        }
+        max_shift_fraction = float(self._read_float_env("TEMPORAL_SPLIT_MAX_SHIFT_FRACTION", 0.12))
+        max_shift_fraction = float(min(max(max_shift_fraction, 0.0), 0.40))
+        max_shift_samples = int(max(0, np.floor(float(n) * max_shift_fraction)))
+        drift_distance_penalty = float(self._read_float_env("TEMPORAL_SPLIT_DRIFT_DISTANCE_PENALTY", 0.50))
+        drift_distance_penalty = float(max(0.0, drift_distance_penalty))
+        min_holdout_fraction = float(self._read_float_env("TEMPORAL_SPLIT_MIN_HOLDOUT_FRACTION", 0.10))
+        min_holdout_fraction = float(min(max(min_holdout_fraction, 0.02), 0.45))
+        min_train_fraction = float(self._read_float_env("TEMPORAL_SPLIT_MIN_TRAIN_FRACTION", 0.60))
+        min_train_fraction = float(min(max(min_train_fraction, 0.30), 0.90))
+        min_holdout_samples = int(max(min_support, int(np.ceil(float(n) * min_holdout_fraction))))
+        min_train_samples = int(max(min_support, int(np.ceil(float(n) * min_train_fraction))))
+
+        debug["drift_optimization_enabled"] = bool(optimize_drift)
+        debug["drift_distance_penalty"] = float(drift_distance_penalty)
+        debug["drift_max_shift_fraction"] = float(max_shift_fraction)
+        debug["min_holdout_samples"] = int(min_holdout_samples)
+        debug["min_train_samples"] = int(min_train_samples)
+
+        if not optimize_drift:
+            debug["selected_split_idx"] = int(fallback_split_idx)
+            debug["search_radius"] = int(fallback_radius)
+            debug["holdout_support_by_class"] = _holdout_support(fallback_split_idx)
+            return int(fallback_split_idx), debug
+
+        scored: List[Tuple[float, float, float, int, int, Dict[str, Any]]] = []
+        for radius, split_idx in enumerate(candidates):
+            if not _support_ok(split_idx):
+                continue
+            if abs(int(split_idx) - int(default_split_idx)) > int(max_shift_samples):
+                continue
+            if int(split_idx) < int(min_train_samples):
+                continue
+            holdout_size = int(n - int(split_idx))
+            if holdout_size < int(min_holdout_samples):
+                continue
+
+            drift = _drift_summary(int(split_idx))
+            distance_ratio = float(abs(int(split_idx) - int(default_split_idx))) / float(max(1, n))
+            score = float(drift["max_abs_drift"]) + (float(drift_distance_penalty) * distance_ratio)
+            scored.append((score, float(drift["max_abs_drift"]), distance_ratio, int(radius), int(split_idx), drift))
+
+        if scored:
+            scored.sort(key=lambda item: (item[0], item[2], item[3], item[4]))
+            _, _, _, radius, split_idx, drift = scored[0]
+            debug["selected_split_idx"] = int(split_idx)
+            debug["search_radius"] = int(radius)
+            debug["holdout_support_by_class"] = _holdout_support(split_idx)
+            debug["drift_objective"] = {
+                "score": float(scored[0][0]),
+                "max_abs_drift": float(drift["max_abs_drift"]),
+                "max_drift_class": drift["max_drift_class"],
+                "distance_ratio": float(scored[0][2]),
+            }
             return int(split_idx), debug
 
-        debug["found"] = False
-        debug["holdout_support_by_class"] = {
-            str(class_id): int(totals[class_id] - int(prefixes[class_id][default_split_idx]))
-            for class_id in required
-        }
-        return int(default_split_idx), debug
+        debug["drift_optimization_fallback"] = "no_candidate_met_drift_constraints"
+        debug["selected_split_idx"] = int(fallback_split_idx)
+        debug["search_radius"] = int(fallback_radius)
+        debug["holdout_support_by_class"] = _holdout_support(fallback_split_idx)
+        return int(fallback_split_idx), debug
 
     def _select_calibration_size_with_support(
         self,
@@ -1706,6 +3148,11 @@ class TrainingPipeline:
         if len(y_train) == 0:
             return X_train, y_train, stats
 
+        classes, counts = np.unique(y_train, return_counts=True)
+        class_counts_before = {int(cls): int(cnt) for cls, cnt in zip(classes, counts)}
+        stats["class_counts_before"] = class_counts_before
+        stats["class_counts_after"] = dict(class_counts_before)
+
         cfg = self._resolve_minority_sampling_config(room_name)
         stats["enabled"] = bool(cfg["enabled"])
         stats["target_share"] = float(cfg["target_share"])
@@ -1713,9 +3160,6 @@ class TrainingPipeline:
         if not bool(cfg["enabled"]):
             return X_train, y_train, stats
 
-        classes, counts = np.unique(y_train, return_counts=True)
-        class_counts_before = {int(cls): int(cnt) for cls, cnt in zip(classes, counts)}
-        stats["class_counts_before"] = class_counts_before
         total = int(len(y_train))
         target_share = float(cfg["target_share"])
         target_count = max(1, int(np.ceil(total * target_share)))
@@ -2644,6 +4088,8 @@ class TrainingPipeline:
             shadow_eval_probs = None
             split_support_debug: Dict[str, Any] = {}
             calib_split_support_debug: Dict[str, Any] = {}
+            holdout_support_map: Dict[str, int] = {}
+            holdout_min_support: int = 0
             if val_split > 0:
                 default_split_idx = int(len(X_seq) * (1 - val_split))
                 default_split_idx = max(1, min(len(X_seq) - 1, default_split_idx))
@@ -2665,6 +4111,12 @@ class TrainingPipeline:
                 X_holdout = X_seq[split_idx:]
                 y_holdout = y_seq[split_idx:]
                 ts_holdout = seq_timestamps[split_idx:]
+                holdout_classes, holdout_counts = np.unique(y_holdout, return_counts=True)
+                holdout_support_map = {
+                    str(int(class_id)): int(count)
+                    for class_id, count in zip(holdout_classes, holdout_counts)
+                }
+                holdout_min_support = min(holdout_support_map.values()) if holdout_support_map else 0
 
                 # Separate calibration split from holdout when enough samples exist.
                 if len(X_holdout) >= int(calibration_policy.separate_calibration_min_holdout):
@@ -2730,6 +4182,8 @@ class TrainingPipeline:
                 validation_data = None
                 logger.info(f"Training on full dataset ({len(X_seq)} samples)")
 
+            train_class_support_pre_sampling = self._build_class_support_map(y_train)
+
             # Apply downsampling on train split only (post-temporal split).
             pre_downsample_count = int(len(X_train))
             X_train, y_train, ts_train = self._downsample_easy_unoccupied(
@@ -2740,6 +4194,7 @@ class TrainingPipeline:
                 resolved_cfg=unoccupied_cfg,
             )
             downsample_removed = int(pre_downsample_count - len(X_train))
+            train_class_support_post_downsample = self._build_class_support_map(y_train)
 
             replay_stats = {
                 "total": int(len(X_train)),
@@ -2758,12 +4213,14 @@ class TrainingPipeline:
                     sampling_strategy=str(fine_tune_params.get("replay_sampling", "random_stratified")),
                 )
             train_samples_for_evidence = int(len(X_train))
+            train_class_support_pre_minority_sampling = self._build_class_support_map(y_train)
 
             X_train, y_train, minority_sampling_stats = self._apply_minority_class_sampling(
                 X_train=X_train,
                 y_train=y_train,
                 room_name=room_name,
             )
+            train_class_support_post_minority_sampling = self._build_class_support_map(y_train)
 
             # Class Weights for Imbalance Handling (compute on training portion only).
             unique_classes, class_counts = np.unique(y_train, return_counts=True)
@@ -2828,6 +4285,15 @@ class TrainingPipeline:
                     f"min={float(np.min(sample_weight)):.3f}, max={float(np.max(sample_weight)):.3f}"
                 )
 
+            initial_model_weights = model.get_weights()
+            checkpoint_selector: Optional[_GateAlignedCheckpointCallback] = None
+            checkpoint_selector_retry: Optional[_GateAlignedCheckpointCallback] = None
+            collapse_retry_debug: Dict[str, Any] = {
+                "enabled": bool(self._resolve_collapse_retry_enabled()),
+                "triggered": False,
+                "selected": "first_pass",
+            }
+
             timeline_target_debug: Dict[str, Any] = {"enabled": False, "reason": "not_timeline_model"}
             timeline_validation_debug: Dict[str, Any] = {}
             timeline_targets_train: Dict[str, np.ndarray] = {}
@@ -2856,6 +4322,16 @@ class TrainingPipeline:
                             f"proceeding without validation targets. Details={timeline_validation_debug}"
                         )
                         timeline_targets_val = {}
+
+            if validation_data is not None and self._resolve_gate_aligned_checkpoint_enabled():
+                checkpoint_selector = _GateAlignedCheckpointCallback(
+                    pipeline=self,
+                    room_name=room_name,
+                    X_val=np.asarray(validation_data[0], dtype=np.float32),
+                    y_val=np.asarray(validation_data[1], dtype=np.int32),
+                    timeline_multitask_enabled=bool(timeline_multitask_enabled),
+                )
+                callbacks.append(checkpoint_selector)
 
             if timeline_multitask_enabled:
                 activity_labels_train = np.asarray(timeline_targets_train["activity_labels"], dtype=np.int32)
@@ -2932,6 +4408,172 @@ class TrainingPipeline:
                     sample_weight=sample_weight,
                     callbacks=callbacks,
                 )
+
+            if (
+                validation_data is not None
+                and not bool(timeline_multitask_enabled)
+                and bool(collapse_retry_debug.get("enabled", False))
+            ):
+                try:
+                    first_raw_pred = model.predict(validation_data[0], verbose=0)
+                    first_probs = self._extract_activity_probabilities(
+                        first_raw_pred,
+                        timeline_multitask_enabled=False,
+                    )
+                    first_summary = self._summarize_gate_aligned_validation(
+                        room_name=room_name,
+                        y_true=np.asarray(validation_data[1], dtype=np.int32),
+                        y_pred_probs=first_probs,
+                    )
+                    collapse_retry_debug["first_pass"] = first_summary
+
+                    if bool(first_summary.get("collapsed", False)):
+                        collapse_retry_debug["triggered"] = True
+                        first_pass_weights = model.get_weights()
+                        first_history = history
+                        retry_class_weights = self._build_collapse_retry_class_weights(
+                            room_name=room_name,
+                            y_train=np.asarray(y_train, dtype=np.int32),
+                            base_class_weights=adjusted_class_weight_dict,
+                        )
+                        retry_lr = float(learning_rate) * float(self._resolve_collapse_retry_lr_scale())
+                        collapse_retry_debug["retry_learning_rate"] = float(retry_lr)
+                        collapse_retry_debug["retry_class_weights"] = {
+                            str(k): float(v) for k, v in retry_class_weights.items()
+                        }
+
+                        model.set_weights(initial_model_weights)
+                        model.compile(
+                            optimizer=tf.keras.optimizers.Adam(learning_rate=retry_lr),
+                            loss='sparse_categorical_crossentropy',
+                            metrics=['accuracy'],
+                            jit_compile=False,
+                        )
+
+                        retry_callbacks = [
+                            EarlyStopping(
+                                monitor='val_loss',
+                                patience=int(
+                                    fine_tune_params.get("patience", 1) if is_correction_fine_tune else 2
+                                ),
+                                restore_best_weights=True,
+                                verbose=1,
+                            )
+                        ]
+                        if progress_callback:
+                            from tensorflow.keras.callbacks import LambdaCallback
+
+                            def on_retry_epoch_end(epoch, logs):
+                                percent = int(((epoch + 1) / max_epochs) * 100)
+                                logs = logs or {}
+                                retry_acc = float(logs.get("accuracy", 0.0) or 0.0)
+                                progress_callback(
+                                    percent,
+                                    f"Retry Epoch {epoch+1}/{max_epochs} - "
+                                    f"loss: {float(logs.get('loss', 0.0)):.4f}, "
+                                    f"acc: {retry_acc:.4f}",
+                                )
+
+                            retry_callbacks.append(LambdaCallback(on_epoch_end=on_retry_epoch_end))
+
+                        if self._resolve_gate_aligned_checkpoint_enabled():
+                            checkpoint_selector_retry = _GateAlignedCheckpointCallback(
+                                pipeline=self,
+                                room_name=room_name,
+                                X_val=np.asarray(validation_data[0], dtype=np.float32),
+                                y_val=np.asarray(validation_data[1], dtype=np.int32),
+                                timeline_multitask_enabled=False,
+                            )
+                            retry_callbacks.append(checkpoint_selector_retry)
+
+                        history_retry = model.fit(
+                            X_train,
+                            y_train,
+                            epochs=max_epochs,
+                            batch_size=32,
+                            validation_data=validation_data,
+                            shuffle=False,
+                            verbose=2,
+                            class_weight=None if use_sample_weight else retry_class_weights,
+                            sample_weight=sample_weight,
+                            callbacks=retry_callbacks,
+                        )
+
+                        retry_raw_pred = model.predict(validation_data[0], verbose=0)
+                        retry_probs = self._extract_activity_probabilities(
+                            retry_raw_pred,
+                            timeline_multitask_enabled=False,
+                        )
+                        retry_summary = self._summarize_gate_aligned_validation(
+                            room_name=room_name,
+                            y_true=np.asarray(validation_data[1], dtype=np.int32),
+                            y_pred_probs=retry_probs,
+                        )
+                        collapse_retry_debug["retry_pass"] = retry_summary
+
+                        first_score = float(first_summary.get("gate_aligned_score", 0.0))
+                        retry_score = float(retry_summary.get("gate_aligned_score", 0.0))
+                        choose_retry = retry_score > (first_score + 1e-8)
+                        if (
+                            not choose_retry
+                            and bool(first_summary.get("collapsed", False))
+                            and not bool(retry_summary.get("collapsed", False))
+                        ):
+                            choose_retry = True
+
+                        if choose_retry:
+                            history = history_retry
+                            adjusted_class_weight_dict = {
+                                int(k): float(v) for k, v in retry_class_weights.items()
+                            }
+                            collapse_retry_debug["selected"] = "retry_pass"
+                            if checkpoint_selector_retry is not None:
+                                checkpoint_selector = checkpoint_selector_retry
+                            logger.info(
+                                f"Collapse auto-retry accepted for {room_name}: "
+                                f"score {first_score:.4f} -> {retry_score:.4f}"
+                            )
+                        else:
+                            model.set_weights(first_pass_weights)
+                            history = first_history
+                            collapse_retry_debug["selected"] = "first_pass"
+                            logger.info(
+                                f"Collapse auto-retry rejected for {room_name}: "
+                                f"score {first_score:.4f} vs {retry_score:.4f}"
+                            )
+                except Exception as e:
+                    collapse_retry_debug["error"] = f"{type(e).__name__}: {e}"
+
+            two_stage_result = self._train_two_stage_core_models(
+                room_name=room_name,
+                seq_length=seq_length,
+                X_train=np.asarray(X_train, dtype=np.float32),
+                y_train=np.asarray(y_train, dtype=np.int32),
+                validation_data=(
+                    (
+                        np.asarray(validation_data[0], dtype=np.float32),
+                        np.asarray(validation_data[1], dtype=np.int32),
+                    )
+                    if validation_data is not None
+                    else None
+                ),
+                max_epochs=max_epochs,
+            )
+            if bool(two_stage_result.get("enabled", False)):
+                stage_a_calibration = self._calibrate_two_stage_stage_a_threshold(
+                    room_name=room_name,
+                    two_stage_result=two_stage_result,
+                    calibration_data=calibration_data or validation_data,
+                )
+                two_stage_result["stage_a_occupied_threshold"] = float(
+                    stage_a_calibration.get(
+                        "threshold", self._resolve_two_stage_stage_a_default_threshold()
+                    )
+                )
+                two_stage_result["stage_a_threshold_source"] = str(
+                    stage_a_calibration.get("source", "env_default")
+                )
+                two_stage_result["stage_a_calibration"] = stage_a_calibration
             
             # Capture metrics - comprehensive reporting
             acc_history = history.history.get("accuracy")
@@ -2958,10 +4600,16 @@ class TrainingPipeline:
                 'adapter_freeze_summary': freeze_summary,
                 'replay': replay_stats,
                 'minority_sampling': minority_sampling_stats,
+                'train_class_support_pre_sampling': train_class_support_pre_sampling,
+                'train_class_support_post_downsample': train_class_support_post_downsample,
+                'train_class_support_pre_minority_sampling': train_class_support_pre_minority_sampling,
+                'train_class_support_post_minority_sampling': train_class_support_post_minority_sampling,
                 'policy_hash': policy_hash,
                 'metric_source': 'holdout_validation',
                 'validation_min_class_support': 0,
                 'validation_class_support': {},
+                'holdout_min_class_support': int(holdout_min_support),
+                'holdout_class_support': dict(holdout_support_map),
                 'required_minority_support': int(holdout_support_floor),
                 'insufficient_validation_evidence': False,
                 'timeline_native_weighting': timeline_native_weighting,
@@ -2969,6 +4617,32 @@ class TrainingPipeline:
                     'enabled': bool(timeline_multitask_enabled),
                     'targets': timeline_target_debug,
                     'validation_targets': timeline_validation_debug,
+                },
+                'checkpoint_selection': (
+                    checkpoint_selector.to_dict()
+                    if checkpoint_selector is not None
+                    else {"enabled": False}
+                ),
+                'collapse_retry': dict(collapse_retry_debug),
+                'two_stage_core': {
+                    'enabled': bool(two_stage_result.get('enabled', False)),
+                    'reason': str(two_stage_result.get('reason', 'disabled')),
+                    'gate_mode': str(two_stage_result.get('gate_mode', self._resolve_two_stage_gate_mode())),
+                    'stage_b_enabled': bool(two_stage_result.get('stage_b_enabled', False)),
+                    'stage_b_reason': str(two_stage_result.get('stage_b_reason', '')),
+                    'excluded_class_ids': list(two_stage_result.get('excluded_class_ids', [])),
+                    'occupied_class_ids': list(two_stage_result.get('occupied_class_ids', [])),
+                    'primary_occupied_class_id': two_stage_result.get('primary_occupied_class_id'),
+                    'stage_a_occupied_threshold': float(
+                        two_stage_result.get(
+                            'stage_a_occupied_threshold',
+                            self._resolve_two_stage_stage_a_default_threshold(),
+                        )
+                    ),
+                    'stage_a_threshold_source': str(
+                        two_stage_result.get('stage_a_threshold_source', 'env_default')
+                    ),
+                    'stage_a_calibration': dict(two_stage_result.get('stage_a_calibration', {})),
                 },
             }
             metrics["split_support"] = split_support_debug
@@ -2997,26 +4671,92 @@ class TrainingPipeline:
                 val_support_map = {str(int(c)): int(n) for c, n in zip(val_classes, val_counts)}
                 metrics["validation_class_support"] = val_support_map
                 metrics["validation_min_class_support"] = min(val_support_map.values()) if val_support_map else 0
-                y_pred = model.predict(validation_data[0], verbose=0)
-                if isinstance(y_pred, dict):
-                    y_pred = y_pred.get("activity_logits")
-                if y_pred is None:
-                    raise ModelTrainError(f"Missing activity logits for validation predictions ({room_name})")
-                if bool(timeline_multitask_enabled):
-                    y_pred = tf.nn.softmax(np.asarray(y_pred), axis=1).numpy()
-                y_pred_classes = np.argmax(y_pred, axis=1)
+                y_pred_single = model.predict(validation_data[0], verbose=0)
+                y_pred = self._extract_activity_probabilities(
+                    y_pred_single,
+                    timeline_multitask_enabled=bool(timeline_multitask_enabled),
+                )
+
+                if bool(two_stage_result.get("enabled", False)):
+                    gate_mode = str(
+                        (metrics.get("two_stage_core") or {}).get("gate_mode", self._resolve_two_stage_gate_mode())
+                    ).strip().lower()
+                    try:
+                        y_pred_two_stage = self._predict_two_stage_core_probabilities(
+                            two_stage_result=two_stage_result,
+                            X=np.asarray(validation_data[0], dtype=np.float32),
+                        )
+                        y_pred_two_stage_classes = np.argmax(y_pred_two_stage, axis=1)
+                        report_two_stage = classification_report(
+                            y_val_eval,
+                            y_pred_two_stage_classes,
+                            output_dict=True,
+                            zero_division=0,
+                        )
+                        two_stage_payload = {
+                            "macro_f1": float(report_two_stage.get("macro avg", {}).get("f1-score", 0.0)),
+                            "macro_recall": float(report_two_stage.get("macro avg", {}).get("recall", 0.0)),
+                            "macro_precision": float(report_two_stage.get("macro avg", {}).get("precision", 0.0)),
+                        }
+                        metrics["two_stage_core"]["validation_summary"] = two_stage_payload
+                        if gate_mode == "primary":
+                            y_pred = y_pred_two_stage
+                            metrics["two_stage_core"]["gate_source"] = "two_stage_primary"
+                            metrics["metric_source"] = "holdout_validation_two_stage_primary"
+                        else:
+                            metrics["two_stage_core"]["gate_source"] = "single_stage_shadow"
+                    except Exception as e:
+                        metrics["two_stage_core"]["error"] = f"{type(e).__name__}: {e}"
+                        metrics["two_stage_core"]["gate_source"] = "single_stage_fallback_error"
+                        logger.warning(f"Two-stage validation fallback for {room_name}: {e}")
+
                 shadow_eval_y_true = np.asarray(y_val_eval, dtype=np.int32)
-                shadow_eval_probs = np.asarray(y_pred, dtype=np.float32)
+                shadow_eval_probs = None
+                label_encoder = self.platform.label_encoders.get(room_name)
+                classes = getattr(label_encoder, "classes_", None) if label_encoder is not None else None
                 
                 try:
+                    y_pred_arr = np.asarray(y_pred)
+                    if y_pred_arr.ndim != 2 or y_pred_arr.shape[0] != len(y_val_eval):
+                        raise ValueError(
+                            f"unexpected_validation_prediction_shape:{getattr(y_pred_arr, 'shape', None)}"
+                        )
+                    y_pred_classes = np.argmax(y_pred_arr, axis=1)
+                    shadow_eval_probs = np.asarray(y_pred_arr, dtype=np.float32)
+
+                    class_ids = sorted(
+                        set(np.unique(y_val_eval).astype(int)) | set(np.unique(y_pred_classes).astype(int))
+                    )
+                    if classes is not None:
+                        class_ids = [int(cid) for cid in class_ids if 0 <= int(cid) < len(classes)]
+                    if class_ids:
+                        cm = confusion_matrix(y_val_eval, y_pred_classes, labels=class_ids).astype(int)
+                        labels = []
+                        true_dist: Dict[str, int] = {}
+                        pred_dist: Dict[str, int] = {}
+                        for idx, class_id in enumerate(class_ids):
+                            label_name = (
+                                str(classes[class_id]).strip().lower()
+                                if classes is not None and 0 <= int(class_id) < len(classes)
+                                else f"class_{int(class_id)}"
+                            )
+                            labels.append(label_name)
+                            true_dist[label_name] = int(cm[idx, :].sum())
+                            pred_dist[label_name] = int(cm[:, idx].sum())
+                        metrics["confusion_matrix"] = {
+                            "class_ids": [int(cid) for cid in class_ids],
+                            "labels": labels,
+                            "matrix": cm.tolist(),
+                        }
+                        metrics["true_class_distribution"] = true_dist
+                        metrics["predicted_class_distribution"] = pred_dist
+
                     report = classification_report(y_val_eval, y_pred_classes, output_dict=True, zero_division=0)
                     metrics['macro_f1'] = float(report['macro avg']['f1-score'])
                     metrics['macro_recall'] = float(report['macro avg']['recall'])
                     metrics['macro_precision'] = float(report['macro avg']['precision'])
                     per_label_recall = {}
                     per_label_support = {}
-                    label_encoder = self.platform.label_encoders.get(room_name)
-                    classes = getattr(label_encoder, "classes_", None) if label_encoder is not None else None
                     if classes is not None:
                         for class_id in sorted(np.unique(y_val_eval).astype(int)):
                             if class_id < 0 or class_id >= len(classes):
@@ -3329,6 +5069,23 @@ class TrainingPipeline:
             metrics["saved_version"] = int(saved_version)
             metrics["promotion_deferred"] = bool(defer_promotion and gate_pass)
             metrics["promoted_to_latest"] = bool(promote_to_latest)
+            if bool(two_stage_result.get("enabled", False)):
+                try:
+                    two_stage_artifacts = self._write_two_stage_core_artifacts(
+                        elder_id=elder_id,
+                        room_name=room_name,
+                        saved_version=int(saved_version),
+                        two_stage_result=two_stage_result,
+                        promote_to_latest=bool(promote_to_latest),
+                    )
+                    if two_stage_artifacts:
+                        metrics["two_stage_core"]["artifact_paths"] = two_stage_artifacts
+                        metrics["two_stage_core"]["saved_version"] = int(saved_version)
+                except Exception as e:
+                    metrics["two_stage_core"]["artifact_error"] = f"{type(e).__name__}: {e}"
+                    logger.warning(
+                        f"Failed writing two-stage artifacts for {elder_id}/{room_name} v{saved_version}: {e}"
+                    )
             if shadow_artifact_payload is not None:
                 shadow_paths = self._write_event_first_shadow_artifact(
                     elder_id=elder_id,

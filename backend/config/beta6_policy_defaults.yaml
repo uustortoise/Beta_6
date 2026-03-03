@@ -54,12 +54,13 @@ calibration:
 unoccupied_downsample:
   min_share_by_room:
     bathroom: 0.08
+    bedroom: 0.60
     entrance: 0.08
     livingroom: 0.12
     kitchen: 0.14
   stride_by_room:
     bathroom: 12
-    bedroom: 4
+    bedroom: 2
     entrance: 14
     kitchen: 10
     livingroom: 12

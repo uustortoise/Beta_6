@@ -778,9 +778,29 @@ class TrainingPipeline:
             out[key_txt] = float(numeric)
         return out
 
+    @staticmethod
+    def _build_class_support_map(y_values: Any) -> Dict[str, int]:
+        out: Dict[str, int] = {}
+        try:
+            arr = np.asarray(y_values, dtype=np.int64)
+        except Exception:
+            return out
+        if arr.size == 0:
+            return out
+        classes, counts = np.unique(arr, return_counts=True)
+        for class_id, count in zip(classes, counts):
+            out[str(int(class_id))] = int(count)
+        return out
+
     def _compute_class_prior_drift(self, candidate_metrics: Mapping[str, Any]) -> Dict[str, Any]:
         """
-        Compare train (post-sampling) vs validation class priors for drift diagnostics.
+        Compare train vs validation class priors for drift diagnostics.
+
+        Primary hard-gate source:
+        - pre-sampling train support (temporal train split before train-only rebalancing)
+
+        Secondary diagnostic source:
+        - post-sampling train support (after downsampling/minority sampling)
         """
         result: Dict[str, Any] = {
             "available": False,
@@ -794,20 +814,29 @@ class TrainingPipeline:
             "validation_total": 0.0,
             "required_validation_support": 0,
             "validation_min_support": 0,
+            "drift_source": "pre_sampling_train_vs_validation",
+            "sampled_available": False,
+            "sampled_max_abs_drift": None,
+            "sampled_max_abs_drift_pp": None,
+            "sampled_max_drift_class": None,
+            "sampled_class_drift": {},
+            "sampled_train_total": 0.0,
         }
 
+        train_counts_raw: Any = candidate_metrics.get("train_class_support_pre_sampling") or {}
         minority_stats = candidate_metrics.get("minority_sampling") or {}
-        train_counts_raw: Any = {}
+        sampled_counts_raw: Any = candidate_metrics.get("train_class_support_post_minority_sampling") or {}
         if isinstance(minority_stats, Mapping):
-            train_counts_raw = (
-                minority_stats.get("class_counts_after")
-                or minority_stats.get("class_counts_before")
-                or {}
-            )
+            sampled_counts_raw = sampled_counts_raw or minority_stats.get("class_counts_after") or {}
         val_counts_raw: Any = candidate_metrics.get("validation_class_support") or {}
 
         train_counts = self._normalize_class_count_map(train_counts_raw)
+        sampled_counts = self._normalize_class_count_map(sampled_counts_raw)
         val_counts = self._normalize_class_count_map(val_counts_raw)
+        if not train_counts and sampled_counts:
+            # Backward-compatible fallback for historical metrics without pre-sampling support map.
+            train_counts = dict(sampled_counts)
+            result["drift_source"] = "post_sampling_train_vs_validation_fallback"
         if not train_counts:
             result["reason"] = "missing_train_class_counts"
             return result
@@ -866,6 +895,39 @@ class TrainingPipeline:
                 "validation_min_support": int(val_min_support),
             }
         )
+        if sampled_counts:
+            sampled_total = float(sum(sampled_counts.values()))
+            if sampled_total > 0.0:
+                sampled_class_ids = sorted(set(sampled_counts.keys()) | set(val_counts.keys()), key=_sort_key)
+                sampled_class_drift: Dict[str, Dict[str, float]] = {}
+                sampled_max_abs = -1.0
+                sampled_max_class: Optional[str] = None
+                for class_id in sampled_class_ids:
+                    sampled_train_share = float(sampled_counts.get(class_id, 0.0)) / sampled_total
+                    val_share = float(val_counts.get(class_id, 0.0)) / val_total
+                    drift = float(sampled_train_share - val_share)
+                    sampled_class_drift[class_id] = {
+                        "train_share": float(sampled_train_share),
+                        "validation_share": float(val_share),
+                        "drift": float(drift),
+                        "drift_pp": float(drift * 100.0),
+                    }
+                    abs_drift = abs(drift)
+                    if abs_drift > sampled_max_abs:
+                        sampled_max_abs = float(abs_drift)
+                        sampled_max_class = class_id
+                result.update(
+                    {
+                        "sampled_available": True,
+                        "sampled_max_abs_drift": float(sampled_max_abs if sampled_max_abs >= 0.0 else 0.0),
+                        "sampled_max_abs_drift_pp": float(
+                            (sampled_max_abs if sampled_max_abs >= 0.0 else 0.0) * 100.0
+                        ),
+                        "sampled_max_drift_class": sampled_max_class,
+                        "sampled_class_drift": sampled_class_drift,
+                        "sampled_train_total": float(sampled_total),
+                    }
+                )
         return result
 
     def _is_bootstrap_release_phase(self, candidate_metrics: Mapping[str, Any]) -> bool:
@@ -1064,6 +1126,10 @@ class TrainingPipeline:
         if bool(gate_policy.block_on_train_fallback_metrics) and metric_source == "train_fallback_small_dataset":
             _add_watch(f"train_metric_fallback_blocked:{room_key}")
         if bool(class_prior_drift.get("available")):
+            if str(class_prior_drift.get("drift_source", "")).strip().lower() == (
+                "post_sampling_train_vs_validation_fallback"
+            ):
+                _add_watch(f"class_prior_drift_source_fallback:{room_key}:post_sampling")
             if bool(class_prior_drift.get("evaluable")):
                 max_abs_drift = class_prior_drift.get("max_abs_drift")
                 if max_abs_drift is not None and float(max_abs_drift) > float(prior_drift_max):
@@ -1076,6 +1142,16 @@ class TrainingPipeline:
                 _add_watch(
                     f"class_prior_drift_not_evaluable:{room_key}:support={validation_min_support}<"
                     f"required={int(required_validation_support)}"
+                )
+            sampled_max_abs_drift = class_prior_drift.get("sampled_max_abs_drift")
+            if (
+                sampled_max_abs_drift is not None
+                and float(sampled_max_abs_drift) > float(prior_drift_max)
+            ):
+                sampled_max_class = class_prior_drift.get("sampled_max_drift_class") or "unknown"
+                _add_watch(
+                    f"class_prior_drift_sampled_watch:{room_key}:{sampled_max_class}:"
+                    f"{float(sampled_max_abs_drift):.3f}>{float(prior_drift_max):.3f}"
                 )
         for key, threshold in effective_label_recall_by_room_label.items():
             key_txt = str(key).strip().lower()
@@ -2458,6 +2534,11 @@ class TrainingPipeline:
             "required_class_ids": sorted(set(int(v) for v in required_class_ids)),
             "min_support": int(max(1, min_support)),
             "search_radius": 0,
+            "drift_optimization_enabled": True,
+            "drift_distance_penalty": 0.0,
+            "drift_max_shift_fraction": 0.0,
+            "min_holdout_samples": 0,
+            "min_train_samples": 0,
         }
         required = sorted(set(int(v) for v in required_class_ids))
         if n < 2 or len(required) == 0:
@@ -2477,7 +2558,7 @@ class TrainingPipeline:
             if radius > 0 and right <= n - 1:
                 candidates.append(int(right))
 
-        for radius, split_idx in enumerate(candidates):
+        def _support_ok(split_idx: int) -> bool:
             ok = True
             for class_id in required:
                 train_count = int(prefixes[class_id][split_idx])
@@ -2490,22 +2571,119 @@ class TrainingPipeline:
                 if totals[class_id] >= (2 * min_support) and train_count < min_support:
                     ok = False
                     break
-            if not ok:
-                continue
-            debug["selected_split_idx"] = int(split_idx)
-            debug["search_radius"] = int(radius)
-            debug["holdout_support_by_class"] = {
+            return bool(ok)
+
+        def _holdout_support(split_idx: int) -> Dict[str, int]:
+            return {
                 str(class_id): int(totals[class_id] - int(prefixes[class_id][split_idx]))
                 for class_id in required
             }
+
+        def _drift_summary(split_idx: int) -> Dict[str, Any]:
+            train_total = float(max(1, split_idx))
+            holdout_total = float(max(1, n - split_idx))
+            max_abs = -1.0
+            max_class = None
+            class_drift: Dict[str, Dict[str, float]] = {}
+            for class_id in required:
+                train_count = int(prefixes[class_id][split_idx])
+                holdout_count = int(totals[class_id] - train_count)
+                train_share = float(train_count) / train_total
+                holdout_share = float(holdout_count) / holdout_total
+                drift = float(train_share - holdout_share)
+                class_drift[str(class_id)] = {
+                    "train_share": float(train_share),
+                    "holdout_share": float(holdout_share),
+                    "drift": float(drift),
+                    "drift_pp": float(drift * 100.0),
+                }
+                abs_drift = abs(drift)
+                if abs_drift > max_abs:
+                    max_abs = float(abs_drift)
+                    max_class = int(class_id)
+            return {
+                "max_abs_drift": float(max_abs if max_abs >= 0.0 else 0.0),
+                "max_drift_class": max_class,
+                "class_drift": class_drift,
+            }
+
+        fallback_split_idx: Optional[int] = None
+        fallback_radius: int = 0
+        for radius, split_idx in enumerate(candidates):
+            if not _support_ok(split_idx):
+                continue
+            fallback_split_idx = int(split_idx)
+            fallback_radius = int(radius)
+            break
+
+        if fallback_split_idx is None:
+            debug["found"] = False
+            debug["holdout_support_by_class"] = _holdout_support(default_split_idx)
+            return int(default_split_idx), debug
+
+        optimize_drift = str(os.getenv("TEMPORAL_SPLIT_OPTIMIZE_DRIFT", "true")).strip().lower() in {
+            "1", "true", "yes", "on", "enabled",
+        }
+        max_shift_fraction = float(self._read_float_env("TEMPORAL_SPLIT_MAX_SHIFT_FRACTION", 0.12))
+        max_shift_fraction = float(min(max(max_shift_fraction, 0.0), 0.40))
+        max_shift_samples = int(max(0, np.floor(float(n) * max_shift_fraction)))
+        drift_distance_penalty = float(self._read_float_env("TEMPORAL_SPLIT_DRIFT_DISTANCE_PENALTY", 0.50))
+        drift_distance_penalty = float(max(0.0, drift_distance_penalty))
+        min_holdout_fraction = float(self._read_float_env("TEMPORAL_SPLIT_MIN_HOLDOUT_FRACTION", 0.10))
+        min_holdout_fraction = float(min(max(min_holdout_fraction, 0.02), 0.45))
+        min_train_fraction = float(self._read_float_env("TEMPORAL_SPLIT_MIN_TRAIN_FRACTION", 0.60))
+        min_train_fraction = float(min(max(min_train_fraction, 0.30), 0.90))
+        min_holdout_samples = int(max(min_support, int(np.ceil(float(n) * min_holdout_fraction))))
+        min_train_samples = int(max(min_support, int(np.ceil(float(n) * min_train_fraction))))
+
+        debug["drift_optimization_enabled"] = bool(optimize_drift)
+        debug["drift_distance_penalty"] = float(drift_distance_penalty)
+        debug["drift_max_shift_fraction"] = float(max_shift_fraction)
+        debug["min_holdout_samples"] = int(min_holdout_samples)
+        debug["min_train_samples"] = int(min_train_samples)
+
+        if not optimize_drift:
+            debug["selected_split_idx"] = int(fallback_split_idx)
+            debug["search_radius"] = int(fallback_radius)
+            debug["holdout_support_by_class"] = _holdout_support(fallback_split_idx)
+            return int(fallback_split_idx), debug
+
+        scored: List[Tuple[float, float, float, int, int, Dict[str, Any]]] = []
+        for radius, split_idx in enumerate(candidates):
+            if not _support_ok(split_idx):
+                continue
+            if abs(int(split_idx) - int(default_split_idx)) > int(max_shift_samples):
+                continue
+            if int(split_idx) < int(min_train_samples):
+                continue
+            holdout_size = int(n - int(split_idx))
+            if holdout_size < int(min_holdout_samples):
+                continue
+
+            drift = _drift_summary(int(split_idx))
+            distance_ratio = float(abs(int(split_idx) - int(default_split_idx))) / float(max(1, n))
+            score = float(drift["max_abs_drift"]) + (float(drift_distance_penalty) * distance_ratio)
+            scored.append((score, float(drift["max_abs_drift"]), distance_ratio, int(radius), int(split_idx), drift))
+
+        if scored:
+            scored.sort(key=lambda item: (item[0], item[2], item[3], item[4]))
+            _, _, _, radius, split_idx, drift = scored[0]
+            debug["selected_split_idx"] = int(split_idx)
+            debug["search_radius"] = int(radius)
+            debug["holdout_support_by_class"] = _holdout_support(split_idx)
+            debug["drift_objective"] = {
+                "score": float(scored[0][0]),
+                "max_abs_drift": float(drift["max_abs_drift"]),
+                "max_drift_class": drift["max_drift_class"],
+                "distance_ratio": float(scored[0][2]),
+            }
             return int(split_idx), debug
 
-        debug["found"] = False
-        debug["holdout_support_by_class"] = {
-            str(class_id): int(totals[class_id] - int(prefixes[class_id][default_split_idx]))
-            for class_id in required
-        }
-        return int(default_split_idx), debug
+        debug["drift_optimization_fallback"] = "no_candidate_met_drift_constraints"
+        debug["selected_split_idx"] = int(fallback_split_idx)
+        debug["search_radius"] = int(fallback_radius)
+        debug["holdout_support_by_class"] = _holdout_support(fallback_split_idx)
+        return int(fallback_split_idx), debug
 
     def _select_calibration_size_with_support(
         self,
@@ -3634,6 +3812,8 @@ class TrainingPipeline:
                 validation_data = None
                 logger.info(f"Training on full dataset ({len(X_seq)} samples)")
 
+            train_class_support_pre_sampling = self._build_class_support_map(y_train)
+
             # Apply downsampling on train split only (post-temporal split).
             pre_downsample_count = int(len(X_train))
             X_train, y_train, ts_train = self._downsample_easy_unoccupied(
@@ -3644,6 +3824,7 @@ class TrainingPipeline:
                 resolved_cfg=unoccupied_cfg,
             )
             downsample_removed = int(pre_downsample_count - len(X_train))
+            train_class_support_post_downsample = self._build_class_support_map(y_train)
 
             replay_stats = {
                 "total": int(len(X_train)),
@@ -3662,12 +3843,14 @@ class TrainingPipeline:
                     sampling_strategy=str(fine_tune_params.get("replay_sampling", "random_stratified")),
                 )
             train_samples_for_evidence = int(len(X_train))
+            train_class_support_pre_minority_sampling = self._build_class_support_map(y_train)
 
             X_train, y_train, minority_sampling_stats = self._apply_minority_class_sampling(
                 X_train=X_train,
                 y_train=y_train,
                 room_name=room_name,
             )
+            train_class_support_post_minority_sampling = self._build_class_support_map(y_train)
 
             # Class Weights for Imbalance Handling (compute on training portion only).
             unique_classes, class_counts = np.unique(y_train, return_counts=True)
@@ -3893,6 +4076,10 @@ class TrainingPipeline:
                 'adapter_freeze_summary': freeze_summary,
                 'replay': replay_stats,
                 'minority_sampling': minority_sampling_stats,
+                'train_class_support_pre_sampling': train_class_support_pre_sampling,
+                'train_class_support_post_downsample': train_class_support_post_downsample,
+                'train_class_support_pre_minority_sampling': train_class_support_pre_minority_sampling,
+                'train_class_support_post_minority_sampling': train_class_support_post_minority_sampling,
                 'policy_hash': policy_hash,
                 'metric_source': 'holdout_validation',
                 'validation_min_class_support': 0,

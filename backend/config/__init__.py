@@ -6,6 +6,7 @@ Provides centralized config loading for paths, room settings, etc.
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -79,15 +80,44 @@ class RoomConfigManager:
             }
             self._validated_config = SystemConfig(**self._config)
             _logger.warning(f"Config file not found at {self.config_path}, using defaults")
+
+    @staticmethod
+    def _canonical_room_token(room_name: str) -> str:
+        """Canonical room token used for alias-safe key matching."""
+        return re.sub(r"[\s_]+", "", str(room_name or "").strip().lower())
+
+    def _resolve_room_key(self, room_name: str) -> Optional[str]:
+        """
+        Resolve configured room key with alias tolerance.
+
+        Supports equivalence between tokens like:
+        - `LivingRoom`
+        - `living_room`
+        - `Living Room`
+        """
+        rooms = self._config.get("rooms", {})
+        if not isinstance(rooms, dict) or not rooms:
+            return None
+
+        room_key = str(room_name or "").strip().lower().replace(" ", "_")
+        if room_key in rooms:
+            return room_key
+
+        canonical = self._canonical_room_token(room_name)
+        if not canonical:
+            return None
+        for key in rooms.keys():
+            if self._canonical_room_token(key) == canonical:
+                return str(key)
+        return None
     
     def get_sequence_window(self, room_name: str) -> int:
         """
         Get the sequence time window for a specific room.
         Returns in seconds.
         """
-        room_key = room_name.lower().replace(" ", "_")
-        
-        if room_key in self._config.get("rooms", {}):
+        room_key = self._resolve_room_key(room_name)
+        if room_key:
             return self._config["rooms"][room_key].get(
                 "sequence_time_window",
                 self._config["defaults"]["sequence_time_window"]
@@ -97,8 +127,8 @@ class RoomConfigManager:
     def get_data_interval(self, room_name: str = None) -> int:
         """Get data interval (typically 10 seconds)."""
         if room_name:
-            room_key = room_name.lower().replace(" ", "_")
-            if room_key in self._config.get("rooms", {}):
+            room_key = self._resolve_room_key(room_name)
+            if room_key:
                 return self._config["rooms"][room_key].get(
                     "data_interval",
                     self._config["defaults"]["data_interval"]
@@ -126,9 +156,9 @@ class RoomConfigManager:
     
     def update_room_config(self, room_name: str, sequence_time_window: int):
         """Update config for a specific room."""
-        room_key = room_name.lower().replace(" ", "_")
         if "rooms" not in self._config:
             self._config["rooms"] = {}
+        room_key = self._resolve_room_key(room_name) or room_name.lower().replace(" ", "_")
         if room_key not in self._config["rooms"]:
             self._config["rooms"][room_key] = {}
         self._config["rooms"][room_key]["sequence_time_window"] = sequence_time_window

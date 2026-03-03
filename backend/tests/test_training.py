@@ -1412,6 +1412,7 @@ class TestTrainingPipeline(unittest.TestCase):
     def test_compute_class_prior_drift_reports_max_abs_shift(self):
         drift = self.pipeline._compute_class_prior_drift(
             {
+                "train_class_support_pre_sampling": {"0": 200, "1": 800},
                 "minority_sampling": {
                     "class_counts_after": {"0": 200, "1": 800},
                 },
@@ -1423,8 +1424,64 @@ class TestTrainingPipeline(unittest.TestCase):
         )
         self.assertTrue(drift["available"])
         self.assertTrue(drift["evaluable"])
+        self.assertEqual(drift.get("drift_source"), "pre_sampling_train_vs_validation")
         self.assertEqual(drift["max_drift_class"], "1")
         self.assertAlmostEqual(float(drift["max_abs_drift"]), 0.5, places=6)
+        self.assertAlmostEqual(float(drift.get("sampled_max_abs_drift", 0.0)), 0.5, places=6)
+
+    def test_compute_class_prior_drift_prefers_pre_sampling_counts_over_sampled(self):
+        drift = self.pipeline._compute_class_prior_drift(
+            {
+                "train_class_support_pre_sampling": {"0": 800, "1": 200},
+                "train_class_support_post_minority_sampling": {"0": 500, "1": 500},
+                "validation_class_support": {"0": 500, "1": 500},
+                "validation_min_class_support": 300,
+                "required_minority_support": 5,
+            }
+        )
+        self.assertTrue(drift["available"])
+        self.assertEqual(drift.get("drift_source"), "pre_sampling_train_vs_validation")
+        self.assertAlmostEqual(float(drift.get("max_abs_drift", 0.0)), 0.3, places=6)
+        self.assertAlmostEqual(float(drift.get("sampled_max_abs_drift", 1.0)), 0.0, places=6)
+
+    @patch.dict(
+        os.environ,
+        {
+            "TEMPORAL_SPLIT_OPTIMIZE_DRIFT": "true",
+            "TEMPORAL_SPLIT_DRIFT_DISTANCE_PENALTY": "0.0",
+            "TEMPORAL_SPLIT_MAX_SHIFT_FRACTION": "0.20",
+            "TEMPORAL_SPLIT_MIN_HOLDOUT_FRACTION": "0.10",
+            "TEMPORAL_SPLIT_MIN_TRAIN_FRACTION": "0.60",
+        },
+        clear=False,
+    )
+    def test_select_temporal_split_can_shift_to_reduce_prior_drift(self):
+        y_seq = np.asarray(
+            [0] * 150 + [1] * 250 + [2] * 400 + [0] * 20 + [1] * 140 + [2] * 40,
+            dtype=np.int32,
+        )
+        def _max_abs_drift(split_idx: int) -> float:
+            train = y_seq[:split_idx]
+            holdout = y_seq[split_idx:]
+            values = []
+            for class_id in (0, 1, 2):
+                train_share = float(np.mean(train == class_id))
+                holdout_share = float(np.mean(holdout == class_id))
+                values.append(abs(train_share - holdout_share))
+            return float(max(values))
+
+        selected, debug = self.pipeline._select_temporal_split_index_with_support(
+            y_seq=y_seq,
+            default_split_idx=800,
+            required_class_ids=[0, 1, 2],
+            min_support=5,
+        )
+        self.assertNotEqual(int(selected), 800)
+        self.assertTrue(bool(debug.get("drift_optimization_enabled")))
+        self.assertIn("drift_objective", debug)
+        self.assertLess(_max_abs_drift(int(selected)), _max_abs_drift(800))
+        self.assertGreaterEqual(int(selected), int(debug.get("min_train_samples", 0)))
+        self.assertGreaterEqual(int(1000 - selected), int(debug.get("min_holdout_samples", 0)))
 
     @patch.dict(os.environ, {"ENABLE_MINORITY_CLASS_SAMPLING": "false"}, clear=False)
     def test_apply_minority_sampling_records_counts_even_when_disabled(self):

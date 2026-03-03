@@ -2766,6 +2766,24 @@ class TrainingPipeline:
                 "error": str(e),
             }
 
+        # Re-apply occupied-rate floor after any gate-aligned tuning so that
+        # tuning cannot reintroduce near-all-unoccupied routing.
+        if min_pred_rate > 0.0 and predicted_occ_rate + 1e-9 < min_pred_rate:
+            quantile_level = float(np.clip(1.0 - min_pred_rate, 0.0, 1.0))
+            candidate_threshold = float(np.quantile(p_occ, quantile_level))
+            adjusted_threshold = float(
+                np.clip(min(final_threshold, candidate_threshold), threshold_min, threshold_max)
+            )
+            if adjusted_threshold + 1e-9 < final_threshold:
+                final_threshold = adjusted_threshold
+                predicted_occ_rate = float(np.mean(p_occ >= final_threshold))
+                result["threshold"] = final_threshold
+                result["predicted_occupied_rate"] = predicted_occ_rate
+                result["predicted_occupied_floor_adjusted"] = True
+                if "+pred_occ_floor" not in str(result.get("status", "")):
+                    result["status"] = f"{result.get('status', status)}+pred_occ_floor"
+                status = str(result["status"])
+
         logger.info(
             "Two-stage stage-A occupancy threshold for %s: %.4f (%s, support=%d)",
             room_name,

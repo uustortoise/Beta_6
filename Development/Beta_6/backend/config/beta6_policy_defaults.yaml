@@ -3,6 +3,7 @@ version: v1
 clinical_priority:
   multipliers_by_label:
     sleep: 1.6
+    sleep_duration: 1.6
     nap: 1.3
     shower: 2.0
     toilet: 2.0
@@ -55,13 +56,13 @@ unoccupied_downsample:
   min_share_by_room:
     bathroom: 0.25
     bedroom: 0.58
-    entrance: 0.40
+    entrance: 0.55
     livingroom: 0.30
     kitchen: 0.28
   stride_by_room:
     bathroom: 4
     bedroom: 2
-    entrance: 3
+    entrance: 2
     kitchen: 5
     livingroom: 4
 

@@ -2260,6 +2260,27 @@ class TrainingPipeline:
         return float(np.clip(value, 0.0, 1.0))
 
     @staticmethod
+    def _resolve_two_stage_strict_routing_enabled() -> bool:
+        raw = str(os.getenv("TWO_STAGE_CORE_STRICT_ROUTING", "true")).strip().lower()
+        return raw in {"1", "true", "yes", "on", "enabled"}
+
+    @staticmethod
+    def _resolve_two_stage_gate_aligned_threshold_tuning_enabled() -> bool:
+        raw = str(
+            os.getenv("TWO_STAGE_CORE_STAGE_A_GATE_ALIGNED_THRESHOLD_TUNING", "true")
+        ).strip().lower()
+        return raw in {"1", "true", "yes", "on", "enabled"}
+
+    @staticmethod
+    def _resolve_two_stage_gate_aligned_threshold_max_candidates() -> int:
+        raw = os.getenv("TWO_STAGE_CORE_STAGE_A_GATE_ALIGNED_MAX_CANDIDATES", "21")
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = 21
+        return int(max(5, min(81, value)))
+
+    @staticmethod
     def _resolve_two_stage_stage_a_threshold_bounds() -> Tuple[float, float]:
         """
         Resolve stage-A occupancy threshold bounds.
@@ -2716,6 +2737,35 @@ class TrainingPipeline:
                 "predicted_occupied_floor_adjusted": bool(adjusted_for_pred_rate),
             }
         )
+
+        # Final refinement: search stage-A threshold against gate-aligned score
+        # on final two-stage probabilities (same path used by release gate).
+        try:
+            threshold_tuning = self._tune_two_stage_stage_a_threshold_gate_aligned(
+                room_name=room_name,
+                two_stage_result=two_stage_result,
+                X_eval=np.asarray(X_calib, dtype=np.float32),
+                y_eval=y_calib_arr,
+                baseline_threshold=final_threshold,
+            )
+            result["gate_aligned_tuning"] = threshold_tuning
+            if bool(threshold_tuning.get("applied", False)):
+                tuned_threshold = float(threshold_tuning.get("selected_threshold", final_threshold))
+                final_threshold = float(np.clip(tuned_threshold, threshold_min, threshold_max))
+                predicted_occ_rate = float(np.mean(p_occ >= final_threshold))
+                result["threshold"] = final_threshold
+                result["status"] = f"{status}+gate_aligned_tuned"
+                result["source"] = "calibration+gate_aligned_tuning"
+                result["predicted_occupied_rate"] = predicted_occ_rate
+                status = str(result["status"])
+        except Exception as e:
+            result["gate_aligned_tuning"] = {
+                "enabled": bool(self._resolve_two_stage_gate_aligned_threshold_tuning_enabled()),
+                "applied": False,
+                "reason": f"error:{type(e).__name__}",
+                "error": str(e),
+            }
+
         logger.info(
             "Two-stage stage-A occupancy threshold for %s: %.4f (%s, support=%d)",
             room_name,
@@ -2724,6 +2774,242 @@ class TrainingPipeline:
             support,
         )
         return result
+
+    def _tune_two_stage_stage_a_threshold_gate_aligned(
+        self,
+        *,
+        room_name: str,
+        two_stage_result: Mapping[str, Any],
+        X_eval: np.ndarray,
+        y_eval: np.ndarray,
+        baseline_threshold: float,
+    ) -> Dict[str, Any]:
+        tuning: Dict[str, Any] = {
+            "enabled": bool(self._resolve_two_stage_gate_aligned_threshold_tuning_enabled()),
+            "applied": False,
+            "baseline_threshold": float(baseline_threshold),
+            "selected_threshold": float(baseline_threshold),
+            "candidate_count": 0,
+            "reason": "",
+        }
+        if not bool(tuning["enabled"]):
+            tuning["reason"] = "disabled"
+            return tuning
+
+        X_eval_arr = np.asarray(X_eval, dtype=np.float32)
+        y_eval_arr = np.asarray(y_eval, dtype=np.int32)
+        if X_eval_arr.size == 0 or y_eval_arr.size == 0 or int(len(X_eval_arr)) != int(len(y_eval_arr)):
+            tuning["reason"] = "invalid_eval_data"
+            return tuning
+
+        n_classes = int(two_stage_result.get("num_classes", 0) or 0)
+        excluded_ids = [int(v) for v in (two_stage_result.get("excluded_class_ids") or []) if int(v) < n_classes]
+        occupied_ids = [int(v) for v in (two_stage_result.get("occupied_class_ids") or []) if int(v) < n_classes]
+        if n_classes <= 1 or not excluded_ids or not occupied_ids:
+            tuning["reason"] = "invalid_class_mapping"
+            return tuning
+
+        stage_a_model = two_stage_result.get("stage_a_model")
+        if stage_a_model is None:
+            tuning["reason"] = "missing_stage_a_model"
+            return tuning
+
+        raw_stage_a = stage_a_model.predict(X_eval_arr, verbose=0)
+        if isinstance(raw_stage_a, dict):
+            raw_stage_a = raw_stage_a.get("activity_logits")
+        stage_a_probs = self._to_probability_matrix(raw_stage_a)
+        if stage_a_probs.shape[1] < 2:
+            tuning["reason"] = f"invalid_stage_a_width:{stage_a_probs.shape}"
+            return tuning
+
+        stage_b_probs: Optional[np.ndarray] = None
+        stage_b_model = two_stage_result.get("stage_b_model")
+        if stage_b_model is not None:
+            raw_stage_b = stage_b_model.predict(X_eval_arr, verbose=0)
+            if isinstance(raw_stage_b, dict):
+                raw_stage_b = raw_stage_b.get("activity_logits")
+            stage_b_probs = self._to_probability_matrix(raw_stage_b)
+            if stage_b_probs.shape[1] != len(occupied_ids):
+                tuning["reason"] = f"invalid_stage_b_width:{stage_b_probs.shape}"
+                return tuning
+            if int(stage_b_probs.shape[0]) != int(stage_a_probs.shape[0]):
+                tuning["reason"] = "stage_a_stage_b_length_mismatch"
+                return tuning
+
+        p_occ = np.asarray(stage_a_probs[:, 1], dtype=np.float32)
+        thr_min, thr_max = self._resolve_two_stage_stage_a_threshold_bounds()
+        baseline = float(np.clip(float(baseline_threshold), thr_min, thr_max))
+        max_candidates = self._resolve_two_stage_gate_aligned_threshold_max_candidates()
+        quantile_grid = np.linspace(0.02, 0.98, num=max_candidates)
+        quantile_candidates = np.quantile(p_occ, quantile_grid)
+        linear_grid = np.linspace(thr_min, thr_max, num=min(11, max_candidates))
+        merged = np.concatenate(
+            [
+                np.asarray([baseline], dtype=np.float32),
+                np.asarray(quantile_candidates, dtype=np.float32),
+                np.asarray(linear_grid, dtype=np.float32),
+            ]
+        )
+        candidates = sorted(
+            {
+                float(np.clip(val, thr_min, thr_max))
+                for val in merged.tolist()
+                if np.isfinite(val)
+            }
+        )
+        if not candidates:
+            tuning["reason"] = "no_candidates"
+            return tuning
+        tuning["candidate_count"] = int(len(candidates))
+
+        primary_occupied_class_id = int(
+            two_stage_result.get("primary_occupied_class_id", occupied_ids[0])
+        )
+        best_threshold = baseline
+        best_summary: Optional[Dict[str, Any]] = None
+        baseline_summary: Optional[Dict[str, Any]] = None
+        best_score = float("-inf")
+        best_collapsed = True
+
+        for threshold in candidates:
+            probs = self._compose_two_stage_core_probabilities(
+                stage_a_probs=stage_a_probs,
+                stage_b_probs=stage_b_probs,
+                n_classes=n_classes,
+                excluded_ids=excluded_ids,
+                occupied_ids=occupied_ids,
+                primary_occupied_class_id=primary_occupied_class_id,
+                stage_a_threshold=float(threshold),
+            )
+            summary = self._summarize_gate_aligned_validation(
+                room_name=room_name,
+                y_true=y_eval_arr,
+                y_pred_probs=probs,
+            )
+            score = float(summary.get("gate_aligned_score", float("-inf")))
+            collapsed = bool(summary.get("collapsed", False))
+            if abs(float(threshold) - baseline) <= 1e-9:
+                baseline_summary = dict(summary)
+
+            replace = False
+            if best_summary is None:
+                replace = True
+            elif best_collapsed and not collapsed:
+                replace = True
+            elif collapsed == best_collapsed and score > (best_score + 1e-8):
+                replace = True
+            if replace:
+                best_threshold = float(threshold)
+                best_summary = dict(summary)
+                best_score = float(score)
+                best_collapsed = bool(collapsed)
+
+        if baseline_summary is None:
+            baseline_probs = self._compose_two_stage_core_probabilities(
+                stage_a_probs=stage_a_probs,
+                stage_b_probs=stage_b_probs,
+                n_classes=n_classes,
+                excluded_ids=excluded_ids,
+                occupied_ids=occupied_ids,
+                primary_occupied_class_id=primary_occupied_class_id,
+                stage_a_threshold=baseline,
+            )
+            baseline_summary = self._summarize_gate_aligned_validation(
+                room_name=room_name,
+                y_true=y_eval_arr,
+                y_pred_probs=baseline_probs,
+            )
+
+        baseline_score = float(baseline_summary.get("gate_aligned_score", float("-inf")))
+        baseline_collapsed = bool(baseline_summary.get("collapsed", False))
+        selected_summary = best_summary or baseline_summary
+
+        improve = best_score > (baseline_score + 1e-8)
+        collapse_rescue = baseline_collapsed and not bool(selected_summary.get("collapsed", False))
+        if (improve or collapse_rescue) and abs(best_threshold - baseline) > 1e-9:
+            tuning["applied"] = True
+            tuning["selected_threshold"] = float(best_threshold)
+            tuning["reason"] = "best_gate_aligned"
+        else:
+            tuning["selected_threshold"] = float(baseline)
+            tuning["reason"] = "baseline_kept"
+
+        tuning["baseline_summary"] = baseline_summary
+        tuning["selected_summary"] = selected_summary
+        return tuning
+
+    def _compose_two_stage_core_probabilities(
+        self,
+        *,
+        stage_a_probs: np.ndarray,
+        stage_b_probs: Optional[np.ndarray],
+        n_classes: int,
+        excluded_ids: Sequence[int],
+        occupied_ids: Sequence[int],
+        primary_occupied_class_id: int,
+        stage_a_threshold: float,
+    ) -> np.ndarray:
+        stage_a_arr = np.asarray(stage_a_probs, dtype=np.float32)
+        if stage_a_arr.ndim != 2 or stage_a_arr.shape[1] < 2:
+            raise ValueError(f"invalid_stage_a_width:{stage_a_arr.shape}")
+
+        n_samples = int(stage_a_arr.shape[0])
+        strict_routing = bool(self._resolve_two_stage_strict_routing_enabled())
+        excluded_arr = np.asarray([int(v) for v in excluded_ids], dtype=np.int32)
+        occupied_arr = np.asarray([int(v) for v in occupied_ids], dtype=np.int32)
+
+        p_occ = stage_a_arr[:, 1]
+        p_unocc = stage_a_arr[:, 0]
+        occupied_mask = p_occ >= float(np.clip(stage_a_threshold, 0.0, 1.0))
+        out = np.zeros(shape=(n_samples, int(n_classes)), dtype=np.float32)
+
+        non_occ_indices = np.where(~occupied_mask)[0]
+        if non_occ_indices.size > 0:
+            out[np.ix_(non_occ_indices, excluded_arr)] = 1.0 / float(len(excluded_arr))
+
+        if np.any(occupied_mask):
+            occ_indices = np.where(occupied_mask)[0]
+            p_occ_active = p_occ[occupied_mask]
+            p_unocc_active = p_unocc[occupied_mask]
+
+            if not strict_routing:
+                out[np.ix_(occ_indices, excluded_arr)] = (
+                    (p_unocc_active / float(len(excluded_arr)))[:, None]
+                )
+
+            if stage_b_probs is not None:
+                stage_b_arr = np.asarray(stage_b_probs, dtype=np.float32)
+                if stage_b_arr.ndim != 2 or int(stage_b_arr.shape[0]) != n_samples:
+                    raise ValueError(
+                        f"invalid_stage_b_shape:{stage_b_arr.shape}:expected_rows={n_samples}"
+                    )
+                if int(stage_b_arr.shape[1]) != int(len(occupied_arr)):
+                    raise ValueError(
+                        f"invalid_stage_b_width:{stage_b_arr.shape[1]}!=expected:{len(occupied_arr)}"
+                    )
+                stage_b_active = stage_b_arr[occupied_mask]
+                for idx, class_id in enumerate(occupied_arr):
+                    if strict_routing:
+                        out[occ_indices, int(class_id)] = stage_b_active[:, idx]
+                    else:
+                        out[occ_indices, int(class_id)] = p_occ_active * stage_b_active[:, idx]
+            else:
+                primary = int(primary_occupied_class_id)
+                if primary not in set(int(v) for v in occupied_arr.tolist()):
+                    primary = int(occupied_arr[0])
+                if strict_routing:
+                    out[occ_indices, int(primary)] = 1.0
+                else:
+                    out[occ_indices, int(primary)] = p_occ_active
+
+        row_sums = np.sum(out, axis=1, keepdims=True)
+        invalid_rows = row_sums[:, 0] <= 1e-8
+        if np.any(invalid_rows):
+            out[invalid_rows, :] = 0.0
+            out[invalid_rows, int(excluded_arr[0])] = 1.0
+            row_sums = np.sum(out, axis=1, keepdims=True)
+        out = out / np.clip(row_sums, 1e-8, None)
+        return out.astype(np.float32, copy=False)
 
     def _predict_two_stage_core_probabilities(
         self,
@@ -2760,53 +3046,34 @@ class TrainingPipeline:
         except (TypeError, ValueError):
             parsed_stage_a_threshold = self._resolve_two_stage_stage_a_default_threshold()
         stage_a_threshold = float(np.clip(parsed_stage_a_threshold, 0.0, 1.0))
-        p_occ = stage_a_probs[:, 1]
-        p_unocc = stage_a_probs[:, 0]
-        occupied_mask = p_occ >= stage_a_threshold
-        out = np.zeros(shape=(n_samples, n_classes), dtype=np.float32)
-        non_occ_indices = np.where(~occupied_mask)[0]
-        if non_occ_indices.size > 0:
-            out[np.ix_(non_occ_indices, np.asarray(excluded_ids, dtype=np.int32))] = (
-                1.0 / float(len(excluded_ids))
-            )
-
-        if np.any(occupied_mask):
-            occ_indices = np.where(occupied_mask)[0]
-            p_occ_active = p_occ[occupied_mask]
-            p_unocc_active = p_unocc[occupied_mask]
-            out[np.ix_(occ_indices, np.asarray(excluded_ids, dtype=np.int32))] = (
-                (p_unocc_active / float(len(excluded_ids)))[:, None]
-            )
-
-            stage_b_model = two_stage_result.get("stage_b_model")
-            if stage_b_model is not None:
-                raw_stage_b = stage_b_model.predict(X, verbose=0)
-                if isinstance(raw_stage_b, dict):
-                    raw_stage_b = raw_stage_b.get("activity_logits")
-                stage_b_probs = self._to_probability_matrix(raw_stage_b)
-                if stage_b_probs.shape[1] != len(occupied_ids):
-                    raise ValueError(
-                        f"invalid_stage_b_width:{stage_b_probs.shape[1]}!=expected:{len(occupied_ids)}"
-                    )
-                stage_b_probs = stage_b_probs[occupied_mask]
-                for idx, class_id in enumerate(occupied_ids):
-                    out[occ_indices, int(class_id)] = p_occ_active * stage_b_probs[:, idx]
-            else:
-                primary_occupied_class_id = int(
-                    two_stage_result.get("primary_occupied_class_id", occupied_ids[0])
+        stage_b_probs: Optional[np.ndarray] = None
+        stage_b_model = two_stage_result.get("stage_b_model")
+        if stage_b_model is not None:
+            raw_stage_b = stage_b_model.predict(X, verbose=0)
+            if isinstance(raw_stage_b, dict):
+                raw_stage_b = raw_stage_b.get("activity_logits")
+            stage_b_probs = self._to_probability_matrix(raw_stage_b)
+            if stage_b_probs.shape[1] != len(occupied_ids):
+                raise ValueError(
+                    f"invalid_stage_b_width:{stage_b_probs.shape[1]}!=expected:{len(occupied_ids)}"
                 )
-                if primary_occupied_class_id not in occupied_ids:
-                    primary_occupied_class_id = occupied_ids[0]
-                out[occ_indices, int(primary_occupied_class_id)] = p_occ_active
+            if int(stage_b_probs.shape[0]) != n_samples:
+                raise ValueError(
+                    f"invalid_stage_b_rows:{stage_b_probs.shape[0]}!=expected:{n_samples}"
+                )
 
-        row_sums = np.sum(out, axis=1, keepdims=True)
-        invalid_rows = row_sums[:, 0] <= 1e-8
-        if np.any(invalid_rows):
-            out[invalid_rows, :] = 0.0
-            out[invalid_rows, excluded_ids[0]] = 1.0
-            row_sums = np.sum(out, axis=1, keepdims=True)
-        out = out / np.clip(row_sums, 1e-8, None)
-        return out.astype(np.float32, copy=False)
+        primary_occupied_class_id = int(
+            two_stage_result.get("primary_occupied_class_id", occupied_ids[0])
+        )
+        return self._compose_two_stage_core_probabilities(
+            stage_a_probs=stage_a_probs,
+            stage_b_probs=stage_b_probs,
+            n_classes=n_classes,
+            excluded_ids=excluded_ids,
+            occupied_ids=occupied_ids,
+            primary_occupied_class_id=primary_occupied_class_id,
+            stage_a_threshold=stage_a_threshold,
+        )
 
     def _write_two_stage_core_artifacts(
         self,

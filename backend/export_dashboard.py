@@ -1601,6 +1601,59 @@ def _to_float_or_none(value):
     return float(parsed)
 
 
+def _parse_manifest_timestamp(token: str) -> datetime | None:
+    value = str(token or "").strip()
+    if not value:
+        return None
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            return datetime.strptime(value, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}[T_ ]\d{2}:\d{2}:\d{2}", value):
+            return datetime.fromisoformat(value.replace("_", " ").replace("T", " "))
+        if re.fullmatch(r"\d{8}", value):
+            return datetime.strptime(value, "%Y%m%d").replace(hour=23, minute=59, second=59)
+        if re.fullmatch(r"(?i)\d{1,2}[a-z]{3}\d{4}", value):
+            return datetime.strptime(value.lower(), "%d%b%Y").replace(hour=23, minute=59, second=59)
+    except ValueError:
+        return None
+    return None
+
+
+def _resolve_sensor_event_time(metadata: dict) -> str | None:
+    manifest = metadata.get("training_manifest") if isinstance(metadata, dict) else None
+    if not isinstance(manifest, list) or not manifest:
+        return None
+
+    latest_ts: datetime | None = None
+    for entry in manifest:
+        text = str(entry or "")
+        if not text:
+            continue
+        candidates: list[datetime] = []
+        for match in re.findall(r"\d{4}-\d{2}-\d{2}[T_ ]\d{2}:\d{2}:\d{2}", text):
+            parsed = _parse_manifest_timestamp(match)
+            if parsed is not None:
+                candidates.append(parsed)
+        for match in re.findall(r"\d{4}-\d{2}-\d{2}", text):
+            parsed = _parse_manifest_timestamp(match)
+            if parsed is not None:
+                candidates.append(parsed)
+        for match in re.findall(r"(?<!\d)(\d{8})(?!\d)", text):
+            parsed = _parse_manifest_timestamp(match)
+            if parsed is not None:
+                candidates.append(parsed)
+        for match in re.findall(r"(?i)(\d{1,2}[a-z]{3}\d{4})", text):
+            parsed = _parse_manifest_timestamp(match)
+            if parsed is not None:
+                candidates.append(parsed)
+        if not candidates:
+            continue
+        entry_latest = max(candidates)
+        if latest_ts is None or entry_latest > latest_ts:
+            latest_ts = entry_latest
+    return latest_ts.isoformat(sep=" ") if latest_ts is not None else None
+
+
 def _resolve_schedule_day_bucket(schedule: list, training_days: float | None) -> str | None:
     if training_days is None:
         return None
@@ -1820,6 +1873,7 @@ def fetch_promotion_gate_monitor(elder_id: str, days: int = 30, limit: int = 60)
         if status_lower == "no_op_same_fingerprint":
             production_counters["no_op_retrain_skip"] += 1
         metrics_list = metadata.get("metrics") if isinstance(metadata, dict) else None
+        run_sensor_event_time = _resolve_sensor_event_time(metadata if isinstance(metadata, dict) else {})
         if isinstance(metrics_list, list):
             production_counters["promoted"] += int(
                 sum(1 for metric in metrics_list if bool((metric or {}).get("gate_pass", False)))
@@ -1908,6 +1962,7 @@ def fetch_promotion_gate_monitor(elder_id: str, days: int = 30, limit: int = 60)
                 {
                     "run_id": run_id,
                     "training_date": str(training_date) if pd.notna(training_date) else None,
+                    "sensor_event_time": run_sensor_event_time,
                     "pass": bool(rr.get("pass", False)),
                     "champion_version": int(rr.get("champion_version")) if rr.get("champion_version") is not None else None,
                     "candidate_macro_f1_mean": float(candidate_f1) if candidate_f1 is not None else None,
@@ -1945,6 +2000,7 @@ def fetch_promotion_gate_monitor(elder_id: str, days: int = 30, limit: int = 60)
                     "room": room_name,
                     "run_id": point.get("run_id"),
                     "training_date": point.get("training_date"),
+                    "sensor_event_time": point.get("sensor_event_time"),
                     "candidate_macro_f1_mean": point.get("candidate_macro_f1_mean"),
                     "candidate_accuracy_mean": point.get("candidate_accuracy_mean"),
                     "required_threshold": point.get("required_threshold"),
@@ -4746,12 +4802,31 @@ with tab3:
             room_history_points = monitor.get("room_history_points", [])
             if isinstance(room_history_points, list) and room_history_points:
                 history_df = pd.DataFrame(room_history_points)
-                if "training_date" in history_df.columns:
-                    history_df["training_date"] = pd.to_datetime(history_df["training_date"], errors="coerce")
-                history_df = history_df.dropna(subset=["training_date"])
+                history_df["training_time"] = pd.to_datetime(history_df.get("training_date"), errors="coerce")
+                history_df["sensor_event_time"] = pd.to_datetime(
+                    history_df.get("sensor_event_time"), errors="coerce"
+                )
+                history_df = history_df.dropna(subset=["training_time"])
                 if not history_df.empty:
                     st.markdown("#### 📈 F1/Accuracy Over Time")
                     st.caption("Hover any point to see exact run/time/metric values.")
+                    time_axis_mode = st.radio(
+                        "X-axis Time Source",
+                        options=["Sensor Event Time (Chronology)", "Training Time (Run Chronology)"],
+                        index=0,
+                        horizontal=True,
+                        key="promotion_trend_time_axis",
+                    )
+                    prefer_sensor_time = time_axis_mode.startswith("Sensor Event Time")
+                    if prefer_sensor_time and int(history_df["sensor_event_time"].notna().sum()) == 0:
+                        st.info("No sensor event timestamps found in training manifests yet; using training run time.")
+                    axis_col = "sensor_event_time" if prefer_sensor_time else "training_time"
+                    axis_title = "Sensor Event Time" if prefer_sensor_time else "Training Time"
+                    history_df["plot_time"] = history_df[axis_col].where(
+                        history_df[axis_col].notna(),
+                        history_df["training_time"],
+                    )
+                    history_df = history_df.dropna(subset=["plot_time"])
                     room_options = sorted(history_df["room"].dropna().astype(str).unique().tolist())
                     default_rooms = room_options[: min(len(room_options), 6)]
                     selected_trend_rooms = st.multiselect(
@@ -4762,7 +4837,7 @@ with tab3:
                     )
                     if selected_trend_rooms:
                         history_df = history_df[history_df["room"].isin(selected_trend_rooms)].copy()
-                    history_df = history_df.sort_values(["training_date", "run_id", "room"])
+                    history_df = history_df.sort_values(["plot_time", "run_id", "room"])
 
                     f1_df = history_df[history_df["candidate_macro_f1_mean"].notna()].copy()
                     acc_df = history_df[history_df["candidate_accuracy_mean"].notna()].copy()
@@ -4772,14 +4847,15 @@ with tab3:
                         f1_tooltips = [
                             alt.Tooltip("room:N", title="Room"),
                             alt.Tooltip("run_id:Q", title="Run ID"),
-                            alt.Tooltip("training_date:T", title="Training Time"),
+                            alt.Tooltip("sensor_event_time:T", title="Sensor Event Time"),
+                            alt.Tooltip("training_time:T", title="Training Time"),
                             alt.Tooltip("candidate_macro_f1_mean:Q", title="WF Candidate F1", format=".6f"),
                             alt.Tooltip("required_threshold:Q", title="Required Threshold", format=".6f"),
                             alt.Tooltip("training_days:Q", title="Training Days", format=".1f"),
                             alt.Tooltip("pass:N", title="Passed"),
                         ]
                         f1_base = alt.Chart(f1_df).encode(
-                            x=alt.X("training_date:T", title="Training Time"),
+                            x=alt.X("plot_time:T", title=axis_title),
                             y=alt.Y("candidate_macro_f1_mean:Q", title="WF Candidate F1"),
                             color=alt.Color("room:N", title="Room"),
                         )
@@ -4793,12 +4869,13 @@ with tab3:
                             threshold_tooltips = [
                                 alt.Tooltip("room:N", title="Room"),
                                 alt.Tooltip("run_id:Q", title="Run ID"),
-                                alt.Tooltip("training_date:T", title="Training Time"),
+                                alt.Tooltip("sensor_event_time:T", title="Sensor Event Time"),
+                                alt.Tooltip("training_time:T", title="Training Time"),
                                 alt.Tooltip("required_threshold:Q", title="Required Threshold", format=".6f"),
                                 alt.Tooltip("training_days:Q", title="Training Days", format=".1f"),
                             ]
                             threshold_base = alt.Chart(threshold_df).encode(
-                                x=alt.X("training_date:T", title="Training Time"),
+                                x=alt.X("plot_time:T", title=axis_title),
                                 y=alt.Y("required_threshold:Q", title="WF Candidate F1"),
                                 color=alt.Color("room:N", title="Room"),
                             )
@@ -4816,13 +4893,14 @@ with tab3:
                         acc_tooltips = [
                             alt.Tooltip("room:N", title="Room"),
                             alt.Tooltip("run_id:Q", title="Run ID"),
-                            alt.Tooltip("training_date:T", title="Training Time"),
+                            alt.Tooltip("sensor_event_time:T", title="Sensor Event Time"),
+                            alt.Tooltip("training_time:T", title="Training Time"),
                             alt.Tooltip("candidate_accuracy_mean:Q", title="WF Candidate Accuracy", format=".6f"),
                             alt.Tooltip("training_days:Q", title="Training Days", format=".1f"),
                             alt.Tooltip("pass:N", title="Passed"),
                         ]
                         acc_base = alt.Chart(acc_df).encode(
-                            x=alt.X("training_date:T", title="Training Time"),
+                            x=alt.X("plot_time:T", title=axis_title),
                             y=alt.Y("candidate_accuracy_mean:Q", title="WF Candidate Accuracy"),
                             color=alt.Color("room:N", title="Room"),
                         )

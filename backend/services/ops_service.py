@@ -45,6 +45,59 @@ def _normalize_room_key(value: str) -> str:
     return normalized if isinstance(normalized, str) else ""
 
 
+def _parse_manifest_timestamp(token: str) -> datetime | None:
+    value = str(token or "").strip()
+    if not value:
+        return None
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+            return datetime.strptime(value, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}[T_ ]\d{2}:\d{2}:\d{2}", value):
+            return datetime.fromisoformat(value.replace("_", " ").replace("T", " "))
+        if re.fullmatch(r"\d{8}", value):
+            return datetime.strptime(value, "%Y%m%d").replace(hour=23, minute=59, second=59)
+        if re.fullmatch(r"(?i)\d{1,2}[a-z]{3}\d{4}", value):
+            return datetime.strptime(value.lower(), "%d%b%Y").replace(hour=23, minute=59, second=59)
+    except ValueError:
+        return None
+    return None
+
+
+def _resolve_sensor_event_time(metadata: dict) -> str | None:
+    manifest = metadata.get("training_manifest") if isinstance(metadata, dict) else None
+    if not isinstance(manifest, list) or not manifest:
+        return None
+
+    latest_ts: datetime | None = None
+    for entry in manifest:
+        text = str(entry or "")
+        if not text:
+            continue
+        candidates: list[datetime] = []
+        for match in re.findall(r"\d{4}-\d{2}-\d{2}[T_ ]\d{2}:\d{2}:\d{2}", text):
+            parsed = _parse_manifest_timestamp(match)
+            if parsed is not None:
+                candidates.append(parsed)
+        for match in re.findall(r"\d{4}-\d{2}-\d{2}", text):
+            parsed = _parse_manifest_timestamp(match)
+            if parsed is not None:
+                candidates.append(parsed)
+        for match in re.findall(r"(?<!\d)(\d{8})(?!\d)", text):
+            parsed = _parse_manifest_timestamp(match)
+            if parsed is not None:
+                candidates.append(parsed)
+        for match in re.findall(r"(?i)(\d{1,2}[a-z]{3}\d{4})", text):
+            parsed = _parse_manifest_timestamp(match)
+            if parsed is not None:
+                candidates.append(parsed)
+        if not candidates:
+            continue
+        entry_latest = max(candidates)
+        if latest_ts is None or entry_latest > latest_ts:
+            latest_ts = entry_latest
+    return latest_ts.isoformat(sep=" ") if latest_ts is not None else None
+
+
 def _resolve_schedule_day_bucket(schedule: list, training_days: float | None) -> str | None:
     if training_days is None:
         return None
@@ -255,6 +308,7 @@ def get_model_update_monitor(elder_id: str, days: int = 30, limit: int = 60) -> 
             production_counters["no_op_retrain_skip"] += 1
 
         metrics_list = metadata.get("metrics") if isinstance(metadata, dict) else None
+        run_sensor_event_time = _resolve_sensor_event_time(metadata if isinstance(metadata, dict) else {})
         if isinstance(metrics_list, list):
             production_counters["promoted"] += int(
                 sum(1 for metric in metrics_list if bool((metric or {}).get("gate_pass", False)))
@@ -344,6 +398,7 @@ def get_model_update_monitor(elder_id: str, days: int = 30, limit: int = 60) -> 
                 {
                     "run_id": run_id,
                     "training_date": str(training_date) if pd.notna(training_date) else None,
+                    "sensor_event_time": run_sensor_event_time,
                     "pass": bool(rr.get("pass", False)),
                     "champion_version": int(rr.get("champion_version")) if rr.get("champion_version") is not None else None,
                     "candidate_macro_f1_mean": float(candidate_f1) if candidate_f1 is not None else None,
@@ -381,6 +436,7 @@ def get_model_update_monitor(elder_id: str, days: int = 30, limit: int = 60) -> 
                     "room": room_name,
                     "run_id": point.get("run_id"),
                     "training_date": point.get("training_date"),
+                    "sensor_event_time": point.get("sensor_event_time"),
                     "candidate_macro_f1_mean": point.get("candidate_macro_f1_mean"),
                     "candidate_accuracy_mean": point.get("candidate_accuracy_mean"),
                     "required_threshold": point.get("required_threshold"),

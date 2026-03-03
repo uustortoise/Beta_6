@@ -273,12 +273,31 @@ def render():
             room_history_points = monitor.get("room_history_points", [])
             if isinstance(room_history_points, list) and room_history_points:
                 history_df = pd.DataFrame(room_history_points)
-                if "training_date" in history_df.columns:
-                    history_df["training_date"] = pd.to_datetime(history_df["training_date"], errors="coerce")
-                history_df = history_df.dropna(subset=["training_date"])
+                history_df["training_time"] = pd.to_datetime(history_df.get("training_date"), errors="coerce")
+                history_df["sensor_event_time"] = pd.to_datetime(
+                    history_df.get("sensor_event_time"), errors="coerce"
+                )
+                history_df = history_df.dropna(subset=["training_time"])
                 if not history_df.empty:
                     st.markdown("#### F1/Accuracy Over Time")
                     st.caption("Hover any point to see exact run/time/metric values.")
+                    time_axis_mode = st.radio(
+                        "X-axis Time Source",
+                        options=["Sensor Event Time (Chronology)", "Training Time (Run Chronology)"],
+                        index=0,
+                        horizontal=True,
+                        key="ops_promotion_trend_time_axis",
+                    )
+                    prefer_sensor_time = time_axis_mode.startswith("Sensor Event Time")
+                    if prefer_sensor_time and int(history_df["sensor_event_time"].notna().sum()) == 0:
+                        st.info("No sensor event timestamps found in training manifests yet; using training run time.")
+                    axis_col = "sensor_event_time" if prefer_sensor_time else "training_time"
+                    axis_title = "Sensor Event Time" if prefer_sensor_time else "Training Time"
+                    history_df["plot_time"] = history_df[axis_col].where(
+                        history_df[axis_col].notna(),
+                        history_df["training_time"],
+                    )
+                    history_df = history_df.dropna(subset=["plot_time"])
                     room_options = sorted(history_df["room"].dropna().astype(str).unique().tolist())
                     selected_rooms = st.multiselect(
                         "Rooms to Plot",
@@ -288,7 +307,7 @@ def render():
                     )
                     if selected_rooms:
                         history_df = history_df[history_df["room"].isin(selected_rooms)].copy()
-                    history_df = history_df.sort_values(["training_date", "run_id", "room"])
+                    history_df = history_df.sort_values(["plot_time", "run_id", "room"])
 
                     f1_df = history_df[history_df["candidate_macro_f1_mean"].notna()].copy()
                     acc_df = history_df[history_df["candidate_accuracy_mean"].notna()].copy()
@@ -298,13 +317,14 @@ def render():
                         f1_tooltips = [
                             alt.Tooltip("room:N", title="Room"),
                             alt.Tooltip("run_id:Q", title="Run ID"),
-                            alt.Tooltip("training_date:T", title="Training Time"),
+                            alt.Tooltip("sensor_event_time:T", title="Sensor Event Time"),
+                            alt.Tooltip("training_time:T", title="Training Time"),
                             alt.Tooltip("candidate_macro_f1_mean:Q", title="WF Candidate F1", format=".6f"),
                             alt.Tooltip("required_threshold:Q", title="Required Threshold", format=".6f"),
                             alt.Tooltip("training_days:Q", title="Training Days", format=".1f"),
                         ]
                         f1_base = alt.Chart(f1_df).encode(
-                            x=alt.X("training_date:T", title="Training Time"),
+                            x=alt.X("plot_time:T", title=axis_title),
                             y=alt.Y("candidate_macro_f1_mean:Q", title="WF Candidate F1"),
                             color=alt.Color("room:N", title="Room"),
                         )
@@ -318,12 +338,13 @@ def render():
                             threshold_tooltips = [
                                 alt.Tooltip("room:N", title="Room"),
                                 alt.Tooltip("run_id:Q", title="Run ID"),
-                                alt.Tooltip("training_date:T", title="Training Time"),
+                                alt.Tooltip("sensor_event_time:T", title="Sensor Event Time"),
+                                alt.Tooltip("training_time:T", title="Training Time"),
                                 alt.Tooltip("required_threshold:Q", title="Required Threshold", format=".6f"),
                                 alt.Tooltip("training_days:Q", title="Training Days", format=".1f"),
                             ]
                             threshold_base = alt.Chart(threshold_df).encode(
-                                x=alt.X("training_date:T", title="Training Time"),
+                                x=alt.X("plot_time:T", title=axis_title),
                                 y=alt.Y("required_threshold:Q", title="WF Candidate F1"),
                                 color=alt.Color("room:N", title="Room"),
                             )
@@ -341,12 +362,13 @@ def render():
                         acc_tooltips = [
                             alt.Tooltip("room:N", title="Room"),
                             alt.Tooltip("run_id:Q", title="Run ID"),
-                            alt.Tooltip("training_date:T", title="Training Time"),
+                            alt.Tooltip("sensor_event_time:T", title="Sensor Event Time"),
+                            alt.Tooltip("training_time:T", title="Training Time"),
                             alt.Tooltip("candidate_accuracy_mean:Q", title="WF Candidate Accuracy", format=".6f"),
                             alt.Tooltip("training_days:Q", title="Training Days", format=".1f"),
                         ]
                         acc_base = alt.Chart(acc_df).encode(
-                            x=alt.X("training_date:T", title="Training Time"),
+                            x=alt.X("plot_time:T", title=axis_title),
                             y=alt.Y("candidate_accuracy_mean:Q", title="WF Candidate Accuracy"),
                             color=alt.Color("room:N", title="Room"),
                         )

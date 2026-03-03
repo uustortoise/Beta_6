@@ -1,0 +1,133 @@
+version: v1
+
+clinical_priority:
+  multipliers_by_label:
+    sleep: 1.6
+    nap: 1.3
+    shower: 2.0
+    toilet: 2.0
+    cooking: 1.5
+    washing_dishes: 1.3
+    change_clothes: 1.3
+    bathroom_normal_use: 1.3
+    kitchen_normal_use: 1.2
+    livingroom_normal_use: 1.2
+    bedroom_normal_use: 1.2
+    room_normal_use: 1.2
+    watch_tv: 1.1
+    out: 1.1
+    inactive: 0.85
+    unoccupied: 0.75
+    low_confidence: 0.60
+
+calibration:
+  precision_targets_by_label:
+    sleep: 0.70
+    nap: 0.70
+    shower: 0.70
+    toilet: 0.70
+    cooking: 0.70
+    washing_dishes: 0.70
+    change_clothes: 0.70
+    bathroom_normal_use: 0.70
+    kitchen_normal_use: 0.70
+    livingroom_normal_use: 0.70
+    bedroom_normal_use: 0.70
+    room_normal_use: 0.70
+    watch_tv: 0.70
+    out: 0.70
+    inactive: 0.70
+    unoccupied: 0.70
+  recall_floors_by_label:
+    sleep: 0.18
+    nap: 0.15
+    shower: 0.14
+    toilet: 0.14
+    cooking: 0.12
+    washing_dishes: 0.12
+    bathroom_normal_use: 0.12
+    kitchen_normal_use: 0.12
+    livingroom_normal_use: 0.10
+    bedroom_normal_use: 0.10
+    room_normal_use: 0.10
+
+unoccupied_downsample:
+  min_share_by_room:
+    bathroom: 0.25
+    bedroom: 0.58
+    entrance: 0.40
+    livingroom: 0.30
+    kitchen: 0.28
+  stride_by_room:
+    bathroom: 4
+    bedroom: 2
+    entrance: 3
+    kitchen: 5
+    livingroom: 4
+
+minority_sampling:
+  target_share_by_room:
+    bathroom: 0.10
+    bedroom: 0.18
+    entrance: 0.18
+    kitchen: 0.12
+    livingroom: 0.15
+  max_multiplier_by_room:
+    bathroom: 2
+    bedroom: 2
+    entrance: 4
+    kitchen: 3
+    livingroom: 3
+
+data_viability:
+  min_observed_days_by_room:
+    bedroom: 7
+    livingroom: 7
+    kitchen: 7
+    entrance: 7
+    bathroom: 7
+  min_post_gap_rows_by_room:
+    bedroom: 12000
+    livingroom: 12000
+    kitchen: 10000
+    entrance: 10000
+    bathroom: 8000
+  max_unresolved_drop_ratio_by_room:
+    bedroom: 0.85
+    livingroom: 0.85
+    kitchen: 0.85
+    entrance: 0.85
+    bathroom: 0.90
+  min_training_windows_by_room:
+    bedroom: 3000
+    livingroom: 3000
+    kitchen: 2500
+    entrance: 2500
+    bathroom: 2000
+
+training:
+  timeline_native_rooms:
+    - bedroom
+    - livingroom
+  min_holdout_support_default: 3
+  min_holdout_support_by_room:
+    bedroom: 5
+    bathroom: 5
+    kitchen: 5
+    livingroom: 5
+    entrance: 3
+
+runtime:
+  hard_negative_risky_rooms:
+    - bathroom
+    - entrance
+    - kitchen
+  runtime_unknown_rooms:
+    - livingroom
+  wf_min_minority_support_default: 3
+  wf_min_minority_support_by_room:
+    bedroom: 5
+    bathroom: 5
+    kitchen: 5
+    livingroom: 5
+    entrance: 3

@@ -165,7 +165,7 @@ def test_release_gate_evidence_profile_respects_explicit_floor_overrides():
     assert policy.release_gate.min_recall_support == 17
 
 
-def test_pilot_profile_forces_neutral_clinical_priority_multipliers():
+def test_pilot_profile_preserves_bedroom_sleep_multipliers_only():
     policy = load_policy_from_env(
         {
             "RELEASE_GATE_EVIDENCE_PROFILE": "pilot_stage_a",
@@ -175,11 +175,28 @@ def test_pilot_profile_forces_neutral_clinical_priority_multipliers():
     )
 
     assert policy.release_gate.evidence_profile == "pilot_stage_a"
-    assert policy.clinical_priority.get_multiplier("sleep") == 1.0
+    assert policy.clinical_priority.get_multiplier("sleep") == 2.2
     assert policy.clinical_priority.get_multiplier("inactive") == 1.0
     assert policy.clinical_priority.get_multiplier("shower") == 1.0
-    assert all(value == 1.0 for value in policy.clinical_priority.multipliers.values())
-    assert all(value == 1.0 for value in policy.clinical_priority.multipliers_by_room_label.values())
+    assert policy.clinical_priority.get_room_label_multiplier("bedroom", "sleep") == 0.7
+    assert policy.clinical_priority.get_room_label_multiplier("bathroom", "shower") == 1.0
+
+
+def test_pilot_profile_can_override_preserved_priority_labels():
+    policy = load_policy_from_env(
+        {
+            "RELEASE_GATE_EVIDENCE_PROFILE": "pilot_stage_a",
+            "CLINICAL_PRIORITY_MULTIPLIERS": "sleep:2.0,inactive:0.4,shower:2.3",
+            "PILOT_STAGE_CLINICAL_PRIORITY_LABELS": "shower",
+            "PILOT_STAGE_CLINICAL_PRIORITY_ROOM_LABELS": "bathroom.shower",
+            "CLINICAL_PRIORITY_MULTIPLIERS_BY_ROOM_LABEL": "bedroom.sleep:3.1,bathroom.shower:2.6",
+        }
+    )
+    assert policy.clinical_priority.get_multiplier("sleep") == 1.0
+    assert policy.clinical_priority.get_multiplier("inactive") == 1.0
+    assert policy.clinical_priority.get_multiplier("shower") == 2.3
+    assert policy.clinical_priority.get_room_label_multiplier("bedroom", "sleep") == 1.0
+    assert policy.clinical_priority.get_room_label_multiplier("bathroom", "shower") == 2.6
 
 
 def test_data_viability_env_overrides():

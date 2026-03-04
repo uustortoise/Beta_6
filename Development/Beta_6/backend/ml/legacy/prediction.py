@@ -361,6 +361,104 @@ class PredictionPipeline:
         return raw in {"1", "true", "yes", "on", "enabled"}
 
     @staticmethod
+    def _resolve_bedroom_sleep_continuity_enabled() -> bool:
+        return _env_enabled("ENABLE_BEDROOM_SLEEP_CONTINUITY", default=True)
+
+    @staticmethod
+    def _resolve_bedroom_sleep_bridge_max_steps() -> int:
+        return max(1, _env_int("BEDROOM_SLEEP_BRIDGE_MAX_STEPS", 36))
+
+    @staticmethod
+    def _resolve_bedroom_sleep_bridge_min_occ_prob() -> float:
+        return float(np.clip(_env_float("BEDROOM_SLEEP_BRIDGE_MIN_OCC_PROB", 0.35), 0.0, 1.0))
+
+    def _apply_bedroom_sleep_continuity_constraints(
+        self,
+        *,
+        room_name: str,
+        probs: np.ndarray,
+        stage_a_p_occ: np.ndarray,
+        stage_a_threshold: float,
+    ) -> np.ndarray:
+        room_key = normalize_room_name(room_name)
+        if room_key != "bedroom":
+            return np.asarray(probs, dtype=np.float32)
+        if not self._resolve_bedroom_sleep_continuity_enabled():
+            return np.asarray(probs, dtype=np.float32)
+
+        label_encoder = self.platform.label_encoders.get(room_name)
+        classes = getattr(label_encoder, "classes_", None) if label_encoder is not None else None
+        if classes is None:
+            return np.asarray(probs, dtype=np.float32)
+        label_to_id = {
+            str(label).strip().lower(): int(idx)
+            for idx, label in enumerate(classes)
+        }
+        sleep_id = label_to_id.get("sleep")
+        unoccupied_id = label_to_id.get("unoccupied")
+        if sleep_id is None or unoccupied_id is None:
+            return np.asarray(probs, dtype=np.float32)
+
+        out = np.asarray(probs, dtype=np.float32).copy()
+        if out.ndim != 2 or out.shape[1] <= max(int(sleep_id), int(unoccupied_id)):
+            return np.asarray(probs, dtype=np.float32)
+        if out.shape[0] <= 2:
+            return out
+
+        pred_ids = np.argmax(out, axis=1).astype(np.int32)
+        stage_a_occ = np.asarray(stage_a_p_occ, dtype=np.float32)
+        if int(stage_a_occ.shape[0]) != int(out.shape[0]):
+            return out
+
+        max_gap_steps = self._resolve_bedroom_sleep_bridge_max_steps()
+        min_occ_prob = self._resolve_bedroom_sleep_bridge_min_occ_prob()
+        min_boundary_occ = max(
+            float(min_occ_prob),
+            float(np.clip(float(stage_a_threshold) * 0.70, 0.0, 1.0)),
+        )
+
+        converted = 0
+        n = int(len(pred_ids))
+        i = 0
+        while i < n:
+            if int(pred_ids[i]) != int(unoccupied_id):
+                i += 1
+                continue
+            start = i
+            while i < n and int(pred_ids[i]) == int(unoccupied_id):
+                i += 1
+            end = i
+            gap_len = int(end - start)
+            if gap_len <= 0 or gap_len > int(max_gap_steps):
+                continue
+            left_is_sleep = start > 0 and int(pred_ids[start - 1]) == int(sleep_id)
+            right_is_sleep = end < n and int(pred_ids[end]) == int(sleep_id)
+            if not (left_is_sleep and right_is_sleep):
+                continue
+            gap_occ = np.asarray(stage_a_occ[start:end], dtype=np.float32)
+            if gap_occ.size <= 0 or float(np.max(gap_occ)) < float(min_boundary_occ):
+                continue
+            for idx in range(start, end):
+                unocc_prob = float(out[idx, int(unoccupied_id)])
+                if unocc_prob <= 0.0:
+                    continue
+                transfer = float(max(unocc_prob * 0.85, 0.50))
+                transfer = float(min(transfer, 0.98))
+                out[idx, int(sleep_id)] = float(max(float(out[idx, int(sleep_id)]), transfer))
+                out[idx, int(unoccupied_id)] = float(min(float(out[idx, int(unoccupied_id)]), 0.02))
+                converted += 1
+
+        if converted > 0:
+            row_sums = np.sum(out, axis=1, keepdims=True)
+            out = out / np.clip(row_sums, 1e-8, None)
+            logger.info(
+                "Bedroom continuity bridge converted %d windows at runtime for %s",
+                int(converted),
+                room_name,
+            )
+        return out.astype(np.float32, copy=False)
+
+    @staticmethod
     def _to_probability_matrix(raw: Any) -> np.ndarray:
         arr = np.asarray(raw, dtype=np.float32)
         if arr.ndim != 2:
@@ -476,6 +574,12 @@ class PredictionPipeline:
             y_pred_probs[invalid_rows, excluded_ids[0]] = 1.0
             row_sums = np.sum(y_pred_probs, axis=1, keepdims=True)
         y_pred_probs = y_pred_probs / np.clip(row_sums, 1e-8, None)
+        y_pred_probs = self._apply_bedroom_sleep_continuity_constraints(
+            room_name=room_name,
+            probs=y_pred_probs,
+            stage_a_p_occ=p_occ,
+            stage_a_threshold=stage_a_threshold,
+        )
         logger.info(
             "Using two-stage core runtime path for %s (stage_a_threshold=%.3f)",
             room_name,

@@ -49,7 +49,7 @@ from ml.reproducibility_report import ReproducibilityTracker, compute_data_finge
 from ml.transformer_head_ab import derive_dual_head_probabilities
 from ml.event_decoder import EventDecoder, DecoderConfig
 from ml.event_kpi import EventKPICalculator, EventKPIConfig
-from ml.event_gates import EventGateChecker, EventGateThresholds
+from ml.event_gates import CriticalityTier, EventGateChecker, EventGateThresholds
 from ml.label_taxonomy import (
     get_critical_labels_for_room,
     get_label_alias_equivalents,
@@ -294,6 +294,41 @@ class TrainingPipeline:
             0.25,
             min_value=0.0,
             max_value=2.0,
+        )
+
+    def _resolve_gate_aligned_lane_b_weight(self) -> float:
+        return self._env_float(
+            "GATE_ALIGNED_LANE_B_WEIGHT",
+            0.50,
+            min_value=0.0,
+            max_value=3.0,
+        )
+
+    def _resolve_gate_aligned_lane_b_floor_penalty(self) -> float:
+        return self._env_float(
+            "GATE_ALIGNED_LANE_B_FLOOR_PENALTY",
+            0.35,
+            min_value=0.0,
+            max_value=3.0,
+        )
+
+    def _resolve_two_stage_bedroom_continuity_enabled(self) -> bool:
+        return self._env_bool("ENABLE_BEDROOM_SLEEP_CONTINUITY", True)
+
+    def _resolve_two_stage_bedroom_bridge_max_steps(self) -> int:
+        raw = os.getenv("BEDROOM_SLEEP_BRIDGE_MAX_STEPS")
+        try:
+            value = int(raw) if raw is not None else 36
+        except (TypeError, ValueError):
+            value = 36
+        return max(1, int(value))
+
+    def _resolve_two_stage_bedroom_bridge_min_occ_prob(self) -> float:
+        return self._env_float(
+            "BEDROOM_SLEEP_BRIDGE_MIN_OCC_PROB",
+            0.35,
+            min_value=0.0,
+            max_value=1.0,
         )
 
     def _resolve_collapse_retry_enabled(self) -> bool:
@@ -2141,6 +2176,43 @@ class TrainingPipeline:
         critical_recall_mean = float(np.mean(critical_recalls)) if critical_recalls else 0.0
         critical_recall_min = float(np.min(critical_recalls)) if critical_recalls else 0.0
 
+        lane_b_event_map = get_lane_b_event_labels_for_room(normalize_room_name(room_name))
+        lane_b_thresholds = EventGateThresholds()
+        lane_b_floor_failures: List[str] = []
+        lane_b_stats: Dict[str, Dict[str, Any]] = {}
+        lane_b_recalls: List[float] = []
+        for event_name, labels in lane_b_event_map.items():
+            total_support = 0
+            weighted_recall = 0.0
+            for label in labels:
+                key = str(label).strip().lower()
+                support = int(per_label_support.get(key, 0) or 0)
+                recall = float(per_label_recall.get(key, 0.0) or 0.0)
+                total_support += support
+                weighted_recall += recall * float(support)
+            event_recall = float(weighted_recall / float(total_support)) if total_support > 0 else 0.0
+            tier = EventGateChecker.EVENT_TIERS.get(str(event_name), CriticalityTier.TIER_3)
+            if tier == CriticalityTier.TIER_1:
+                required_recall = float(lane_b_thresholds.tier_1_recall_min)
+            elif tier == CriticalityTier.TIER_2:
+                required_recall = float(lane_b_thresholds.tier_2_recall_min)
+            else:
+                required_recall = float(lane_b_thresholds.tier_3_recall_min)
+            eligible = int(total_support) >= int(lane_b_thresholds.min_support_for_tier_gates)
+            lane_b_stats[str(event_name)] = {
+                "labels": [str(item).strip().lower() for item in labels],
+                "support": int(total_support),
+                "recall": float(event_recall),
+                "required_recall": float(required_recall),
+                "tier": int(tier.value),
+                "eligible_for_floor": bool(eligible),
+            }
+            if eligible:
+                lane_b_recalls.append(float(event_recall))
+                if float(event_recall) < float(required_recall):
+                    lane_b_floor_failures.append(str(event_name))
+        lane_b_recall_mean = float(np.mean(lane_b_recalls)) if lane_b_recalls else 0.0
+
         dominant_class_id = -1
         dominant_class_count = 0
         dominant_class_share = 0.0
@@ -2159,13 +2231,17 @@ class TrainingPipeline:
         collapse_ratio = self._resolve_gate_aligned_collapse_ratio()
         collapsed = bool(dominant_class_share >= float(collapse_ratio))
         critical_floor_failed = bool(len(critical_floor_failures) > 0)
+        lane_b_floor_failed = bool(len(lane_b_floor_failures) > 0)
 
         score = float(macro_f1)
         score += float(self._resolve_gate_aligned_critical_weight()) * float(critical_recall_mean)
+        score += float(self._resolve_gate_aligned_lane_b_weight()) * float(lane_b_recall_mean)
         if collapsed:
             score -= float(self._resolve_gate_aligned_collapse_penalty())
         if critical_floor_failed:
             score -= float(self._resolve_gate_aligned_floor_penalty())
+        if lane_b_floor_failed:
+            score -= float(self._resolve_gate_aligned_lane_b_floor_penalty())
 
         dominant_label = self._get_label_name(room_name, dominant_class_id)
         return {
@@ -2187,6 +2263,9 @@ class TrainingPipeline:
             "collapse_ratio": float(collapse_ratio),
             "collapsed": bool(collapsed),
             "predicted_class_distribution": predicted_distribution,
+            "lane_b_event_stats": lane_b_stats,
+            "lane_b_recall_mean": float(lane_b_recall_mean),
+            "lane_b_floor_failures": lane_b_floor_failures,
             "gate_aligned_score": float(score),
         }
 
@@ -2891,6 +2970,7 @@ class TrainingPipeline:
 
         for threshold in candidates:
             probs = self._compose_two_stage_core_probabilities(
+                room_name=room_name,
                 stage_a_probs=stage_a_probs,
                 stage_b_probs=stage_b_probs,
                 n_classes=n_classes,
@@ -2924,6 +3004,7 @@ class TrainingPipeline:
 
         if baseline_summary is None:
             baseline_probs = self._compose_two_stage_core_probabilities(
+                room_name=room_name,
                 stage_a_probs=stage_a_probs,
                 stage_b_probs=stage_b_probs,
                 n_classes=n_classes,
@@ -2959,6 +3040,7 @@ class TrainingPipeline:
     def _compose_two_stage_core_probabilities(
         self,
         *,
+        room_name: str,
         stage_a_probs: np.ndarray,
         stage_b_probs: Optional[np.ndarray],
         n_classes: int,
@@ -3027,11 +3109,120 @@ class TrainingPipeline:
             out[invalid_rows, int(excluded_arr[0])] = 1.0
             row_sums = np.sum(out, axis=1, keepdims=True)
         out = out / np.clip(row_sums, 1e-8, None)
+        out = self._apply_bedroom_sleep_continuity_constraints(
+            room_name=room_name,
+            probs=out,
+            stage_a_p_occ=p_occ,
+            stage_a_threshold=stage_a_threshold,
+        )
+        return out.astype(np.float32, copy=False)
+
+    def _apply_bedroom_sleep_continuity_constraints(
+        self,
+        *,
+        room_name: str,
+        probs: np.ndarray,
+        stage_a_p_occ: np.ndarray,
+        stage_a_threshold: float,
+    ) -> np.ndarray:
+        """
+        Apply lightweight bedroom sleep continuity constraints.
+
+        This approximates a CRF-style duration prior by bridging short
+        `unoccupied` gaps between surrounding `sleep` runs when stage-A occupancy
+        confidence is near the decision boundary.
+        """
+        room_key = normalize_room_name(room_name)
+        if room_key != "bedroom":
+            return np.asarray(probs, dtype=np.float32)
+        if not self._resolve_two_stage_bedroom_continuity_enabled():
+            return np.asarray(probs, dtype=np.float32)
+
+        label_encoder = self.platform.label_encoders.get(room_name)
+        classes = getattr(label_encoder, "classes_", None) if label_encoder is not None else None
+        if classes is None:
+            return np.asarray(probs, dtype=np.float32)
+
+        label_to_id = {
+            str(label).strip().lower(): int(idx)
+            for idx, label in enumerate(classes)
+        }
+        sleep_id = label_to_id.get("sleep")
+        unoccupied_id = label_to_id.get("unoccupied")
+        if sleep_id is None or unoccupied_id is None:
+            return np.asarray(probs, dtype=np.float32)
+
+        out = np.asarray(probs, dtype=np.float32).copy()
+        if out.ndim != 2 or out.shape[1] <= max(int(sleep_id), int(unoccupied_id)):
+            return np.asarray(probs, dtype=np.float32)
+        if out.shape[0] <= 2:
+            return out
+
+        pred_ids = np.argmax(out, axis=1).astype(np.int32)
+        stage_a_occ = np.asarray(stage_a_p_occ, dtype=np.float32)
+        if int(stage_a_occ.shape[0]) != int(out.shape[0]):
+            return out
+
+        max_gap_steps = self._resolve_two_stage_bedroom_bridge_max_steps()
+        min_occ_prob = self._resolve_two_stage_bedroom_bridge_min_occ_prob()
+        # Guard: require a weak proximity to occupied decision boundary.
+        min_boundary_occ = max(
+            float(min_occ_prob),
+            float(np.clip(float(stage_a_threshold) * 0.70, 0.0, 1.0)),
+        )
+
+        converted = 0
+        n = int(len(pred_ids))
+        i = 0
+        while i < n:
+            if int(pred_ids[i]) != int(unoccupied_id):
+                i += 1
+                continue
+            start = i
+            while i < n and int(pred_ids[i]) == int(unoccupied_id):
+                i += 1
+            end = i  # exclusive
+            gap_len = int(end - start)
+            if gap_len <= 0 or gap_len > int(max_gap_steps):
+                continue
+            left_is_sleep = start > 0 and int(pred_ids[start - 1]) == int(sleep_id)
+            right_is_sleep = end < n and int(pred_ids[end]) == int(sleep_id)
+            if not (left_is_sleep and right_is_sleep):
+                continue
+
+            gap_occ = np.asarray(stage_a_occ[start:end], dtype=np.float32)
+            if gap_occ.size <= 0:
+                continue
+            if float(np.max(gap_occ)) < float(min_boundary_occ):
+                continue
+
+            for idx in range(start, end):
+                unocc_prob = float(out[idx, int(unoccupied_id)])
+                if unocc_prob <= 0.0:
+                    continue
+                # Route the majority of gap mass to sleep while keeping a small
+                # residual for uncertainty.
+                transfer = float(max(unocc_prob * 0.85, 0.50))
+                transfer = float(min(transfer, 0.98))
+                out[idx, int(sleep_id)] = float(max(float(out[idx, int(sleep_id)]), transfer))
+                out[idx, int(unoccupied_id)] = float(min(float(out[idx, int(unoccupied_id)]), 0.02))
+                converted += 1
+
+        if converted > 0:
+            row_sums = np.sum(out, axis=1, keepdims=True)
+            out = out / np.clip(row_sums, 1e-8, None)
+            logger.info(
+                "Bedroom continuity bridge converted %d windows (max_gap_steps=%d, min_occ_prob=%.3f)",
+                int(converted),
+                int(max_gap_steps),
+                float(min_boundary_occ),
+            )
         return out.astype(np.float32, copy=False)
 
     def _predict_two_stage_core_probabilities(
         self,
         *,
+        room_name: str,
         two_stage_result: Mapping[str, Any],
         X: np.ndarray,
     ) -> np.ndarray:
@@ -3084,6 +3275,7 @@ class TrainingPipeline:
             two_stage_result.get("primary_occupied_class_id", occupied_ids[0])
         )
         return self._compose_two_stage_core_probabilities(
+            room_name=room_name,
             stage_a_probs=stage_a_probs,
             stage_b_probs=stage_b_probs,
             n_classes=n_classes,
@@ -4998,6 +5190,7 @@ class TrainingPipeline:
                     ).strip().lower()
                     try:
                         y_pred_two_stage = self._predict_two_stage_core_probabilities(
+                            room_name=room_name,
                             two_stage_result=two_stage_result,
                             X=np.asarray(validation_data[0], dtype=np.float32),
                         )

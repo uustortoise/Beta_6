@@ -392,6 +392,88 @@ class TestPredictionPipeline(unittest.TestCase):
     @patch.dict(
         'os.environ',
         {
+            'ENABLE_TWO_STAGE_CORE_RUNTIME': 'true',
+            'TWO_STAGE_CORE_RUNTIME_ROOMS': 'bedroom',
+            'ENABLE_BEDROOM_SLEEP_CONTINUITY': 'true',
+            'BEDROOM_SLEEP_BRIDGE_MAX_STEPS': '3',
+            'BEDROOM_SLEEP_BRIDGE_MIN_OCC_PROB': '0.30',
+        },
+        clear=False,
+    )
+    @patch('ml.prediction.normalize_room_name', side_effect=lambda x: str(x).strip().lower())
+    @patch('ml.prediction.calculate_sequence_length')
+    def test_run_prediction_two_stage_bridges_short_bedroom_sleep_gaps(self, mock_calc_seq, mock_norm):
+        mock_calc_seq.return_value = 5
+        self.mock_platform.label_encoders['bedroom'] = MagicMock()
+        self.mock_platform.room_models['bedroom'] = MagicMock()
+        self.mock_platform.label_encoders['bedroom'].classes_ = np.array(
+            ['sleep', 'bedroom_normal_use', 'unoccupied']
+        )
+        self.mock_platform.label_encoders['bedroom'].inverse_transform.side_effect = (
+            lambda arr: np.array(
+                [
+                    'sleep' if int(v) == 0 else 'bedroom_normal_use' if int(v) == 1 else 'unoccupied'
+                    for v in arr
+                ]
+            )
+        )
+        self.mock_platform.class_thresholds = {'bedroom': {'0': 0.0, '1': 0.0, '2': 0.0}}
+        self.mock_platform.room_models['bedroom'].predict.return_value = np.array([[0.99, 0.005, 0.005]] * 6)
+
+        stage_a_model = MagicMock()
+        stage_a_model.predict.return_value = np.array(
+            [
+                [0.05, 0.95],
+                [0.05, 0.95],
+                [0.60, 0.40],
+                [0.60, 0.40],
+                [0.05, 0.95],
+                [0.05, 0.95],
+            ]
+        )
+        stage_b_model = MagicMock()
+        stage_b_model.predict.return_value = np.array(
+            [
+                [0.90, 0.10],
+                [0.90, 0.10],
+                [0.10, 0.90],
+                [0.10, 0.90],
+                [0.90, 0.10],
+                [0.90, 0.10],
+            ]
+        )
+        self.mock_platform.two_stage_core_models = {
+            'bedroom': {
+                'stage_a_model': stage_a_model,
+                'stage_b_model': stage_b_model,
+                'num_classes': 3,
+                'excluded_class_ids': [2],
+                'occupied_class_ids': [0, 1],
+                'primary_occupied_class_id': 0,
+                'stage_a_occupied_threshold': 0.5,
+            }
+        }
+        self.mock_platform.create_sequences.return_value = np.zeros((6, 5, 2))
+        sensor_data = {
+            'bedroom': pd.DataFrame({
+                'timestamp': pd.date_range('2023-01-01', periods=10, freq='10s'),
+                's1': np.random.randn(10),
+                's2': np.random.randn(10),
+            })
+        }
+        self.mock_platform.preprocess_with_resampling.return_value = sensor_data['bedroom']
+
+        predictions = self.pipeline.run_prediction(sensor_data=sensor_data, loaded_rooms=['bedroom'], seq_length=5)
+        pred_df = predictions['bedroom']
+
+        self.assertEqual(len(pred_df), 6)
+        self.assertTrue((pred_df['predicted_activity'] == 'sleep').all())
+        stage_a_model.predict.assert_called_once()
+        stage_b_model.predict.assert_called_once()
+
+    @patch.dict(
+        'os.environ',
+        {
             'RUNTIME_UNKNOWN_ENABLED': 'true',
             'RUNTIME_UNKNOWN_ROOMS': 'room1',
             'RUNTIME_UNKNOWN_NIGHT_ONLY': 'true',

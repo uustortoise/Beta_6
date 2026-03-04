@@ -239,6 +239,17 @@ def _parse_label_override_map(raw_value: str) -> dict[str, str]:
     return out
 
 
+def _parse_lower_token_set(raw_value: str | None, default_csv: str = "") -> set[str]:
+    txt = str(raw_value).strip() if raw_value is not None else str(default_csv).strip()
+    if not txt:
+        return set()
+    return {
+        str(token).strip().lower()
+        for token in txt.split(",")
+        if str(token).strip()
+    }
+
+
 @dataclass
 class ClinicalPriorityPolicy:
     multipliers: dict[str, float] = field(
@@ -518,17 +529,34 @@ def load_policy_from_env(environ: Mapping[str, str] | None = None) -> TrainingPo
         minimum=0.0,
         maximum=100.0,
     )
-    # Pilot profiles run on short-window evidence. Force neutral class weighting
-    # to avoid hidden default-label bias from partial env overrides.
+    # Pilot profiles run on short-window evidence. Keep weights neutral by
+    # default, but preserve bedroom sleep-critical labels so checkpoint/gate
+    # selection can still optimize sleep-duration recall.
     if pilot_relaxed_evidence:
+        preserved_labels = _parse_lower_token_set(
+            env.get("PILOT_STAGE_CLINICAL_PRIORITY_LABELS"),
+            default_csv="sleep,sleep_duration",
+        )
+        preserved_room_labels = _parse_lower_token_set(
+            env.get("PILOT_STAGE_CLINICAL_PRIORITY_ROOM_LABELS"),
+            default_csv="bedroom.sleep,bedroom.sleep_duration",
+        )
         policy.clinical_priority.multipliers = {
-            str(label).strip().lower(): 1.0
-            for label in policy.clinical_priority.multipliers.keys()
+            str(label).strip().lower(): (
+                float(value)
+                if str(label).strip().lower() in preserved_labels
+                else 1.0
+            )
+            for label, value in policy.clinical_priority.multipliers.items()
             if str(label).strip()
         }
         policy.clinical_priority.multipliers_by_room_label = {
-            str(key).strip().lower(): 1.0
-            for key in policy.clinical_priority.multipliers_by_room_label.keys()
+            str(key).strip().lower(): (
+                float(value)
+                if str(key).strip().lower() in preserved_room_labels
+                else 1.0
+            )
+            for key, value in policy.clinical_priority.multipliers_by_room_label.items()
             if str(key).strip()
         }
 

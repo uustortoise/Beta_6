@@ -245,6 +245,26 @@ class TrainingPipeline:
                 resolved.add(room)
         return resolved
 
+    @staticmethod
+    def _env_room_float_map(name: str) -> Dict[str, float]:
+        raw = os.getenv(name)
+        if raw is None:
+            return {}
+        resolved: Dict[str, float] = {}
+        for token in str(raw).split(","):
+            entry = str(token).strip()
+            if not entry or ":" not in entry:
+                continue
+            room_token, value_token = entry.split(":", 1)
+            room = normalize_room_name(room_token)
+            if not room:
+                continue
+            try:
+                resolved[room] = float(value_token)
+            except (TypeError, ValueError):
+                continue
+        return resolved
+
     def _resolve_gate_aligned_checkpoint_enabled(self) -> bool:
         return self._env_bool("ENABLE_GATE_ALIGNED_CHECKPOINT", True)
 
@@ -2420,6 +2440,52 @@ class TrainingPipeline:
         abs_floor = float(np.clip(abs_floor, 0.0, 1.0))
         return ratio, abs_floor
 
+    def _resolve_two_stage_stage_a_max_predicted_occupied_ceiling(
+        self,
+        room_name: Optional[str] = None,
+    ) -> Tuple[float, float]:
+        """
+        Resolve safeguards for maximum predicted occupied rate on calibration.
+
+        Returns:
+            (relative_ratio, absolute_ceiling)
+        where:
+            max_pred_rate = min(absolute_ceiling, true_occupied_rate * relative_ratio)
+        """
+        raw_ratio = os.getenv("TWO_STAGE_CORE_STAGE_A_MAX_PRED_OCCUPIED_RATIO", "1.60")
+        raw_abs = os.getenv("TWO_STAGE_CORE_STAGE_A_MAX_PRED_OCCUPIED_ABS", "0.95")
+        room_key = normalize_room_name(room_name) if room_name else ""
+        ratio_by_room = self._env_room_float_map(
+            "TWO_STAGE_CORE_STAGE_A_MAX_PRED_OCCUPIED_RATIO_BY_ROOM"
+        )
+        abs_by_room = self._env_room_float_map(
+            "TWO_STAGE_CORE_STAGE_A_MAX_PRED_OCCUPIED_ABS_BY_ROOM"
+        )
+        if room_key and room_key in ratio_by_room:
+            raw_ratio = str(ratio_by_room.get(room_key))
+        if room_key and room_key in abs_by_room:
+            raw_abs = str(abs_by_room.get(room_key))
+        if room_key == "bedroom":
+            raw_ratio = os.getenv(
+                "TWO_STAGE_CORE_STAGE_A_BEDROOM_MAX_PRED_OCCUPIED_RATIO",
+                raw_ratio,
+            )
+            raw_abs = os.getenv(
+                "TWO_STAGE_CORE_STAGE_A_BEDROOM_MAX_PRED_OCCUPIED_ABS",
+                raw_abs,
+            )
+        try:
+            ratio = float(raw_ratio)
+        except (TypeError, ValueError):
+            ratio = 1.60
+        try:
+            abs_ceiling = float(raw_abs)
+        except (TypeError, ValueError):
+            abs_ceiling = 0.95
+        ratio = float(np.clip(ratio, 1.0, 10.0))
+        abs_ceiling = float(np.clip(abs_ceiling, 0.0, 1.0))
+        return ratio, abs_ceiling
+
     @staticmethod
     def _resolve_two_stage_stage_a_calib_val_occ_gap_max() -> float:
         """
@@ -2703,6 +2769,7 @@ class TrainingPipeline:
         room_name: str,
         two_stage_result: Mapping[str, Any],
         calibration_data: Optional[Tuple[np.ndarray, np.ndarray]],
+        champion_meta: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Calibrate occupancy threshold for stage-A of two-stage core modeling.
@@ -2721,6 +2788,7 @@ class TrainingPipeline:
             "true_occupied_rate": None,
             "predicted_occupied_rate": None,
             "min_predicted_occupied_rate": None,
+            "max_predicted_occupied_rate": None,
         }
         if not bool(two_stage_result.get("enabled", False)):
             result["status"] = "disabled"
@@ -2822,9 +2890,16 @@ class TrainingPipeline:
         min_ratio, min_abs_floor = self._resolve_two_stage_stage_a_min_predicted_occupied_floor(
             room_name=room_name
         )
+        max_ratio, max_abs_ceiling = self._resolve_two_stage_stage_a_max_predicted_occupied_ceiling(
+            room_name=room_name
+        )
         min_pred_rate = float(np.clip(max(min_abs_floor, true_occupied_rate * min_ratio), 0.0, 1.0))
+        max_pred_rate = float(np.clip(min(max_abs_ceiling, true_occupied_rate * max_ratio), 0.0, 1.0))
+        if max_pred_rate < min_pred_rate:
+            max_pred_rate = min_pred_rate
         predicted_occ_rate = float(np.mean(p_occ >= final_threshold))
         adjusted_for_pred_rate = False
+        adjusted_for_pred_cap = False
         if min_pred_rate > 0.0 and predicted_occ_rate + 1e-9 < min_pred_rate:
             quantile_level = float(np.clip(1.0 - min_pred_rate, 0.0, 1.0))
             candidate_threshold = float(np.quantile(p_occ, quantile_level))
@@ -2835,10 +2910,22 @@ class TrainingPipeline:
                 final_threshold = adjusted_threshold
                 predicted_occ_rate = float(np.mean(p_occ >= final_threshold))
                 adjusted_for_pred_rate = True
+        if max_pred_rate < 1.0 and predicted_occ_rate - 1e-9 > max_pred_rate:
+            quantile_level = float(np.clip(1.0 - max_pred_rate, 0.0, 1.0))
+            candidate_threshold = float(np.quantile(p_occ, quantile_level))
+            adjusted_threshold = float(
+                np.clip(max(final_threshold, candidate_threshold), threshold_min, threshold_max)
+            )
+            if adjusted_threshold > final_threshold + 1e-9:
+                final_threshold = adjusted_threshold
+                predicted_occ_rate = float(np.mean(p_occ >= final_threshold))
+                adjusted_for_pred_cap = True
 
         status = str(base_status)
         if adjusted_for_pred_rate:
             status = f"{base_status}+pred_occ_floor"
+        if adjusted_for_pred_cap:
+            status = f"{status}+pred_occ_cap"
 
         result.update(
             {
@@ -2852,7 +2939,9 @@ class TrainingPipeline:
                 },
                 "predicted_occupied_rate": predicted_occ_rate,
                 "min_predicted_occupied_rate": min_pred_rate,
+                "max_predicted_occupied_rate": max_pred_rate,
                 "predicted_occupied_floor_adjusted": bool(adjusted_for_pred_rate),
+                "predicted_occupied_cap_adjusted": bool(adjusted_for_pred_cap),
             }
         )
 
@@ -2865,6 +2954,7 @@ class TrainingPipeline:
                 X_eval=np.asarray(X_calib, dtype=np.float32),
                 y_eval=y_calib_arr,
                 baseline_threshold=final_threshold,
+                champion_meta=champion_meta,
             )
             result["gate_aligned_tuning"] = threshold_tuning
             if bool(threshold_tuning.get("applied", False)):
@@ -2901,6 +2991,21 @@ class TrainingPipeline:
                 if "+pred_occ_floor" not in str(result.get("status", "")):
                     result["status"] = f"{result.get('status', status)}+pred_occ_floor"
                 status = str(result["status"])
+        if max_pred_rate < 1.0 and predicted_occ_rate - 1e-9 > max_pred_rate:
+            quantile_level = float(np.clip(1.0 - max_pred_rate, 0.0, 1.0))
+            candidate_threshold = float(np.quantile(p_occ, quantile_level))
+            adjusted_threshold = float(
+                np.clip(max(final_threshold, candidate_threshold), threshold_min, threshold_max)
+            )
+            if adjusted_threshold > final_threshold + 1e-9:
+                final_threshold = adjusted_threshold
+                predicted_occ_rate = float(np.mean(p_occ >= final_threshold))
+                result["threshold"] = final_threshold
+                result["predicted_occupied_rate"] = predicted_occ_rate
+                result["predicted_occupied_cap_adjusted"] = True
+                if "+pred_occ_cap" not in str(result.get("status", "")):
+                    result["status"] = f"{result.get('status', status)}+pred_occ_cap"
+                status = str(result["status"])
 
         logger.info(
             "Two-stage stage-A occupancy threshold for %s: %.4f (%s, support=%d)",
@@ -2919,6 +3024,7 @@ class TrainingPipeline:
         X_eval: np.ndarray,
         y_eval: np.ndarray,
         baseline_threshold: float,
+        champion_meta: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         tuning: Dict[str, Any] = {
             "enabled": bool(self._resolve_two_stage_gate_aligned_threshold_tuning_enabled()),
@@ -3001,12 +3107,50 @@ class TrainingPipeline:
         primary_occupied_class_id = int(
             two_stage_result.get("primary_occupied_class_id", occupied_ids[0])
         )
-        best_threshold = baseline
-        best_summary: Optional[Dict[str, Any]] = None
-        baseline_summary: Optional[Dict[str, Any]] = None
-        best_score = float("-inf")
-        best_collapsed = True
+        no_regress_context: Dict[str, Any] = {
+            "enabled": False,
+            "target_macro_f1_floor": None,
+            "max_drop_from_champion": None,
+            "champion_macro_f1": None,
+            "eligible_count": 0,
+            "baseline_pass": None,
+            "selected_pass": None,
+            "fallback": None,
+        }
+        try:
+            candidate_f1 = None
+            if isinstance(champion_meta, Mapping):
+                champion_metrics = champion_meta.get("metrics")
+                if isinstance(champion_metrics, Mapping):
+                    candidate_f1 = champion_metrics.get("macro_f1")
+            if candidate_f1 is not None:
+                champion_f1 = float(candidate_f1)
+                policy = get_release_gates_config()
+                no_regress_cfg = (policy.get("release_gates", {}) or {}).get("no_regress", {}) or {}
+                exempt_rooms = {
+                    normalize_room_name(room)
+                    for room in (no_regress_cfg.get("exempt_rooms", []) or [])
+                }
+                if normalize_room_name(room_name) not in exempt_rooms:
+                    gate_policy = self._active_policy().release_gate
+                    max_drop = float(
+                        no_regress_cfg.get(
+                            "max_drop_from_champion",
+                            gate_policy.max_drop_from_champion_default,
+                        )
+                    )
+                    no_regress_context.update(
+                        {
+                            "enabled": True,
+                            "champion_macro_f1": champion_f1,
+                            "max_drop_from_champion": max_drop,
+                            "target_macro_f1_floor": float(champion_f1 - max_drop),
+                        }
+                    )
+        except Exception as e:
+            no_regress_context["error"] = f"{type(e).__name__}: {e}"
 
+        candidate_records: List[Dict[str, Any]] = []
         for threshold in candidates:
             probs = self._compose_two_stage_core_probabilities(
                 room_name=room_name,
@@ -3025,55 +3169,86 @@ class TrainingPipeline:
             )
             score = float(summary.get("gate_aligned_score", float("-inf")))
             collapsed = bool(summary.get("collapsed", False))
-            if abs(float(threshold) - baseline) <= 1e-9:
-                baseline_summary = dict(summary)
-
-            replace = False
-            if best_summary is None:
-                replace = True
-            elif best_collapsed and not collapsed:
-                replace = True
-            elif collapsed == best_collapsed and score > (best_score + 1e-8):
-                replace = True
-            if replace:
-                best_threshold = float(threshold)
-                best_summary = dict(summary)
-                best_score = float(score)
-                best_collapsed = bool(collapsed)
-
-        if baseline_summary is None:
-            baseline_probs = self._compose_two_stage_core_probabilities(
-                room_name=room_name,
-                stage_a_probs=stage_a_probs,
-                stage_b_probs=stage_b_probs,
-                n_classes=n_classes,
-                excluded_ids=excluded_ids,
-                occupied_ids=occupied_ids,
-                primary_occupied_class_id=primary_occupied_class_id,
-                stage_a_threshold=baseline,
-            )
-            baseline_summary = self._summarize_gate_aligned_validation(
-                room_name=room_name,
-                y_true=y_eval_arr,
-                y_pred_probs=baseline_probs,
+            macro_f1 = summary.get("macro_f1")
+            macro_f1_val = float(macro_f1) if macro_f1 is not None else None
+            no_regress_ok = True
+            floor = no_regress_context.get("target_macro_f1_floor")
+            if no_regress_context.get("enabled") and floor is not None:
+                no_regress_ok = bool(macro_f1_val is not None and macro_f1_val + 1e-9 >= float(floor))
+            candidate_records.append(
+                {
+                    "threshold": float(threshold),
+                    "summary": dict(summary),
+                    "score": score,
+                    "collapsed": collapsed,
+                    "macro_f1": macro_f1_val,
+                    "no_regress_ok": bool(no_regress_ok),
+                }
             )
 
-        baseline_score = float(baseline_summary.get("gate_aligned_score", float("-inf")))
-        baseline_collapsed = bool(baseline_summary.get("collapsed", False))
-        selected_summary = best_summary or baseline_summary
+        if not candidate_records:
+            tuning["reason"] = "no_candidate_records"
+            return tuning
+
+        def _pick_best(records: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+            ranked = sorted(
+                list(records),
+                key=lambda item: (
+                    1 if bool(item.get("collapsed", False)) else 0,
+                    -float(item.get("score", float("-inf"))),
+                ),
+            )
+            return ranked[0]
+
+        baseline_record = min(
+            candidate_records,
+            key=lambda item: abs(float(item.get("threshold", baseline)) - baseline),
+        )
+        baseline_summary = dict(baseline_record.get("summary", {}))
+        baseline_score = float(baseline_record.get("score", float("-inf")))
+        baseline_collapsed = bool(baseline_record.get("collapsed", False))
+        baseline_no_regress_ok = bool(baseline_record.get("no_regress_ok", True))
+        no_regress_context["baseline_pass"] = baseline_no_regress_ok
+
+        selected_record = _pick_best(candidate_records)
+        selected_reason = "best_gate_aligned"
+        if bool(no_regress_context.get("enabled")):
+            eligible_records = [item for item in candidate_records if bool(item.get("no_regress_ok", False))]
+            no_regress_context["eligible_count"] = int(len(eligible_records))
+            if eligible_records:
+                selected_record = _pick_best(eligible_records)
+                no_regress_context["fallback"] = "eligible_only"
+            else:
+                no_regress_context["fallback"] = "all_candidates_no_eligible"
+            selected_reason = "best_gate_aligned_no_regress"
+        selected_summary = dict(selected_record.get("summary", {}))
+        best_threshold = float(selected_record.get("threshold", baseline))
+        best_score = float(selected_record.get("score", float("-inf")))
+        best_collapsed = bool(selected_record.get("collapsed", False))
+        selected_no_regress_ok = bool(selected_record.get("no_regress_ok", True))
+        no_regress_context["selected_pass"] = selected_no_regress_ok
 
         improve = best_score > (baseline_score + 1e-8)
         collapse_rescue = baseline_collapsed and not bool(selected_summary.get("collapsed", False))
-        if (improve or collapse_rescue) and abs(best_threshold - baseline) > 1e-9:
+        no_regress_rescue = bool(
+            no_regress_context.get("enabled")
+            and (not baseline_no_regress_ok)
+            and selected_no_regress_ok
+        )
+        if (improve or collapse_rescue or no_regress_rescue) and abs(best_threshold - baseline) > 1e-9:
             tuning["applied"] = True
             tuning["selected_threshold"] = float(best_threshold)
-            tuning["reason"] = "best_gate_aligned"
+            if no_regress_rescue:
+                tuning["reason"] = "no_regress_rescue"
+            else:
+                tuning["reason"] = selected_reason
         else:
             tuning["selected_threshold"] = float(baseline)
             tuning["reason"] = "baseline_kept"
 
         tuning["baseline_summary"] = baseline_summary
         tuning["selected_summary"] = selected_summary
+        tuning["no_regress"] = no_regress_context
         return tuning
 
     def _compose_two_stage_core_probabilities(
@@ -5151,6 +5326,7 @@ class TrainingPipeline:
                     room_name=room_name,
                     two_stage_result=two_stage_result,
                     calibration_data=stage_a_calibration_input,
+                    champion_meta=champion_meta,
                 )
                 stage_a_calibration["input_source"] = str(
                     stage_a_calibration_alignment.get("input_source", "unknown")

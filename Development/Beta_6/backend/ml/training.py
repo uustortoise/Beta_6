@@ -2384,8 +2384,10 @@ class TrainingPipeline:
             min_thr, max_thr = max_thr, min_thr
         return min_thr, max_thr
 
-    @staticmethod
-    def _resolve_two_stage_stage_a_min_predicted_occupied_floor() -> Tuple[float, float]:
+    def _resolve_two_stage_stage_a_min_predicted_occupied_floor(
+        self,
+        room_name: Optional[str] = None,
+    ) -> Tuple[float, float]:
         """
         Resolve safeguards for minimum predicted occupied rate on calibration.
 
@@ -2396,6 +2398,16 @@ class TrainingPipeline:
         """
         raw_ratio = os.getenv("TWO_STAGE_CORE_STAGE_A_MIN_PRED_OCCUPIED_RATIO", "0.50")
         raw_abs = os.getenv("TWO_STAGE_CORE_STAGE_A_MIN_PRED_OCCUPIED_ABS", "0.05")
+        room_key = normalize_room_name(room_name) if room_name else ""
+        if room_key == "bedroom":
+            raw_ratio = os.getenv(
+                "TWO_STAGE_CORE_STAGE_A_BEDROOM_MIN_PRED_OCCUPIED_RATIO",
+                raw_ratio,
+            )
+            raw_abs = os.getenv(
+                "TWO_STAGE_CORE_STAGE_A_BEDROOM_MIN_PRED_OCCUPIED_ABS",
+                raw_abs,
+            )
         try:
             ratio = float(raw_ratio)
         except (TypeError, ValueError):
@@ -2407,6 +2419,21 @@ class TrainingPipeline:
         ratio = float(np.clip(ratio, 0.0, 1.0))
         abs_floor = float(np.clip(abs_floor, 0.0, 1.0))
         return ratio, abs_floor
+
+    @staticmethod
+    def _resolve_two_stage_stage_a_calib_val_occ_gap_max() -> float:
+        """
+        Max allowed occupied-rate gap between validation and calibration splits.
+
+        If the gap is larger and gate-mode is primary, use validation split for
+        stage-A threshold calibration to match promotion gate distribution.
+        """
+        raw = os.getenv("TWO_STAGE_CORE_STAGE_A_CALIB_VAL_OCC_GAP_MAX", "0.10")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = 0.10
+        return float(np.clip(value, 0.0, 1.0))
 
     def _two_stage_core_enabled_for_room(self, room_name: str) -> bool:
         enabled = str(os.getenv("ENABLE_TWO_STAGE_CORE_MODELING", "true")).strip().lower() in {
@@ -2660,6 +2687,16 @@ class TrainingPipeline:
         )
         return result
 
+    @staticmethod
+    def _occupied_rate_for_class_ids(y: np.ndarray, occupied_class_ids: Sequence[int]) -> float:
+        y_arr = np.asarray(y, dtype=np.int32)
+        if y_arr.size == 0:
+            return 0.0
+        occ_ids = np.asarray([int(v) for v in occupied_class_ids], dtype=np.int32)
+        if occ_ids.size == 0:
+            return 0.0
+        return float(np.mean(np.isin(y_arr, occ_ids)))
+
     def _calibrate_two_stage_stage_a_threshold(
         self,
         *,
@@ -2782,7 +2819,9 @@ class TrainingPipeline:
 
         # Guardrail: prevent stage-A threshold from collapsing to near-zero occupied
         # predictions on calibration when true occupied support is substantial.
-        min_ratio, min_abs_floor = self._resolve_two_stage_stage_a_min_predicted_occupied_floor()
+        min_ratio, min_abs_floor = self._resolve_two_stage_stage_a_min_predicted_occupied_floor(
+            room_name=room_name
+        )
         min_pred_rate = float(np.clip(max(min_abs_floor, true_occupied_rate * min_ratio), 0.0, 1.0))
         predicted_occ_rate = float(np.mean(p_occ >= final_threshold))
         adjusted_for_pred_rate = False
@@ -5067,11 +5106,56 @@ class TrainingPipeline:
                 max_epochs=max_epochs,
             )
             if bool(two_stage_result.get("enabled", False)):
+                stage_a_calibration_input = calibration_data or validation_data
+                stage_a_calibration_alignment: Dict[str, Any] = {
+                    "gate_mode": str(
+                        two_stage_result.get("gate_mode", self._resolve_two_stage_gate_mode())
+                    ).strip().lower(),
+                    "input_source": (
+                        "calibration_data"
+                        if calibration_data is not None
+                        else ("validation_data" if validation_data is not None else "none")
+                    ),
+                    "fallback_triggered": False,
+                }
+                if calibration_data is not None and validation_data is not None:
+                    occupied_ids = [int(v) for v in (two_stage_result.get("occupied_class_ids") or [])]
+                    val_occ_rate = self._occupied_rate_for_class_ids(validation_data[1], occupied_ids)
+                    calib_occ_rate = self._occupied_rate_for_class_ids(calibration_data[1], occupied_ids)
+                    occ_gap = float(abs(val_occ_rate - calib_occ_rate))
+                    max_occ_gap = self._resolve_two_stage_stage_a_calib_val_occ_gap_max()
+                    stage_a_calibration_alignment.update(
+                        {
+                            "validation_occupied_rate": float(val_occ_rate),
+                            "calibration_occupied_rate": float(calib_occ_rate),
+                            "occupied_rate_gap": float(occ_gap),
+                            "max_allowed_gap": float(max_occ_gap),
+                        }
+                    )
+                    if (
+                        stage_a_calibration_alignment["gate_mode"] == "primary"
+                        and occ_gap > (max_occ_gap + 1e-9)
+                    ):
+                        stage_a_calibration_input = validation_data
+                        stage_a_calibration_alignment["input_source"] = "validation_data_occ_gap_fallback"
+                        stage_a_calibration_alignment["fallback_triggered"] = True
+                        logger.info(
+                            "Stage-A calibration split fallback for %s: |val_occ-calib_occ|=%.4f > %.4f; "
+                            "using validation distribution for primary gate alignment.",
+                            room_name,
+                            occ_gap,
+                            max_occ_gap,
+                        )
+
                 stage_a_calibration = self._calibrate_two_stage_stage_a_threshold(
                     room_name=room_name,
                     two_stage_result=two_stage_result,
-                    calibration_data=calibration_data or validation_data,
+                    calibration_data=stage_a_calibration_input,
                 )
+                stage_a_calibration["input_source"] = str(
+                    stage_a_calibration_alignment.get("input_source", "unknown")
+                )
+                stage_a_calibration["alignment"] = dict(stage_a_calibration_alignment)
                 two_stage_result["stage_a_occupied_threshold"] = float(
                     stage_a_calibration.get(
                         "threshold", self._resolve_two_stage_stage_a_default_threshold()
@@ -5211,6 +5295,18 @@ class TrainingPipeline:
                             y_pred = y_pred_two_stage
                             metrics["two_stage_core"]["gate_source"] = "two_stage_primary"
                             metrics["metric_source"] = "holdout_validation_two_stage_primary"
+                            checkpoint_payload = metrics.get("checkpoint_selection")
+                            if isinstance(checkpoint_payload, dict):
+                                checkpoint_payload["proxy_source"] = "single_stage_pre_two_stage"
+                                checkpoint_payload["proxy_for_metric_source"] = (
+                                    "holdout_validation_two_stage_primary"
+                                )
+                            collapse_retry_payload = metrics.get("collapse_retry")
+                            if isinstance(collapse_retry_payload, dict):
+                                collapse_retry_payload["proxy_source"] = "single_stage_pre_two_stage"
+                                collapse_retry_payload["proxy_for_metric_source"] = (
+                                    "holdout_validation_two_stage_primary"
+                                )
                         else:
                             metrics["two_stage_core"]["gate_source"] = "single_stage_shadow"
                     except Exception as e:

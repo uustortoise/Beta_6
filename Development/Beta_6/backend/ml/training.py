@@ -90,6 +90,7 @@ class _GateAlignedCheckpointCallback(tf.keras.callbacks.Callback):
         X_val: np.ndarray,
         y_val: np.ndarray,
         timeline_multitask_enabled: bool,
+        no_regress_macro_f1_floor: Optional[float] = None,
     ) -> None:
         super().__init__()
         self.pipeline = pipeline
@@ -97,10 +98,20 @@ class _GateAlignedCheckpointCallback(tf.keras.callbacks.Callback):
         self.X_val = np.asarray(X_val, dtype=np.float32)
         self.y_val = np.asarray(y_val, dtype=np.int32)
         self.timeline_multitask_enabled = bool(timeline_multitask_enabled)
+        self.no_regress_macro_f1_floor = (
+            float(no_regress_macro_f1_floor)
+            if no_regress_macro_f1_floor is not None and np.isfinite(float(no_regress_macro_f1_floor))
+            else None
+        )
         self.best_score = float("-inf")
         self.best_epoch = -1
         self.best_weights = None
         self.best_summary: Dict[str, Any] = {}
+        self.best_floor_score = float("-inf")
+        self.best_floor_epoch = -1
+        self.best_floor_weights = None
+        self.best_floor_summary: Dict[str, Any] = {}
+        self.selection_mode = "overall_best"
         self.last_summary: Dict[str, Any] = {}
         self.last_error: Optional[str] = None
 
@@ -119,9 +130,18 @@ class _GateAlignedCheckpointCallback(tf.keras.callbacks.Callback):
                 y_pred_probs=y_pred_probs,
             )
             score = float(summary.get("gate_aligned_score", float("-inf")))
+            macro_f1 = summary.get("macro_f1")
+            passes_floor = True
+            if self.no_regress_macro_f1_floor is not None:
+                if macro_f1 is None:
+                    passes_floor = False
+                else:
+                    passes_floor = float(macro_f1) >= (float(self.no_regress_macro_f1_floor) - 1e-8)
             self.last_summary = {
                 "epoch": int(epoch),
                 "score": score,
+                "passes_no_regress_floor": bool(passes_floor),
+                "no_regress_macro_f1_floor": self.no_regress_macro_f1_floor,
                 **summary,
             }
             if score > (self.best_score + 1e-8):
@@ -129,12 +149,25 @@ class _GateAlignedCheckpointCallback(tf.keras.callbacks.Callback):
                 self.best_epoch = int(epoch)
                 self.best_weights = self.model.get_weights()
                 self.best_summary = dict(self.last_summary)
+            if passes_floor and score > (self.best_floor_score + 1e-8):
+                self.best_floor_score = score
+                self.best_floor_epoch = int(epoch)
+                self.best_floor_weights = self.model.get_weights()
+                self.best_floor_summary = dict(self.last_summary)
         except Exception as e:
             self.last_error = f"{type(e).__name__}: {e}"
 
     def on_train_end(self, logs=None):
-        if self.best_weights is not None:
+        if self.best_floor_weights is not None:
+            self.model.set_weights(self.best_floor_weights)
+            self.best_score = float(self.best_floor_score)
+            self.best_epoch = int(self.best_floor_epoch)
+            self.best_weights = self.best_floor_weights
+            self.best_summary = dict(self.best_floor_summary)
+            self.selection_mode = "no_regress_floor"
+        elif self.best_weights is not None:
             self.model.set_weights(self.best_weights)
+            self.selection_mode = "overall_best"
 
     def to_dict(self) -> Dict[str, Any]:
         payload = {
@@ -143,6 +176,11 @@ class _GateAlignedCheckpointCallback(tf.keras.callbacks.Callback):
             "best_score": float(self.best_score) if np.isfinite(self.best_score) else None,
             "best_summary": dict(self.best_summary),
             "last_summary": dict(self.last_summary),
+            "selection_mode": str(self.selection_mode),
+            "no_regress_macro_f1_floor": self.no_regress_macro_f1_floor,
+            "best_floor_epoch": int(self.best_floor_epoch) if self.best_floor_epoch >= 0 else None,
+            "best_floor_score": float(self.best_floor_score) if np.isfinite(self.best_floor_score) else None,
+            "best_floor_summary": dict(self.best_floor_summary),
         }
         if self.last_error:
             payload["error"] = self.last_error
@@ -394,6 +432,93 @@ class TrainingPipeline:
             "RELEASE_GATE_SAMPLED_DRIFT_BLOCK_ROOMS",
             ("bedroom", "entrance"),
         )
+
+    def _resolve_release_gate_collapse_block_enabled(self) -> bool:
+        return self._env_bool("RELEASE_GATE_BLOCK_ON_PREDICTED_CLASS_COLLAPSE", True)
+
+    def _resolve_release_gate_collapse_ratio(self) -> float:
+        return self._env_float(
+            "RELEASE_GATE_PREDICTED_CLASS_COLLAPSE_RATIO",
+            self._resolve_gate_aligned_collapse_ratio(),
+            min_value=0.50,
+            max_value=1.0,
+        )
+
+    def _resolve_release_gate_collapse_block_rooms(self) -> set[str]:
+        return self._env_room_set(
+            "RELEASE_GATE_PREDICTED_CLASS_COLLAPSE_BLOCK_ROOMS",
+            ("bedroom", "entrance", "kitchen", "livingroom"),
+        )
+
+    def _resolve_no_regress_macro_f1_floor(
+        self,
+        *,
+        room_name: str,
+        champion_meta: Optional[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        context: Dict[str, Any] = {
+            "enabled": False,
+            "target_macro_f1_floor": None,
+            "max_drop_from_champion": None,
+            "champion_macro_f1": None,
+            "exempt": False,
+        }
+        if not isinstance(champion_meta, Mapping):
+            return context
+
+        champion_metrics = champion_meta.get("metrics")
+        if not isinstance(champion_metrics, Mapping):
+            return context
+
+        champion_f1_raw = champion_metrics.get("macro_f1")
+        if champion_f1_raw is None:
+            return context
+
+        try:
+            champion_f1 = float(champion_f1_raw)
+        except (TypeError, ValueError):
+            return context
+
+        if not np.isfinite(champion_f1):
+            return context
+
+        try:
+            policy = get_release_gates_config()
+            no_regress_cfg = (policy.get("release_gates", {}) or {}).get("no_regress", {}) or {}
+            exempt_rooms = {
+                normalize_room_name(room)
+                for room in (no_regress_cfg.get("exempt_rooms", []) or [])
+            }
+            room_key = normalize_room_name(room_name)
+            if room_key in exempt_rooms:
+                context.update(
+                    {
+                        "enabled": False,
+                        "champion_macro_f1": champion_f1,
+                        "exempt": True,
+                    }
+                )
+                return context
+
+            gate_policy = self._active_policy().release_gate
+            max_drop = float(
+                no_regress_cfg.get(
+                    "max_drop_from_champion",
+                    gate_policy.max_drop_from_champion_default,
+                )
+            )
+            context.update(
+                {
+                    "enabled": True,
+                    "target_macro_f1_floor": float(champion_f1 - max_drop),
+                    "max_drop_from_champion": float(max_drop),
+                    "champion_macro_f1": float(champion_f1),
+                    "exempt": False,
+                }
+            )
+        except Exception as e:
+            context["error"] = f"{type(e).__name__}: {e}"
+        return context
 
     def _get_label_name(self, room_name: str, class_id: int) -> str | None:
         """Resolve encoded class ID to label name for a given room."""
@@ -1341,6 +1466,9 @@ class TrainingPipeline:
         }
         sampled_drift_block_enabled = self._resolve_sampled_prior_drift_block_enabled()
         sampled_drift_block_rooms = self._resolve_sampled_prior_drift_block_rooms()
+        collapse_block_enabled = self._resolve_release_gate_collapse_block_enabled()
+        collapse_block_ratio = self._resolve_release_gate_collapse_ratio()
+        collapse_block_rooms = self._resolve_release_gate_collapse_block_rooms()
         training_days_epsilon = 1e-3
         insufficient_validation_evidence = bool(candidate_metrics.get("insufficient_validation_evidence", False))
         validation_evaluable = (
@@ -1428,6 +1556,40 @@ class TrainingPipeline:
                     _add_blocking(sampled_reason_block)
                 else:
                     _add_watch(sampled_reason_block.replace("_failed:", "_watch:", 1))
+        if str(metric_source).strip().lower().startswith("holdout_validation"):
+            raw_pred_distribution = candidate_metrics.get("predicted_class_distribution") or {}
+            pred_distribution = {}
+            if isinstance(raw_pred_distribution, Mapping):
+                for key, value in raw_pred_distribution.items():
+                    label = str(key).strip().lower()
+                    if not label:
+                        continue
+                    try:
+                        count = int(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if count > 0:
+                        pred_distribution[label] = count
+            if pred_distribution:
+                total = int(sum(pred_distribution.values()))
+                if total > 0:
+                    dominant_label, dominant_count = max(
+                        pred_distribution.items(),
+                        key=lambda item: (int(item[1]), str(item[0])),
+                    )
+                    dominant_share = float(dominant_count) / float(total)
+                    candidate_metrics["dominant_predicted_class_label"] = str(dominant_label)
+                    candidate_metrics["dominant_predicted_class_share"] = float(dominant_share)
+                    if dominant_share >= float(collapse_block_ratio):
+                        collapse_reason = (
+                            f"predicted_class_collapse:{room_key}:{dominant_label}:{dominant_share:.3f}"
+                            f">={float(collapse_block_ratio):.3f}"
+                        )
+                        is_block_room = (not collapse_block_rooms) or (room_key in collapse_block_rooms)
+                        if collapse_block_enabled and is_block_room and validation_evaluable:
+                            _add_blocking(collapse_reason)
+                        else:
+                            _add_watch(collapse_reason)
         for key, threshold in effective_label_recall_by_room_label.items():
             key_txt = str(key).strip().lower()
             if not key_txt.startswith(f"{room_key}."):
@@ -5014,6 +5176,16 @@ class TrainingPipeline:
                 "triggered": False,
                 "selected": "first_pass",
             }
+            checkpoint_no_regress = self._resolve_no_regress_macro_f1_floor(
+                room_name=room_name,
+                champion_meta=champion_meta,
+            )
+            checkpoint_no_regress_floor = (
+                float(checkpoint_no_regress.get("target_macro_f1_floor"))
+                if bool(checkpoint_no_regress.get("enabled", False))
+                and checkpoint_no_regress.get("target_macro_f1_floor") is not None
+                else None
+            )
 
             timeline_target_debug: Dict[str, Any] = {"enabled": False, "reason": "not_timeline_model"}
             timeline_validation_debug: Dict[str, Any] = {}
@@ -5051,6 +5223,7 @@ class TrainingPipeline:
                     X_val=np.asarray(validation_data[0], dtype=np.float32),
                     y_val=np.asarray(validation_data[1], dtype=np.int32),
                     timeline_multitask_enabled=bool(timeline_multitask_enabled),
+                    no_regress_macro_f1_floor=checkpoint_no_regress_floor,
                 )
                 callbacks.append(checkpoint_selector)
 
@@ -5204,6 +5377,7 @@ class TrainingPipeline:
                                 X_val=np.asarray(validation_data[0], dtype=np.float32),
                                 y_val=np.asarray(validation_data[1], dtype=np.int32),
                                 timeline_multitask_enabled=False,
+                                no_regress_macro_f1_floor=checkpoint_no_regress_floor,
                             )
                             retry_callbacks.append(checkpoint_selector_retry)
 
@@ -5390,6 +5564,7 @@ class TrainingPipeline:
                     if checkpoint_selector is not None
                     else {"enabled": False}
                 ),
+                'checkpoint_no_regress': dict(checkpoint_no_regress),
                 'collapse_retry': dict(collapse_retry_debug),
                 'two_stage_core': {
                     'enabled': bool(two_stage_result.get('enabled', False)),

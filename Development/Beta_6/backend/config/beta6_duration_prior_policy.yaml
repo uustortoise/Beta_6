@@ -1,0 +1,44 @@
+version: v1
+
+duration_priors:
+  default:
+    min_minutes: 1.0
+    target_minutes: 12.0
+    max_minutes: 90.0
+    penalty_weight: 0.8
+  by_label:
+    sleep:
+      min_minutes: 20.0
+      target_minutes: 420.0
+      max_minutes: 720.0
+      penalty_weight: 1.2
+    nap:
+      min_minutes: 10.0
+      target_minutes: 45.0
+      max_minutes: 150.0
+      penalty_weight: 1.0
+    showering:
+      min_minutes: 3.0
+      target_minutes: 12.0
+      max_minutes: 45.0
+      penalty_weight: 1.1
+    out:
+      min_minutes: 5.0
+      target_minutes: 90.0
+      max_minutes: 600.0
+      penalty_weight: 0.7
+    unoccupied:
+      min_minutes: 2.0
+      target_minutes: 20.0
+      max_minutes: 240.0
+      penalty_weight: 0.6
+
+transition:
+  switch_penalty: 0.15
+  impossible_transition_penalty: 1000000.0
+  self_transition_bias: 0.05
+  step_minutes: 1.0
+  continuity_labels: ["sleep"]
+  continuity_min_minutes: 45.0
+  continuity_break_penalty: 0.35
+  continuity_escape_margin: 0.40

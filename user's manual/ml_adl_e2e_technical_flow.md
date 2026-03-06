@@ -1,219 +1,162 @@
-# Beta 5.5 ML + ADL E2E Technical Flow
+# Beta 6 ML + ADL E2E Technical Flow
 
 ## 1) Purpose
-This is the source-of-truth technical document for how Beta 5.5 processes data end-to-end:
-- raw sensor files -> preprocessing -> model training/inference -> ADL timeline,
-- manual corrections/labels -> retraining priority chain,
-- event-first evaluation path (smoke/matrix/go-no-go).
-
-Use this document for engineering follow-up and onboarding.
+This is the runtime source-of-truth for Beta 6:
+- raw file ingestion and routing,
+- resident-batched retraining and model promotion,
+- inference and ADL persistence,
+- segment/timeline generation,
+- correction and label authority behavior.
 
 ## 2) Runtime Topology
 
 ### Services
-- Operator entrypoint: `./start-ops.sh` (wrapper) -> `./ops_start.sh` -> `./start.sh`
 - Watcher: `backend/run_daily_analysis.py`
-- Core processing: `backend/process_data.py`
-- ML pipeline: `backend/ml/pipeline.py`
-- Web UI: `web-ui` on `http://localhost:3002`
-- Streamlit Studio: `backend/export_dashboard.py` on `http://localhost:8503`
+- File processor: `backend/process_data.py`
+- ML orchestrator: `backend/ml/pipeline.py` (`UnifiedPipeline`)
+- Training core: `backend/ml/training.py`
+- Prediction core: `backend/ml/legacy/prediction.py` (via `backend/ml/prediction.py` wrapper)
+- Registry/versioning: `backend/ml/legacy/registry.py` (via `backend/ml/registry.py` wrapper)
+- Streamlit Studio default: `backend/app/main.py` (legacy fallback `backend/export_dashboard.py`)
+- Web UI: `web-ui` (`http://localhost:3002`)
 
-### Data Stores
-- Primary DB (production mode): PostgreSQL (`elderlycare_timescaledb`, port 5432)
-- Key table for predictions/corrections: `adl_history`
-- Timeline table: `activity_segments`
-- Context/trajectory/anomaly tables: `household_segments`, `context_episodes`, `trajectory_events`, `routine_anomalies`
+### Data stores
+- Primary DB: PostgreSQL/Timescale (default runtime path)
+- Core row table: `adl_history`
+- Timeline segment table: `activity_segments`
+- Sidecar tables: `household_segments`, `context_episodes`, `trajectory_events`, `routine_anomalies`
 
-## 3) Input Contracts
+## 3) Watcher Loop and File Routing
+`run_daily_analysis.py` runs `job()` immediately, then every 30 seconds.
 
-### File types
-- Training files: `*_train_*.xlsx` / `.xls` / `.parquet`
-- Inference files: `*_input_*.xlsx` / `.xls` / `.parquet`
+### File discovery
+- Scans `data/raw` for `.xlsx`, `.xls`, `.parquet`.
+- Ignores transient/system files (`~$*`, dotfiles).
+- Excludes `_manual_` files from watcher path.
 
-### Resident identity
-- Derived from filename prefix: `HKxxxx_name_...`
-- Extractor: `get_elder_id_from_filename(...)` in `backend/process_data.py`
+### Routing
+- Training files (`*_train_*`): grouped by resident and executed as one batch per resident.
+- Non-train files: processed individually through `process_file(...)`.
 
-### Room sheets
-- Expected sheets: `Bedroom`, `LivingRoom`, `Kitchen`, `Bathroom`, `Entrance`
-- Validation tooling: `backend/scripts/validate_label_pack.py`
+## 4) Training Path (Watcher Batch Mode)
 
-## 4) Runtime E2E Path (Raw -> Timeline)
+### 4.1 Resolve retrain set
+For each resident batch, watcher resolves training files with `RETRAIN_INPUT_MODE`:
+1. `auto_aggregate` (default): incoming files + archived resident history, then deterministic dedupe.
+2. `incoming_only`: only the current batch.
+3. `manifest_only`: explicit file list from `RETRAIN_MANIFEST_PATH`.
 
-### Step A: Watcher detection
-1. `backend/run_daily_analysis.py` scans `data/raw`.
-2. Classifies training vs input file (`_train` marker).
-3. Archives and routes each file for processing.
+Additional safeguards:
+- Pilot evidence profile can enforce `incoming_only`.
+- Preflight checks can block runs for lineage/policy inconsistencies.
+- Fingerprint checks can skip retrain if `(data_fingerprint, policy_hash, code_version)` is unchanged.
 
-### Step B: Load + normalize
-1. Loader: `backend/utils/data_loader.py` (`load_sensor_data`).
-2. Timestamp parsing + optional resampling/cleaning (`clean_and_resample`).
-3. Canonical resampling to fixed 10s interval uses:
-   `elderlycare_v1_16/preprocessing/resampling.py`.
+### 4.2 Aggregated room training
+Watcher calls:
+- `UnifiedPipeline.train_from_files(aggregate_files, elder_id, defer_promotion=...)`
 
-### Step C: Model execution
-1. Entry: `process_file(...)` in `backend/process_data.py`.
-2. Pipeline object: `UnifiedPipeline` from `backend/ml/pipeline.py`.
-3. If `_train` file:
-   - `pipeline.train_and_predict(...)` (training + prediction path).
-4. Else input file:
-   - `pipeline.predict(...)` (inference only).
+Inside `train_from_files(...)`:
+1. Load all files through `load_sensor_data(..., resample=True)`.
+2. Merge per-room data and deduplicate by timestamp with deterministic source precedence.
+3. Denoise (when enabled).
+4. Evaluate pre-training gate stack (`GateIntegrationPipeline`):
+   - `CoverageContractGate`
+   - `PostGapRetentionGate`
+   - `ClassCoverageGate`
+5. If pre-training gates pass, call
+   - `TrainingPipeline.train_room_with_leakage_free_scaling(...)`
+6. Training computes calibration thresholds, release/lane-B checks, and post-training statistical gate info.
+7. Save artifacts via registry with versioning (`save_model_artifacts(...)`).
+8. `defer_promotion` controls whether new versions are promoted immediately or kept candidate-only.
 
-### Step D: Prediction persistence
-1. Each predicted row is written to `adl_history` via:
-   `ADLService.save_adl_event(...)` in `backend/elderlycare_v1_16/services/adl_service.py`.
-2. Persisted fields include:
-   - `activity_type`, `confidence`, `room`, `timestamp`, `record_date`,
-   - `sensor_features` JSON (including top1/top2 and low-confidence metadata).
+## 5) Run-Level Promotion and Rollback Gates
+After per-room training metrics are produced, watcher applies run-level controls:
+1. Decision-trace artifact gate.
+2. Optional walk-forward promotion gate.
+3. Backbone alignment gate.
+4. Beta6 authority gate + fallback sync.
+5. Global gate for run-level acceptance.
 
-### Step E: Timeline generation
-1. Segment regeneration:
-   - `generate_activity_segments(...)` in `backend/process_data.py`,
-   - backed by `regenerate_segments(...)` in `backend/utils/segment_utils.py`.
-2. Segment logic:
-   - activity normalization/validation by room,
-   - sleep continuity merge rules,
-   - long segment chunking safeguards.
+Outcomes:
+- Promote deferred candidates when gate chain passes.
+- Roll back or deactivate rooms when gate chain fails (policy dependent).
+- Persist run metadata to `training_history`.
 
-### Step F: Downstream intelligence
-Triggered after ADL persistence:
-- Sleep analysis (`SleepAnalyzer` + `SleepService`)
-- ICOPE scoring (`ICOPEService`)
-- Insight/alerts (`InsightService`)
-- Household analyzer (`ml/household_analyzer.py`)
-- Trajectory + pattern + context sidecars (if enabled)
+## 6) Training Timeline Materialization
+`train_from_files(...)` returns metrics, not prediction payload rows.
+Watcher then builds timeline rows from training labels via:
+- `_build_legacy_training_timeline_results(...)`
 
-## 5) Label Priority Chain (Critical)
-Label authority order in Beta 5.5:
-1. Golden Samples / manual corrections (`is_corrected = 1`)
-2. Training file labels (`activity` column in train sheets)
+Those rows are persisted to `adl_history`, then:
+- `activity_segments` regeneration runs by day/room,
+- hard-negative mining runs,
+- household analysis runs.
+
+## 7) Inference Path (Non-Train Files)
+For non-train files:
+1. Watcher calls `process_file(file)`.
+2. `process_file(...)` runs `UnifiedPipeline.predict(...)`.
+3. `predict(...)` loads resampled room data and active room models.
+4. `PredictionPipeline.run_prediction(...)` emits:
+   - `predicted_activity`
+   - confidence
+   - `predicted_top1_*` / `predicted_top2_*`
+   - low-confidence fields
+   - runtime unknown/abstain flags when enabled
+5. Golden samples are applied (`apply_golden_samples(...)`).
+6. Optional pre-persistence arbitration can fuse cross-room conflicts.
+7. Rows are saved to `adl_history`; segments regenerated; downstream analyzers execute.
+
+## 8) Label Authority Chain
+Authoritative priority:
+1. Manual corrections / golden samples (`is_corrected=1`)
+2. Training labels (`activity` in training sheets)
 3. Model predictions
 
-Enforcement details:
-- `save_adl_event(...)` prevents overwriting corrected rows.
-- Correction history supports soft-delete and rollback with segment regeneration.
+Corrected rows are protected in persistence flow from accidental overwrite.
 
-## 6) Core ML Training/Inference Mechanics
+## 9) Data Contracts
 
-### Training
-- Main code: `backend/ml/training.py`
-- Architecture path: Transformer backbone (`ml/transformer_backbone.py`) with policy controls.
-- Includes:
-  - deterministic seeding,
-  - class weighting/minority handling,
-  - calibration logic,
-  - gate integration (`ml/gate_integration.py`).
+### File naming
+- Training: contains `_train`
+- Inference: not `_train`
 
-### Inference
-- Main code: `backend/ml/prediction.py`
-- Includes:
-  - calibrated thresholds,
-  - low-confidence labeling (`low_confidence`),
-  - optional scoped runtime `unknown` conversion (from low-confidence windows) with room/night filters and unknown-rate caps (`RUNTIME_UNKNOWN_*`),
-  - optional inference hysteresis (`ENABLE_INFERENCE_HYSTERESIS`).
+### Sheets/rooms
+Expected room sheets commonly include:
+- `Bedroom`, `LivingRoom`, `Kitchen`, `Bathroom`, `Entrance`
 
-## 7) Event-First Evaluation Toolchain (Model QA Path)
-This is the controlled evaluation path used for smoke/matrix/go-no-go decisions.
+### Canonical timeline
+- Loader/resampler normalizes to fixed interval (default 10 seconds).
+- Missing/gap behavior follows policy-resolved forward-fill gap limits.
 
-### Tools
-- Label-pack validator:
-  - `backend/scripts/validate_label_pack.py`
-- Baseline-vs-candidate diff:
-  - `backend/scripts/diff_label_pack.py`
-- Single-day smoke:
-  - `backend/scripts/run_event_first_smoke.py`
-- Full matrix runner:
-  - `backend/scripts/run_event_first_matrix.py`
-- Backtest core:
-  - `backend/scripts/run_event_first_backtest.py`
+## 10) Event-First Evaluation (Separate from Runtime)
+Promotion QA scripts remain separate from watcher runtime generation:
+1. `backend/scripts/validate_label_pack.py`
+2. `backend/scripts/diff_label_pack.py`
+3. `backend/scripts/run_event_first_smoke.py`
+4. `backend/scripts/run_event_first_matrix.py`
+5. `backend/scripts/run_event_first_backtest.py`
 
-### Typical run order
-1. Validate incoming label pack.
-2. Diff against baseline pack (confirm actual label deltas).
-3. Run smoke on target day/seed.
-4. Run matrix profile.
-5. Aggregate + go/no-go using configured gates.
+Use this path for experiment/evaluation governance, not daily timeline ingestion.
 
-## 8) Ops Team: Adding New ADL Labels
-Yes, ops can add labels without core code changes, via registry/config workflow.
+## 11) Operational Commands
 
-### Required updates
-1. Update ADL registry:
-   - `backend/config/adl_event_registry.v1.yaml`
-2. Keep room validity mapping aligned when needed:
-   - `backend/utils/segment_utils.py` (`ROOM_ACTIVITY_VALIDATION`)
-3. Re-run label pack validator to catch unknown labels.
-
-### Safety check
-- Unknown labels are surfaced by `validate_label_pack.py` and should be resolved before matrix/signoff.
-
-## 9) Exact Command Blocks (Copy/Paste)
-
-### Platform start + health
+### Start stack
 ```bash
-cd /Users/dicksonng/DT/Development/Beta_5.5
+cd /Users/dicksonng/DT/Development/Beta_6
 ./ops_doctor.sh preflight
 ./start-ops.sh --no-scan --skip-pull --skip-install
 ./ops_doctor.sh running
 ```
 
-### Event-first intake/matrix
+### Stop stack
 ```bash
-cd /Users/dicksonng/DT/Development/Beta_5.5
-
-python3 backend/scripts/validate_label_pack.py \
-  --pack-dir "/Users/dicksonng/DT/Development/New training files" \
-  --elder-id HK0011_jessica \
-  --min-day 4 --max-day 10 \
-  --output /tmp/beta55_label_pack_validation.json
-
-python3 backend/scripts/diff_label_pack.py \
-  --baseline-dir "/Users/dicksonng/DT/Development/New training files/corrected_clones" \
-  --candidate-dir "/Users/dicksonng/DT/Development/New training files" \
-  --elder-id HK0011_jessica \
-  --min-day 4 --max-day 10 \
-  --json-output /tmp/beta55_label_pack_diff.json \
-  --csv-output /tmp/beta55_label_pack_diff.csv
-
-python3 backend/scripts/run_event_first_smoke.py \
-  --data-dir "/Users/dicksonng/DT/Development/New training files" \
-  --elder-id HK0011_jessica \
-  --day 7 --seed 11 \
-  --expectation-config backend/config/event_first_go_no_go.yaml \
-  --diff-report /tmp/beta55_label_pack_diff.json \
-  --output /tmp/beta55_smoke.json
-
-python3 backend/scripts/run_event_first_matrix.py \
-  --profiles-yaml backend/config/event_first_matrix_profiles.yaml \
-  --profile anchor_top2_frag_v3 \
-  --data-dir "/Users/dicksonng/DT/Development/New training files" \
-  --elder-id HK0011_jessica \
-  --output-dir /tmp/beta55_matrix \
-  --max-workers 3
+cd /Users/dicksonng/DT/Development/Beta_6
+./stop.sh
 ```
 
-### Golden sample harvest
-```bash
-cd /Users/dicksonng/DT/Development/Beta_5.5
-python3 backend/scripts/harvest_gold_samples.py --dry-run
-python3 backend/scripts/harvest_gold_samples.py \
-  --filter-safe-only \
-  --output /Users/dicksonng/DT/Development/Beta_5.5/data/golden_samples
-```
-
-## 10) Known Constraints and Practical Notes
-1. `POSTGRES_ONLY=true` environments require DB availability; several UI/API flows will fail if PostgreSQL is down.
-2. LivingRoom passive occupancy remains the hardest reliability zone; release policy handles this via configured go/no-go logic.
-3. Keep evaluation and runtime paths distinct:
-   - runtime watcher drives product timeline,
-   - event-first matrix drives model promotion decisions.
-
-## 11) Related Docs
-- Ops SOP:
-  - `docs/planning/golden_sample_ops_sop_2026-02-25.md`
-- Labeling guide:
-  - `user's manual/labeling_guide.md`
-- Golden sample guide:
-  - `user's manual/golden_sample_harvesting.md`
-- Non-ML handbook:
-  - `user's manual/ml_module_handbook_non_ml.md`
+## 12) Related docs
+- `user's manual/data_flow_logic.md`
+- `user's manual/operation_manual.md`
+- `user's manual/labeling_guide.md`
+- `user's manual/golden_sample_harvesting.md`

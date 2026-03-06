@@ -1,0 +1,111 @@
+{
+  "generated_at_utc": "2026-03-05T23:28:04.528569Z",
+  "variant": "A1 (timeline multitask + floor 0.0)",
+  "resident_coverage": {
+    "required_min_residents": 2,
+    "available_residents": [
+      "HK001_jessica"
+    ],
+    "status": "insufficient"
+  },
+  "windows": {
+    "day7_10": {
+      "seeds": {
+        "11": {
+          "path": "/tmp/beta6_s1_a1_seed11_d7_10.json",
+          "livingroom_mae": 90.84154108247759,
+          "bedroom_sleep_mae": 90.93798557907586,
+          "hard_gate_passed": 4,
+          "hard_gate_total": 5,
+          "hard_gate_pass_rate": 0.8,
+          "lr_improvement_vs_full_bundle_pct": 0.6260895612987133,
+          "lr_regression_vs_anchor_pct": 0.027735502686702
+        },
+        "22": {
+          "path": "/tmp/beta6_s1_a1_seed22.json",
+          "livingroom_mae": 88.39315807891133,
+          "bedroom_sleep_mae": 44.717467701979196,
+          "hard_gate_passed": 4,
+          "hard_gate_total": 5,
+          "hard_gate_pass_rate": 0.8,
+          "lr_improvement_vs_full_bundle_pct": 0.6361672851248762,
+          "lr_regression_vs_anchor_pct": 3.5728916295127915e-05
+        },
+        "33": {
+          "path": "/tmp/beta6_s1_a1_seed33_d7_10.json",
+          "livingroom_mae": 84.14857312109656,
+          "bedroom_sleep_mae": 40.33654469522579,
+          "hard_gate_passed": 4,
+          "hard_gate_total": 5,
+          "hard_gate_pass_rate": 0.8,
+          "lr_improvement_vs_full_bundle_pct": 0.6536383077954454,
+          "lr_regression_vs_anchor_pct": -0.04798537027835094
+        }
+      },
+      "median_livingroom_mae": 88.39315807891133,
+      "median_livingroom_improvement_vs_full_bundle_pct": 0.6361672851248762,
+      "median_bedroom_sleep_mae": 44.717467701979196,
+      "hard_gate_pass_rate_mean": 0.8000000000000002
+    },
+    "full_window": {
+      "seeds": {
+        "11": {
+          "path": "/tmp/beta6_s1_a1_seed11_d4_10.json",
+          "livingroom_mae": 96.54306378324924,
+          "bedroom_sleep_mae": 37.87929131953908,
+          "hard_gate_passed": 16,
+          "hard_gate_total": 20,
+          "hard_gate_pass_rate": 0.8,
+          "lr_improvement_vs_full_bundle_pct": 0.6026216761339813,
+          "lr_regression_vs_anchor_pct": 0.09223966266827964
+        },
+        "22": {
+          "path": "/tmp/beta6_s1_a1_seed22_d4_10.json",
+          "livingroom_mae": 116.34584077106071,
+          "bedroom_sleep_mae": 56.741840211087,
+          "hard_gate_passed": 16,
+          "hard_gate_total": 20,
+          "hard_gate_pass_rate": 0.8,
+          "lr_improvement_vs_full_bundle_pct": 0.5211119951798283,
+          "lr_regression_vs_anchor_pct": 0.3162783207496403
+        },
+        "33": {
+          "path": "/tmp/beta6_s1_a1_seed33_d4_10.json",
+          "livingroom_mae": 106.674728960563,
+          "bedroom_sleep_mae": 45.41556145626512,
+          "hard_gate_passed": 16,
+          "hard_gate_total": 20,
+          "hard_gate_pass_rate": 0.8,
+          "lr_improvement_vs_full_bundle_pct": 0.5609189999565218,
+          "lr_regression_vs_anchor_pct": 0.20686422627630954
+        }
+      },
+      "median_livingroom_mae": 106.674728960563,
+      "median_livingroom_improvement_vs_full_bundle_pct": 0.5609189999565218,
+      "median_bedroom_sleep_mae": 45.41556145626512,
+      "hard_gate_pass_rate_mean": 0.8000000000000002
+    }
+  },
+  "matrix_gate_evaluation": {
+    "median_lr_improvement_ge_20pct_each_window": {
+      "status": "pass"
+    },
+    "no_catastrophic_regression_gt_60pct_vs_anchor": {
+      "status": "pass",
+      "violations": []
+    },
+    "gate_pass_rate_trend_non_decreasing": {
+      "status": "pass",
+      "day7_10_pass_rate_mean": 0.8000000000000002,
+      "full_window_pass_rate_mean": 0.8000000000000002
+    },
+    "resident_coverage": {
+      "required_min_residents": 2,
+      "available_residents": [
+        "HK001_jessica"
+      ],
+      "status": "insufficient"
+    }
+  },
+  "decision": "NO_GO_INCOMPLETE_COHORT"
+}

@@ -1224,6 +1224,10 @@ def test_train_files_rolls_back_promoted_rooms_when_wf_report_has_no_failed_room
     monkeypatch.setattr("run_daily_analysis.ModelRegistry", lambda *_args, **_kwargs: MagicMock())
     monkeypatch.setattr("run_daily_analysis._snapshot_current_versions", lambda *_args, **_kwargs: {"Bedroom": 1})
     monkeypatch.setattr(
+        "run_daily_analysis._validate_beta6_runtime_activation_preflight",
+        lambda **kwargs: (True, {"pass": True, "reason": "ok"}),
+    )
+    monkeypatch.setattr(
         "run_daily_analysis._is_env_enabled",
         lambda name, default=False: False if name == "ENABLE_PRE_PROMOTION_GATING" else True,
     )
@@ -1373,6 +1377,10 @@ def test_train_files_promotes_deferred_candidates_after_wf_pass(monkeypatch, tmp
     monkeypatch.setattr("run_daily_analysis.UnifiedPipeline", _PipelineStub)
     monkeypatch.setattr("run_daily_analysis.ModelRegistry", lambda *_args, **_kwargs: registry)
     monkeypatch.setattr("run_daily_analysis._snapshot_current_versions", lambda *_args, **_kwargs: {"Bedroom": 1})
+    monkeypatch.setattr(
+        "run_daily_analysis._validate_beta6_runtime_activation_preflight",
+        lambda **kwargs: (True, {"pass": True, "reason": "ok"}),
+    )
     monkeypatch.setattr("run_daily_analysis._is_env_enabled", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         "run_daily_analysis._evaluate_walk_forward_promotion_gate",
@@ -1449,6 +1457,10 @@ def test_train_files_marks_rejected_when_deferred_promotion_apply_fails(monkeypa
     monkeypatch.setattr("run_daily_analysis.UnifiedPipeline", _PipelineStub)
     monkeypatch.setattr("run_daily_analysis.ModelRegistry", lambda *_args, **_kwargs: registry)
     monkeypatch.setattr("run_daily_analysis._snapshot_current_versions", lambda *_args, **_kwargs: {"Bedroom": 1})
+    monkeypatch.setattr(
+        "run_daily_analysis._validate_beta6_runtime_activation_preflight",
+        lambda **kwargs: (True, {"pass": True, "reason": "ok"}),
+    )
     monkeypatch.setattr("run_daily_analysis._is_env_enabled", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         "run_daily_analysis._evaluate_walk_forward_promotion_gate",

@@ -1,0 +1,89 @@
+{
+  "generated_at_utc": "2026-03-06T11:33:56+00:00",
+  "step": "Step2_S2-02",
+  "artifact_version": "beta6_step2_gate_semantics.v1",
+  "thresholds_check": {
+    "evidence_profile": "pilot_stage_b",
+    "min_validation_class_support": 8,
+    "min_recall_support": 8,
+    "expected_min_validation_class_support": 8,
+    "expected_min_recall_support": 8,
+    "pass": true
+  },
+  "low_support_semantics": {
+    "gate_name": "recall_sleep_duration",
+    "status": "not_evaluated",
+    "expected_status": "not_evaluated",
+    "pass": true,
+    "details": {
+      "is_critical": false,
+      "tier": 1,
+      "event_name": "sleep_duration",
+      "support": 9,
+      "insufficient_support": true,
+      "min_support": 10,
+      "recall_confidence_interval_low": 0.6355703582571297,
+      "recall_confidence_interval_high": 0.9951921635470069,
+      "recall_confidence_interval_width": 0.3596218052898772
+    },
+    "confidence_interval_keys_present": true
+  },
+  "short_window_semantics": {
+    "configured_min_support_for_tier_gates": 10,
+    "expected_min_support_for_tier_gates": 10,
+    "lane_b_gate_pass": true,
+    "lane_b_reasons": [],
+    "recall_sleep_duration_status": "pass",
+    "pass": true
+  },
+  "bootstrap_watch_semantics": {
+    "lane_b_gate_pass": true,
+    "lane_b_reasons": [],
+    "enforcement": "watch_only_bootstrap",
+    "soft_failed_critical_failures": [
+      "recall_sleep_duration"
+    ],
+    "expected_enforcement": "watch_only_bootstrap",
+    "pass": true
+  },
+  "collapse_semantics": {
+    "lane_b_gate_pass": false,
+    "lane_b_reasons": [
+      "lane_b_gate_failed:bedroom:collapse_sleep_duration"
+    ],
+    "enforcement": "hard_bootstrap_collapse_guard",
+    "expected_enforcement": "hard_bootstrap_collapse_guard",
+    "pass": true
+  },
+  "tests": [
+    {
+      "command": "pytest -q tests/test_training.py -k lane_b_event_gates or bootstrap",
+      "returncode": 0,
+      "passed": true,
+      "stdout_tail": ".........                                                                [100%]\n9 passed, 62 deselected in 0.22s",
+      "stderr_tail": ""
+    },
+    {
+      "command": "pytest -q tests/test_run_daily_analysis_thresholds.py",
+      "returncode": 0,
+      "passed": true,
+      "stdout_tail": "............................................                             [100%]\n44 passed in 0.33s",
+      "stderr_tail": ""
+    }
+  ],
+  "pass_requirements": {
+    "thresholds_profile_target": true,
+    "confidence_interval_fields_present": true,
+    "low_support_not_evaluated": true,
+    "short_window_min_support_10_applied": true,
+    "non_collapse_is_watch_only": true,
+    "collapse_is_hard_block": true,
+    "required_tests_passed": true
+  },
+  "decision": {
+    "status": "PASS",
+    "reason_codes": [
+      "STEP2_GATE_SEMANTICS_PASS"
+    ]
+  }
+}

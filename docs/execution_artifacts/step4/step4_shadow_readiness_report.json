@@ -1,0 +1,50 @@
+{
+  "generated_at_utc": "2026-03-06T12:33:16.650380Z",
+  "step": "Step4_S4-01_readiness",
+  "required_runtime_flags": {
+    "ENABLE_BETA6_HMM_RUNTIME": "true",
+    "ENABLE_BETA6_CRF_RUNTIME": "false",
+    "BETA6_RUNTIME_ALLOW_CRF_CANARY": "true"
+  },
+  "runtime_flag_check": {
+    "ENABLE_BETA6_HMM_RUNTIME": {
+      "expected": "true",
+      "actual": "true",
+      "pass": true
+    },
+    "ENABLE_BETA6_CRF_RUNTIME": {
+      "expected": "false",
+      "actual": "false",
+      "pass": true
+    },
+    "BETA6_RUNTIME_ALLOW_CRF_CANARY": {
+      "expected": "true",
+      "actual": "true",
+      "pass": true
+    }
+  },
+  "runtime_preflight_report_path": "/tmp/beta6_step4_preflight_report.json",
+  "runtime_preflight_reason": "ok",
+  "soak_test_command": "pytest -q tests/test_run_daily_analysis_thresholds.py -k \"beta6_authority or runtime\"",
+  "soak_test_results_path": "/tmp/beta6_step4_soak_tests.txt",
+  "resident_coverage": {
+    "available_residents": [
+      "HK001_jessica"
+    ],
+    "available_resident_count": 1,
+    "required_min_residents_for_matrix": 2,
+    "status": "insufficient"
+  },
+  "pass_requirements": {
+    "runtime_flags_configured": true,
+    "runtime_preflight_ok": true,
+    "soak_test_subset_passed": true,
+    "resident_coverage_min2": false
+  },
+  "decision": {
+    "status": "BLOCKED",
+    "reason_codes": [
+      "STEP4_BLOCKED_RESIDENT_COVERAGE"
+    ]
+  }
+}

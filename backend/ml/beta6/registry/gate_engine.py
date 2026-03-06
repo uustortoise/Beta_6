@@ -15,6 +15,9 @@ from ..gates.timeline_hard_gates import TimelineHardGateResult, evaluate_timelin
 class GateEngine:
     """Deterministic mapping from reports to room/run decisions."""
 
+    _EPISODE_COUNT_RATIO_WATCH_MIN = 0.50
+    _EPISODE_COUNT_RATIO_WATCH_MAX = 2.00
+
     _RUN_FAILURE_PRECEDENCE: List[ReasonCode] = [
         ReasonCode.FAIL_DATA_VIABILITY,
         ReasonCode.FAIL_LEAKAGE_RESIDENT,
@@ -33,6 +36,33 @@ class GateEngine:
         ReasonCode.FAIL_GATE_POLICY,
         ReasonCode.FAIL_UNKNOWN_REASON,
     ]
+
+    @staticmethod
+    def _episode_count_ratio_watch_payload(report: Mapping[str, Any]) -> Dict[str, Any] | None:
+        timeline_metrics = report.get("timeline_metrics")
+        if not isinstance(timeline_metrics, Mapping):
+            return None
+        raw_ratio = timeline_metrics.get("episode_count_ratio")
+        try:
+            if raw_ratio is None:
+                return None
+            ratio = float(raw_ratio)
+        except (TypeError, ValueError):
+            return None
+        if ratio != ratio or ratio in {float("inf"), float("-inf")}:
+            return None
+        status = (
+            "watch"
+            if (ratio < GateEngine._EPISODE_COUNT_RATIO_WATCH_MIN or ratio > GateEngine._EPISODE_COUNT_RATIO_WATCH_MAX)
+            else "ok"
+        )
+        return {
+            "episode_count_ratio": float(ratio),
+            "status": status,
+            "watch_threshold_min": float(GateEngine._EPISODE_COUNT_RATIO_WATCH_MIN),
+            "watch_threshold_max": float(GateEngine._EPISODE_COUNT_RATIO_WATCH_MAX),
+            "blocking": False,
+        }
 
     def _fallback_reason(
         self,
@@ -91,6 +121,9 @@ class GateEngine:
         details.setdefault("timeline_hard_gate_passed", timeline_gate.passed)
         if timeline_gate.details:
             details.setdefault("timeline_hard_gate", timeline_gate.details)
+        episode_count_ratio_watch = self._episode_count_ratio_watch_payload(report)
+        if episode_count_ratio_watch is not None:
+            details.setdefault("episode_count_ratio_watch", episode_count_ratio_watch)
         if timeline_forced_block:
             details.setdefault("pass_overridden_by_timeline_hard_gate", True)
         uncertainty = resolve_uncertainty(report)

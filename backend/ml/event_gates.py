@@ -52,6 +52,7 @@ class EventGateThresholds:
     collapse_recall_threshold: float = 0.02
     collapse_support_threshold: int = 30
     min_support_for_tier_gates: int = 30
+    recall_confidence_interval_z: float = 1.96
     
     def validate(self) -> None:
         """Validate threshold configuration."""
@@ -69,6 +70,8 @@ class EventGateThresholds:
             raise ValueError("collapse_support_threshold must be >= 1")
         if self.min_support_for_tier_gates < 1:
             raise ValueError("min_support_for_tier_gates must be >= 1")
+        if not np.isfinite(float(self.recall_confidence_interval_z)) or float(self.recall_confidence_interval_z) <= 0.0:
+            raise ValueError("recall_confidence_interval_z must be > 0")
 
 
 @dataclass
@@ -179,6 +182,29 @@ class EventGateChecker:
     def __init__(self, thresholds: Optional[EventGateThresholds] = None):
         self.thresholds = thresholds or EventGateThresholds()
         self.thresholds.validate()
+
+    def _compute_recall_confidence_interval(
+        self,
+        *,
+        recall: float,
+        support: int,
+    ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        """
+        Compute Wilson confidence interval for recall with binary support trials.
+        """
+        n = int(max(0, int(support)))
+        if n <= 0:
+            return None, None, None
+
+        p = float(min(max(float(recall), 0.0), 1.0))
+        z = float(self.thresholds.recall_confidence_interval_z)
+        n_float = float(n)
+        denom = 1.0 + (z * z) / n_float
+        center = (p + (z * z) / (2.0 * n_float)) / denom
+        margin = (z / denom) * np.sqrt((p * (1.0 - p) / n_float) + ((z * z) / (4.0 * n_float * n_float)))
+        low = float(max(0.0, center - margin))
+        high = float(min(1.0, center + margin))
+        return low, high, float(high - low)
     
     def check_all_gates(
         self,
@@ -295,6 +321,7 @@ class EventGateChecker:
             if tier is None:
                 continue
             support = int(event_supports.get(event_name, 0) or 0)
+            recall_value = float(recall)
             
             # Get threshold for this tier
             if tier == CriticalityTier.TIER_1:
@@ -304,11 +331,16 @@ class EventGateChecker:
             else:
                 threshold = self.thresholds.tier_3_recall_min
 
+            ci_low, ci_high, ci_width = self._compute_recall_confidence_interval(
+                recall=recall_value,
+                support=support,
+            )
+
             if support < self.thresholds.min_support_for_tier_gates:
                 results.append(GateResult(
                     gate_name=f"recall_{event_name}",
                     status=GateStatus.NOT_EVALUATED,
-                    metric_value=recall,
+                    metric_value=recall_value,
                     threshold_value=threshold,
                     message=(
                         f"{event_name} support={support} below minimum "
@@ -321,23 +353,29 @@ class EventGateChecker:
                         "support": support,
                         "insufficient_support": True,
                         "min_support": self.thresholds.min_support_for_tier_gates,
+                        "recall_confidence_interval_low": ci_low,
+                        "recall_confidence_interval_high": ci_high,
+                        "recall_confidence_interval_width": ci_width,
                     },
                 ))
                 continue
 
-            status = GateStatus.PASS if recall >= threshold else GateStatus.FAIL
+            status = GateStatus.PASS if recall_value >= threshold else GateStatus.FAIL
             
             results.append(GateResult(
                 gate_name=f"recall_{event_name}",
                 status=status,
-                metric_value=recall,
+                metric_value=recall_value,
                 threshold_value=threshold,
-                message=f"{event_name} recall: {recall:.4f} (Tier-{tier.value}, threshold: {threshold})",
+                message=f"{event_name} recall: {recall_value:.4f} (Tier-{tier.value}, threshold: {threshold})",
                 details={
                     "is_critical": tier == CriticalityTier.TIER_1,
                     "tier": tier.value,
                     "event_name": event_name,
                     "support": support,
+                    "recall_confidence_interval_low": ci_low,
+                    "recall_confidence_interval_high": ci_high,
+                    "recall_confidence_interval_width": ci_width,
                 },
             ))
         
@@ -429,6 +467,10 @@ class EventGateChecker:
             threshold = self.thresholds.tier_2_recall_min
         else:
             threshold = self.thresholds.tier_3_recall_min
+        ci_low, ci_high, ci_width = self._compute_recall_confidence_interval(
+            recall=float(recall),
+            support=int(support),
+        )
         
         # Check for collapse
         is_collapsed = (
@@ -461,6 +503,9 @@ class EventGateChecker:
                     "tier": tier.value,
                     "support": support,
                     "insufficient_support": True,
+                    "recall_confidence_interval_low": ci_low,
+                    "recall_confidence_interval_high": ci_high,
+                    "recall_confidence_interval_width": ci_width,
                 },
             )
 
@@ -473,7 +518,14 @@ class EventGateChecker:
             metric_value=recall,
             threshold_value=threshold,
             message=f"{event_name} recall: {recall:.4f} (Tier-{tier.value})",
-            details={"is_critical": tier == CriticalityTier.TIER_1, "tier": tier.value},
+            details={
+                "is_critical": tier == CriticalityTier.TIER_1,
+                "tier": tier.value,
+                "support": int(support),
+                "recall_confidence_interval_low": ci_low,
+                "recall_confidence_interval_high": ci_high,
+                "recall_confidence_interval_width": ci_width,
+            },
         )
 
 

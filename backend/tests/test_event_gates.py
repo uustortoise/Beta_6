@@ -230,6 +230,10 @@ class TestEventGateChecker(unittest.TestCase):
         result = [r for r in report.results if "sleep_duration" in r.gate_name][0]
         self.assertEqual(result.status, GateStatus.PASS)
         self.assertEqual(result.details.get("tier"), 1)
+        self.assertIn("recall_confidence_interval_low", result.details)
+        self.assertIn("recall_confidence_interval_high", result.details)
+        self.assertIn("recall_confidence_interval_width", result.details)
+        self.assertGreaterEqual(result.details.get("recall_confidence_interval_width"), 0.0)
     
     def test_check_tier_1_recall_fail(self):
         """Test Tier-1 recall gate failing."""
@@ -257,6 +261,9 @@ class TestEventGateChecker(unittest.TestCase):
         result = [r for r in report.results if "sleep_duration" in r.gate_name][0]
         self.assertEqual(result.status, GateStatus.NOT_EVALUATED)
         self.assertTrue(result.details.get("insufficient_support"))
+        self.assertIn("recall_confidence_interval_low", result.details)
+        self.assertIn("recall_confidence_interval_high", result.details)
+        self.assertIn("recall_confidence_interval_width", result.details)
         self.assertTrue(report.is_promotable)
     
     def test_check_tier_2_recall(self):
@@ -372,6 +379,9 @@ class TestEventGateChecker(unittest.TestCase):
         # Tier-1 event pass
         result = checker.check_single_event("sleep_duration", 0.55, 50)
         self.assertEqual(result.status, GateStatus.PASS)
+        self.assertIn("recall_confidence_interval_low", result.details)
+        self.assertIn("recall_confidence_interval_high", result.details)
+        self.assertIn("recall_confidence_interval_width", result.details)
         
         # Tier-1 event fail
         result = checker.check_single_event("sleep_duration", 0.45, 50)

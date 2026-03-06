@@ -1,0 +1,81 @@
+{
+  "generated_at_utc": "2026-03-06T11:34:09+00:00",
+  "step": "Step3_S3-02",
+  "artifact_version": "beta6_step3_rollback_drill.v1",
+  "rollback_target_path": "pre-Beta6 flat-softmax runtime path",
+  "required_rollback_flags": {
+    "ENABLE_TIMELINE_MULTITASK": "false",
+    "ENABLE_BETA6_HMM_RUNTIME": "false",
+    "ENABLE_BETA6_CRF_RUNTIME": "false"
+  },
+  "rollback_flag_observation": {
+    "before": {
+      "ENABLE_TIMELINE_MULTITASK": null,
+      "ENABLE_BETA6_HMM_RUNTIME": null,
+      "ENABLE_BETA6_CRF_RUNTIME": null,
+      "BETA6_PHASE4_RUNTIME_ENABLED": null,
+      "ENABLE_BETA6_UNKNOWN_ABSTAIN_RUNTIME": null
+    },
+    "after": {
+      "ENABLE_TIMELINE_MULTITASK": "false",
+      "ENABLE_BETA6_HMM_RUNTIME": "false",
+      "ENABLE_BETA6_CRF_RUNTIME": "false",
+      "BETA6_PHASE4_RUNTIME_ENABLED": "false",
+      "ENABLE_BETA6_UNKNOWN_ABSTAIN_RUNTIME": "false"
+    },
+    "pass": true
+  },
+  "runtime_preflight_check": {
+    "ok": true,
+    "report": {
+      "elder_id": "HK001_jessica",
+      "runtime_flags": {
+        "BETA6_PHASE4_RUNTIME_ENABLED": false,
+        "ENABLE_BETA6_HMM_RUNTIME": false,
+        "ENABLE_BETA6_UNKNOWN_ABSTAIN_RUNTIME": false,
+        "ENABLE_BETA6_CRF_RUNTIME": false
+      },
+      "runtime_mode": null,
+      "reason": "runtime_flags_disabled"
+    },
+    "expected_reason": "runtime_flags_disabled",
+    "pass": true
+  },
+  "quality_check": {
+    "source": "step1_ab_summary:A0_vs_baseline_anchor",
+    "baseline_anchor_livingroom_mae_minutes": 88.39,
+    "post_rollback_livingroom_mae_minutes": 88.39315807891133,
+    "allowed_max_livingroom_mae_minutes": 90.39,
+    "cap_delta_minutes": 2.0,
+    "pass": true
+  },
+  "tests": [
+    {
+      "command": "pytest -q tests/test_beta6_runtime_preflight.py",
+      "returncode": 0,
+      "passed": true,
+      "stdout_tail": ".........                                                                [100%]\n9 passed in 0.07s",
+      "stderr_tail": ""
+    },
+    {
+      "command": "pytest -q tests/test_prediction_beta6_runtime_hook_parity.py",
+      "returncode": 0,
+      "passed": true,
+      "stdout_tail": "...                                                                      [100%]\n3 passed in 0.07s",
+      "stderr_tail": ""
+    }
+  ],
+  "pass_requirements": {
+    "step1_summary_available": true,
+    "rollback_configuration_explicit": true,
+    "rollback_runtime_preflight_path_validated": true,
+    "fallback_quality_check": true,
+    "required_tests_passed": true
+  },
+  "decision": {
+    "status": "PASS",
+    "reason_codes": [
+      "STEP3_ROLLBACK_DRILL_PASS"
+    ]
+  }
+}

@@ -29,10 +29,29 @@ Stop:
 
 ## Current technical scope
 
-1. Runtime watcher pipeline (`backend/run_daily_analysis.py`) for ingestion, training, inference, and timeline generation.
+1. Runtime watcher pipeline (`backend/run_daily_analysis.py`) for ingestion, aggregated retraining, gated promotion, inference, and timeline regeneration.
 2. Streamlit workflow (`backend/app/main.py`) for export, labeling, corrections, and model controls (legacy fallback: `backend/export_dashboard.py`).
 3. Web API/UI (`web-ui`) for resident dashboards and operations.
 4. Event-first evaluation toolchain (`backend/scripts/run_event_first_*.py`) for smoke/matrix/go-no-go.
+
+## Runtime flow (actual code path)
+
+1. Watcher scans `data/raw` every 30 seconds.
+2. Files are split into:
+   - Training batch per resident (`*_train_*`): one aggregated retrain run per resident.
+   - Inference files (non-train): per-file prediction path.
+3. Training batch path:
+   - Training set is resolved by `RETRAIN_INPUT_MODE` (`auto_aggregate` default, or `incoming_only`, `manifest_only`).
+   - `UnifiedPipeline.train_from_files(...)` trains per-room candidates with pre-training gates + post-training checks.
+   - Models are saved versioned via registry; promotion may be deferred until run-level gates pass.
+   - Run-level checks in watcher include decision-trace gate, optional walk-forward gate, backbone alignment gate, Beta6 authority gate, and global gate.
+4. Inference file path:
+   - `process_file(...)` -> `UnifiedPipeline.predict(...)` -> per-room model inference.
+   - Prediction outputs include `predicted_activity`, confidence, top1/top2 metadata, low-confidence flags, and optional runtime unknown/abstain signals.
+5. Persistence + downstream:
+   - Rows are written to `adl_history`.
+   - Segments are regenerated into `activity_segments`.
+   - Downstream services run sleep, ICOPE, insight, household, and optional trajectory/pattern/context analysis.
 
 ## Documentation map
 
@@ -59,4 +78,4 @@ ML/labelling docs:
 1. PostgreSQL is required in current default runtime (`POSTGRES_ONLY=true` path).
 2. `adl_history` is the core source table for predictions/corrections.
 3. `activity_segments` is the final room timeline table consumed by UI flows.
-4. Scoped runtime `unknown` emission is available behind flags (`RUNTIME_UNKNOWN_*`) and is default-off.
+4. Scoped runtime `unknown` emission is controlled by `RUNTIME_UNKNOWN_*`; runtime is fail-closed enabled by default and scoped to configured rooms (default policy includes `livingroom`).

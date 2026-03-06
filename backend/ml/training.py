@@ -1364,19 +1364,42 @@ class TrainingPipeline:
             return True, [], {"status": "not_evaluated", "reason": "no_event_mapping_for_room"}
 
         try:
-            from ml.event_gates import EventGateChecker
+            from ml.event_gates import EventGateChecker, EventGateThresholds
         except Exception as exc:
             logger.warning(f"Lane B gate modules unavailable; skipping event gates: {exc}")
             return True, [], {"status": "not_evaluated", "reason": f"lane_b_gate_module_unavailable:{exc}"}
+
+        evidence_profile = str(self._active_policy().release_gate.evidence_profile).strip().lower()
+        try:
+            training_days = float(candidate_metrics.get("training_days", 0.0) or 0.0)
+        except Exception:
+            training_days = 0.0
+        short_window_max_days = max(1.0, self._read_float_env("RELEASE_GATE_BOOTSTRAP_MAX_TRAINING_DAYS", 14.0))
+        is_short_window_pilot = (
+            evidence_profile in {"pilot_stage_a", "pilot_stage_b"}
+            and training_days <= (short_window_max_days + 1e-3)
+        )
+        default_min_support = 10 if is_short_window_pilot else 30
+        min_support_raw = os.getenv("LANE_B_EVENT_GATE_MIN_SUPPORT")
+        try:
+            configured_min_support = int(min_support_raw) if min_support_raw is not None else int(default_min_support)
+        except (TypeError, ValueError):
+            configured_min_support = int(default_min_support)
+        configured_min_support = max(1, int(configured_min_support))
+        checker = EventGateChecker(
+            EventGateThresholds(min_support_for_tier_gates=configured_min_support)
+        )
 
         eval_date = (
             pd.to_datetime(target_date).date()
             if target_date is not None
             else datetime.now(timezone.utc).date()
         )
-        report = EventGateChecker().check_all_gates(gate_metrics, eval_date)
+        report = checker.check_all_gates(gate_metrics, eval_date)
         report_dict = report.to_dict()
         report_dict["derived_gate_metrics"] = gate_metrics
+        report_dict["configured_min_support_for_tier_gates"] = int(configured_min_support)
+        report_dict["release_gate_evidence_profile"] = evidence_profile
 
         if report.is_promotable:
             report_dict["enforcement"] = "hard"
@@ -2945,6 +2968,172 @@ class TrainingPipeline:
             if str(token).strip()
         }
 
+    @staticmethod
+    def _timeline_activity_unoccupied_weight_floor() -> float:
+        """Optional floor for masked unoccupied/unknown activity-loss windows."""
+        raw = os.getenv("TIMELINE_ACTIVITY_UNOCCUPIED_WEIGHT_FLOOR")
+        if raw is None:
+            return 0.0
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return 0.0
+        if not np.isfinite(value):
+            return 0.0
+        return float(np.clip(value, 0.0, 1.0))
+
+    @staticmethod
+    def _timeline_activity_reweight_mode() -> str:
+        """
+        Class-weight mode for timeline activity head.
+
+        - occupied_only (default): recompute balanced class weights on occupied subset
+          when support is sufficient.
+        - global: keep full-label global class weights.
+        """
+        raw = str(os.getenv("TIMELINE_ACTIVITY_REWEIGHT_MODE", "occupied_only")).strip().lower()
+        return "global" if raw == "global" else "occupied_only"
+
+    def _timeline_activity_masked_class_ids(self, room_name: str) -> set[int]:
+        """Class IDs masked for activity-loss weighting (unoccupied + unknown)."""
+        label_encoder = self.platform.label_encoders.get(room_name)
+        classes = getattr(label_encoder, "classes_", None) if label_encoder is not None else None
+        if classes is None:
+            return set()
+        masked_labels = {"unoccupied", "unknown"}
+        return {
+            int(class_id)
+            for class_id, label in enumerate(classes)
+            if str(label).strip().lower() in masked_labels
+        }
+
+    def _build_timeline_activity_loss_weights(
+        self,
+        *,
+        room_name: str,
+        y_train: np.ndarray,
+        global_class_weight_dict: Dict[int, float],
+        timeline_native_weights: np.ndarray,
+        use_timeline_native_weighting: bool,
+        clinical_policy: Any,
+    ) -> Tuple[np.ndarray, Dict[int, float], Dict[str, Any]]:
+        """
+        Build sample weights for timeline activity head with unoccupied/unknown masking.
+
+        Returns:
+            - activity_sample_weight: per-sample activity loss weight
+            - activity_class_weight_dict: class-weight dictionary used for activity samples
+            - diagnostics: structured weighting diagnostics for metrics/trace
+        """
+        y_arr = np.asarray(y_train, dtype=np.int32)
+        n = int(len(y_arr))
+        if n == 0:
+            diagnostics = {
+                "activity_loss_mask_coverage": 0.0,
+                "activity_loss_mask_floor": 0.0,
+                "activity_class_weight_mode": "global",
+                "activity_class_weight_support": 0,
+                "activity_weight_mean_occupied": 0.0,
+                "activity_weight_mean_masked": 0.0,
+                "masked_class_ids": [],
+                "reweight_mode_requested": self._timeline_activity_reweight_mode(),
+            }
+            return np.zeros((0,), dtype=np.float32), dict(global_class_weight_dict), diagnostics
+
+        class_weight_dict: Dict[int, float] = {
+            int(class_id): float(weight)
+            for class_id, weight in (global_class_weight_dict or {}).items()
+        }
+
+        floor = self._timeline_activity_unoccupied_weight_floor()
+        reweight_mode = self._timeline_activity_reweight_mode()
+        masked_class_ids = sorted(self._timeline_activity_masked_class_ids(room_name))
+
+        if masked_class_ids:
+            masked_flags = np.isin(y_arr, np.asarray(masked_class_ids, dtype=np.int32))
+        else:
+            masked_flags = np.zeros(shape=(n,), dtype=bool)
+        occupied_flags = ~masked_flags
+
+        class_weight_mode = "global"
+        class_weight_support = int(len(y_arr))
+        fallback_reason = None
+
+        if bool(np.any(masked_flags)) and reweight_mode == "occupied_only":
+            occupied_labels = np.asarray(y_arr[occupied_flags], dtype=np.int32)
+            unique_occupied = np.unique(occupied_labels)
+            min_support_for_reweight = max(8, int(len(unique_occupied)))
+
+            if int(len(occupied_labels)) >= min_support_for_reweight and len(unique_occupied) > 0:
+                occupied_weights = compute_class_weight(
+                    class_weight="balanced",
+                    classes=unique_occupied,
+                    y=occupied_labels,
+                )
+                occupied_weight_dict = {
+                    int(class_id): float(weight)
+                    for class_id, weight in zip(unique_occupied.astype(np.int32, copy=False), occupied_weights)
+                }
+
+                label_encoder = self.platform.label_encoders.get(room_name)
+                classes = getattr(label_encoder, "classes_", None) if label_encoder is not None else None
+                for class_id, base_weight in occupied_weight_dict.items():
+                    label_name = None
+                    if classes is not None and 0 <= int(class_id) < len(classes):
+                        label_name = str(classes[int(class_id)])
+                    priority_multiplier = clinical_policy.get_room_label_multiplier(room_name, label_name)
+                    adjusted_weight = float(base_weight) * float(priority_multiplier)
+                    adjusted_weight = max(
+                        float(clinical_policy.class_weight_floor),
+                        min(float(clinical_policy.class_weight_cap), adjusted_weight),
+                    )
+                    class_weight_dict[int(class_id)] = adjusted_weight
+
+                class_weight_mode = "occupied_only"
+                class_weight_support = int(len(occupied_labels))
+            else:
+                fallback_reason = (
+                    f"insufficient_occupied_support:{len(occupied_labels)}<required:{min_support_for_reweight}"
+                )
+                class_weight_support = int(len(occupied_labels))
+
+        weight_by_sample = np.asarray(
+            [class_weight_dict.get(int(class_id), 1.0) for class_id in y_arr],
+            dtype=np.float32,
+        )
+        if use_timeline_native_weighting:
+            native = np.asarray(timeline_native_weights, dtype=np.float32)
+            if native.shape[0] != n:
+                native = np.ones(shape=(n,), dtype=np.float32)
+            weight_by_sample = np.asarray(weight_by_sample * native, dtype=np.float32)
+
+        activity_mask = np.where(masked_flags, 0.0, 1.0).astype(np.float32)
+        effective_mask = np.asarray(activity_mask + (1.0 - activity_mask) * float(floor), dtype=np.float32)
+        activity_sample_weight = np.asarray(weight_by_sample * effective_mask, dtype=np.float32)
+
+        diagnostics: Dict[str, Any] = {
+            "activity_loss_mask_coverage": float(np.mean(masked_flags.astype(np.float32))),
+            "activity_loss_mask_floor": float(floor),
+            "activity_class_weight_mode": str(class_weight_mode),
+            "activity_class_weight_support": int(class_weight_support),
+            "activity_weight_mean_occupied": (
+                float(np.mean(activity_sample_weight[occupied_flags]))
+                if bool(np.any(occupied_flags))
+                else 0.0
+            ),
+            "activity_weight_mean_masked": (
+                float(np.mean(activity_sample_weight[masked_flags]))
+                if bool(np.any(masked_flags))
+                else 0.0
+            ),
+            "masked_class_ids": [int(class_id) for class_id in masked_class_ids],
+            "reweight_mode_requested": str(reweight_mode),
+        }
+        if fallback_reason:
+            diagnostics["activity_class_weight_fallback_reason"] = fallback_reason
+
+        return activity_sample_weight, class_weight_dict, diagnostics
+
     def _build_timeline_targets(
         self,
         *,
@@ -3914,6 +4103,16 @@ class TrainingPipeline:
                     f"sample_weight mean={float(np.mean(sample_weight)):.3f}, "
                     f"min={float(np.min(sample_weight)):.3f}, max={float(np.max(sample_weight)):.3f}"
                 )
+            activity_weighting_diagnostics: Dict[str, Any] = {
+                "activity_loss_mask_coverage": 0.0,
+                "activity_loss_mask_floor": 0.0,
+                "activity_class_weight_mode": "global",
+                "activity_class_weight_support": int(len(y_train)),
+                "activity_weight_mean_occupied": 0.0,
+                "activity_weight_mean_masked": 0.0,
+                "masked_class_ids": [],
+            }
+            activity_class_weight_dict = dict(adjusted_class_weight_dict)
 
             timeline_target_debug: Dict[str, Any] = {"enabled": False, "reason": "not_timeline_model"}
             timeline_validation_debug: Dict[str, Any] = {}
@@ -3956,14 +4155,26 @@ class TrainingPipeline:
                     "boundary_end_logits": boundary_end_train,
                 }
 
-                base_weight_by_sample = np.asarray(
-                    [adjusted_class_weight_dict.get(int(cls), 1.0) for cls in y_train],
-                    dtype=np.float32,
+                activity_sample_weight, activity_class_weight_dict, activity_weighting_diagnostics = (
+                    self._build_timeline_activity_loss_weights(
+                        room_name=room_name,
+                        y_train=y_train,
+                        global_class_weight_dict=adjusted_class_weight_dict,
+                        timeline_native_weights=timeline_native_weights,
+                        use_timeline_native_weighting=use_sample_weight,
+                        clinical_policy=clinical_policy,
+                    )
                 )
-                if use_sample_weight:
-                    activity_sample_weight = np.asarray(base_weight_by_sample * timeline_native_weights, dtype=np.float32)
-                else:
-                    activity_sample_weight = base_weight_by_sample
+                logger.info(
+                    "Timeline activity loss weighting for %s: mode=%s, mask_coverage=%.3f, "
+                    "mask_floor=%.3f, mean_occupied=%.3f, mean_masked=%.3f",
+                    room_name,
+                    activity_weighting_diagnostics.get("activity_class_weight_mode", "global"),
+                    float(activity_weighting_diagnostics.get("activity_loss_mask_coverage", 0.0)),
+                    float(activity_weighting_diagnostics.get("activity_loss_mask_floor", 0.0)),
+                    float(activity_weighting_diagnostics.get("activity_weight_mean_occupied", 0.0)),
+                    float(activity_weighting_diagnostics.get("activity_weight_mean_masked", 0.0)),
+                )
                 sample_weight_fit = {
                     "activity_logits": activity_sample_weight,
                     "occupancy_logits": np.ones_like(activity_sample_weight, dtype=np.float32),
@@ -4087,10 +4298,29 @@ class TrainingPipeline:
                 'required_minority_support': int(holdout_support_floor),
                 'insufficient_validation_evidence': False,
                 'timeline_native_weighting': timeline_native_weighting,
+                'activity_loss_mask_coverage': float(
+                    activity_weighting_diagnostics.get("activity_loss_mask_coverage", 0.0)
+                ),
+                'activity_loss_mask_floor': float(
+                    activity_weighting_diagnostics.get("activity_loss_mask_floor", 0.0)
+                ),
+                'activity_class_weight_mode': str(
+                    activity_weighting_diagnostics.get("activity_class_weight_mode", "global")
+                ),
+                'activity_class_weight_support': int(
+                    activity_weighting_diagnostics.get("activity_class_weight_support", len(y_train))
+                ),
+                'activity_weight_mean_occupied': float(
+                    activity_weighting_diagnostics.get("activity_weight_mean_occupied", 0.0)
+                ),
+                'activity_weight_mean_masked': float(
+                    activity_weighting_diagnostics.get("activity_weight_mean_masked", 0.0)
+                ),
                 'timeline_multitask': {
                     'enabled': bool(timeline_multitask_enabled),
                     'targets': timeline_target_debug,
                     'validation_targets': timeline_validation_debug,
+                    'activity_weighting': activity_weighting_diagnostics,
                 },
                 'two_stage_core': {
                     'enabled': bool(two_stage_result.get('enabled', False)),
@@ -4608,6 +4838,31 @@ class TrainingPipeline:
                 "class_weights": {
                     "base": {str(k): float(v) for k, v in class_weight_dict.items()},
                     "adjusted": {str(k): float(v) for k, v in adjusted_class_weight_dict.items()},
+                    "activity_head": {
+                        "mode": str(activity_weighting_diagnostics.get("activity_class_weight_mode", "global")),
+                        "support": int(
+                            activity_weighting_diagnostics.get(
+                                "activity_class_weight_support",
+                                len(y_train),
+                            )
+                        ),
+                        "mask_coverage": float(
+                            activity_weighting_diagnostics.get("activity_loss_mask_coverage", 0.0)
+                        ),
+                        "mask_floor": float(
+                            activity_weighting_diagnostics.get("activity_loss_mask_floor", 0.0)
+                        ),
+                        "mean_occupied": float(
+                            activity_weighting_diagnostics.get("activity_weight_mean_occupied", 0.0)
+                        ),
+                        "mean_masked": float(
+                            activity_weighting_diagnostics.get("activity_weight_mean_masked", 0.0)
+                        ),
+                        "class_weights": {
+                            str(k): float(v)
+                            for k, v in activity_class_weight_dict.items()
+                        },
+                    },
                     "breakdown": weight_debug,
                 },
                 "calibration_debug": list(self._last_calibration_debug),

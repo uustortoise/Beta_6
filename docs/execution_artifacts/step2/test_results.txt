@@ -1,0 +1,14 @@
+$ pytest -q tests/test_training.py -k lane_b_event_gates or bootstrap
+returncode=0 passed=True
+--- stdout (tail) ---
+.........                                                                [100%]
+9 passed, 62 deselected in 0.22s
+--- stderr (tail) ---
+
+
+$ pytest -q tests/test_run_daily_analysis_thresholds.py
+returncode=0 passed=True
+--- stdout (tail) ---
+............................................                             [100%]
+44 passed in 0.33s
+--- stderr (tail) ---

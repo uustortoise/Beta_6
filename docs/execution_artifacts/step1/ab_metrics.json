@@ -1,0 +1,532 @@
+{
+  "generated_at_utc": "2026-03-06T10:52:18.436372Z",
+  "date": "2026-03-06",
+  "step": "Step1_S1-03",
+  "resident": "HK001_jessica",
+  "seed": 22,
+  "window": {
+    "min_day": 7,
+    "max_day": 10
+  },
+  "reference": {
+    "full_promoted_bundle_livingroom_mae_minutes": 242.95,
+    "baseline_anchor_livingroom_mae_minutes": 88.39
+  },
+  "variants": {
+    "A0": {
+      "path": "/tmp/beta6_s1_a0_seed22.json",
+      "livingroom_active_mae_minutes": 88.39315807891133,
+      "bedroom_sleep_duration_mae_minutes": 44.717467701979196,
+      "hard_gate_checks_total": 5,
+      "hard_gate_checks_passed": 4,
+      "hard_gate_pass_rate": 0.8,
+      "lr_mae_improvement_vs_full_bundle_pct": 0.6361672851248762,
+      "bedroom_sleep_mae_delta_vs_a0_minutes": 0.0,
+      "occupancy_false_empty_rate": 0.030369915064818953,
+      "occupancy_home_empty_precision": 0.2575136612021858,
+      "occupancy_home_empty_recall": 0.10285090710680671,
+      "occupancy_home_empty_predicted_empty_rate": 0.037103212317049994,
+      "occupancy_home_empty_windows_total": 78915,
+      "occupancy_home_empty_predicted_empty_windows": 2928,
+      "occupancy_metrics_source": "direct_home_empty_summary",
+      "occupancy_inference": {
+        "tp": 13514.150360597372,
+        "fn": 6594.849639402629,
+        "fp": 8035.512100547658,
+        "tn": 63784.48789945234,
+        "evaluated_room_splits": 12,
+        "method": "direct_home_empty_summary",
+        "direct_home_empty_summary": {
+          "evaluated": true,
+          "splits_evaluated": 3,
+          "splits_total": 3,
+          "home_empty_precision": 0.2575136612021858,
+          "home_empty_recall": 0.10285090710680671,
+          "home_empty_false_empty_rate": 0.030369915064818953,
+          "tp": 754,
+          "fp": 2174,
+          "fn": 6577,
+          "tn": 69410
+        }
+      },
+      "minority_recall_by_room": {
+        "bedroom": {
+          "labels": {
+            "bedroom_normal_use": {
+              "support": 2572.0,
+              "recall": 0.7461119751166407
+            },
+            "sleep": {
+              "support": 7624.0,
+              "recall": 0.8380115424973767
+            },
+            "unoccupied": {
+              "support": 12832.0,
+              "recall": 0.6521976309226932
+            }
+          },
+          "eligible_nonmasked_labels": [
+            "bedroom_normal_use",
+            "sleep"
+          ],
+          "positive_recall_labels": [
+            "bedroom_normal_use",
+            "sleep"
+          ]
+        },
+        "livingroom": {
+          "labels": {
+            "livingroom_normal_use": {
+              "support": 3383.0,
+              "recall": 0.31983446644989655
+            },
+            "unoccupied": {
+              "support": 19521.0,
+              "recall": 0.9384765124737462
+            }
+          },
+          "eligible_nonmasked_labels": [
+            "livingroom_normal_use"
+          ],
+          "positive_recall_labels": [
+            "livingroom_normal_use"
+          ]
+        },
+        "bathroom": {
+          "labels": {
+            "bathroom_normal_use": {
+              "support": 2039.0,
+              "recall": 0.49632172633643945
+            },
+            "shower": {
+              "support": 504.0,
+              "recall": 0.13293650793650794
+            },
+            "unoccupied": {
+              "support": 20401.0,
+              "recall": 0.9711778834370864
+            }
+          },
+          "eligible_nonmasked_labels": [
+            "bathroom_normal_use",
+            "shower"
+          ],
+          "positive_recall_labels": [
+            "bathroom_normal_use",
+            "shower"
+          ]
+        },
+        "kitchen": {
+          "labels": {
+            "kitchen_normal_use": {
+              "support": 3987.0,
+              "recall": 0.5111612741409581
+            },
+            "unoccupied": {
+              "support": 19066.0,
+              "recall": 0.9170775201930137
+            }
+          },
+          "eligible_nonmasked_labels": [
+            "kitchen_normal_use"
+          ],
+          "positive_recall_labels": [
+            "kitchen_normal_use"
+          ]
+        }
+      },
+      "bedroom_sleep_recall": {
+        "support": 7624.0,
+        "recall": 0.8380115424973767,
+        "status": "pass"
+      }
+    },
+    "A1": {
+      "path": "/tmp/beta6_s1_a1_seed22.json",
+      "livingroom_active_mae_minutes": 88.39315807891133,
+      "bedroom_sleep_duration_mae_minutes": 44.717467701979196,
+      "hard_gate_checks_total": 5,
+      "hard_gate_checks_passed": 4,
+      "hard_gate_pass_rate": 0.8,
+      "lr_mae_improvement_vs_full_bundle_pct": 0.6361672851248762,
+      "bedroom_sleep_mae_delta_vs_a0_minutes": 0.0,
+      "occupancy_false_empty_rate": 0.030369915064818953,
+      "occupancy_home_empty_precision": 0.2575136612021858,
+      "occupancy_home_empty_recall": 0.10285090710680671,
+      "occupancy_home_empty_predicted_empty_rate": 0.037103212317049994,
+      "occupancy_home_empty_windows_total": 78915,
+      "occupancy_home_empty_predicted_empty_windows": 2928,
+      "occupancy_metrics_source": "direct_home_empty_summary",
+      "occupancy_inference": {
+        "tp": 13514.150360597372,
+        "fn": 6594.849639402629,
+        "fp": 8035.512100547658,
+        "tn": 63784.48789945234,
+        "evaluated_room_splits": 12,
+        "method": "direct_home_empty_summary",
+        "direct_home_empty_summary": {
+          "evaluated": true,
+          "splits_evaluated": 3,
+          "splits_total": 3,
+          "home_empty_precision": 0.2575136612021858,
+          "home_empty_recall": 0.10285090710680671,
+          "home_empty_false_empty_rate": 0.030369915064818953,
+          "tp": 754,
+          "fp": 2174,
+          "fn": 6577,
+          "tn": 69410
+        }
+      },
+      "minority_recall_by_room": {
+        "bedroom": {
+          "labels": {
+            "bedroom_normal_use": {
+              "support": 2572.0,
+              "recall": 0.7461119751166407
+            },
+            "sleep": {
+              "support": 7624.0,
+              "recall": 0.8380115424973767
+            },
+            "unoccupied": {
+              "support": 12832.0,
+              "recall": 0.6521976309226932
+            }
+          },
+          "eligible_nonmasked_labels": [
+            "bedroom_normal_use",
+            "sleep"
+          ],
+          "positive_recall_labels": [
+            "bedroom_normal_use",
+            "sleep"
+          ]
+        },
+        "livingroom": {
+          "labels": {
+            "livingroom_normal_use": {
+              "support": 3383.0,
+              "recall": 0.31983446644989655
+            },
+            "unoccupied": {
+              "support": 19521.0,
+              "recall": 0.9384765124737462
+            }
+          },
+          "eligible_nonmasked_labels": [
+            "livingroom_normal_use"
+          ],
+          "positive_recall_labels": [
+            "livingroom_normal_use"
+          ]
+        },
+        "bathroom": {
+          "labels": {
+            "bathroom_normal_use": {
+              "support": 2039.0,
+              "recall": 0.49632172633643945
+            },
+            "shower": {
+              "support": 504.0,
+              "recall": 0.13293650793650794
+            },
+            "unoccupied": {
+              "support": 20401.0,
+              "recall": 0.9711778834370864
+            }
+          },
+          "eligible_nonmasked_labels": [
+            "bathroom_normal_use",
+            "shower"
+          ],
+          "positive_recall_labels": [
+            "bathroom_normal_use",
+            "shower"
+          ]
+        },
+        "kitchen": {
+          "labels": {
+            "kitchen_normal_use": {
+              "support": 3987.0,
+              "recall": 0.5111612741409581
+            },
+            "unoccupied": {
+              "support": 19066.0,
+              "recall": 0.9170775201930137
+            }
+          },
+          "eligible_nonmasked_labels": [
+            "kitchen_normal_use"
+          ],
+          "positive_recall_labels": [
+            "kitchen_normal_use"
+          ]
+        }
+      },
+      "bedroom_sleep_recall": {
+        "support": 7624.0,
+        "recall": 0.8380115424973767,
+        "status": "pass"
+      }
+    },
+    "A2": {
+      "path": "/tmp/beta6_s1_a2_seed22.json",
+      "livingroom_active_mae_minutes": 88.39315807891133,
+      "bedroom_sleep_duration_mae_minutes": 44.717467701979196,
+      "hard_gate_checks_total": 5,
+      "hard_gate_checks_passed": 4,
+      "hard_gate_pass_rate": 0.8,
+      "lr_mae_improvement_vs_full_bundle_pct": 0.6361672851248762,
+      "bedroom_sleep_mae_delta_vs_a0_minutes": 0.0,
+      "occupancy_false_empty_rate": 0.030369915064818953,
+      "occupancy_home_empty_precision": 0.2575136612021858,
+      "occupancy_home_empty_recall": 0.10285090710680671,
+      "occupancy_home_empty_predicted_empty_rate": 0.037103212317049994,
+      "occupancy_home_empty_windows_total": 78915,
+      "occupancy_home_empty_predicted_empty_windows": 2928,
+      "occupancy_metrics_source": "direct_home_empty_summary",
+      "occupancy_inference": {
+        "tp": 13514.150360597372,
+        "fn": 6594.849639402629,
+        "fp": 8035.512100547658,
+        "tn": 63784.48789945234,
+        "evaluated_room_splits": 12,
+        "method": "direct_home_empty_summary",
+        "direct_home_empty_summary": {
+          "evaluated": true,
+          "splits_evaluated": 3,
+          "splits_total": 3,
+          "home_empty_precision": 0.2575136612021858,
+          "home_empty_recall": 0.10285090710680671,
+          "home_empty_false_empty_rate": 0.030369915064818953,
+          "tp": 754,
+          "fp": 2174,
+          "fn": 6577,
+          "tn": 69410
+        }
+      },
+      "minority_recall_by_room": {
+        "bedroom": {
+          "labels": {
+            "bedroom_normal_use": {
+              "support": 2572.0,
+              "recall": 0.7461119751166407
+            },
+            "sleep": {
+              "support": 7624.0,
+              "recall": 0.8380115424973767
+            },
+            "unoccupied": {
+              "support": 12832.0,
+              "recall": 0.6521976309226932
+            }
+          },
+          "eligible_nonmasked_labels": [
+            "bedroom_normal_use",
+            "sleep"
+          ],
+          "positive_recall_labels": [
+            "bedroom_normal_use",
+            "sleep"
+          ]
+        },
+        "livingroom": {
+          "labels": {
+            "livingroom_normal_use": {
+              "support": 3383.0,
+              "recall": 0.31983446644989655
+            },
+            "unoccupied": {
+              "support": 19521.0,
+              "recall": 0.9384765124737462
+            }
+          },
+          "eligible_nonmasked_labels": [
+            "livingroom_normal_use"
+          ],
+          "positive_recall_labels": [
+            "livingroom_normal_use"
+          ]
+        },
+        "bathroom": {
+          "labels": {
+            "bathroom_normal_use": {
+              "support": 2039.0,
+              "recall": 0.49632172633643945
+            },
+            "shower": {
+              "support": 504.0,
+              "recall": 0.13293650793650794
+            },
+            "unoccupied": {
+              "support": 20401.0,
+              "recall": 0.9711778834370864
+            }
+          },
+          "eligible_nonmasked_labels": [
+            "bathroom_normal_use",
+            "shower"
+          ],
+          "positive_recall_labels": [
+            "bathroom_normal_use",
+            "shower"
+          ]
+        },
+        "kitchen": {
+          "labels": {
+            "kitchen_normal_use": {
+              "support": 3987.0,
+              "recall": 0.5111612741409581
+            },
+            "unoccupied": {
+              "support": 19066.0,
+              "recall": 0.9170775201930137
+            }
+          },
+          "eligible_nonmasked_labels": [
+            "kitchen_normal_use"
+          ],
+          "positive_recall_labels": [
+            "kitchen_normal_use"
+          ]
+        }
+      },
+      "bedroom_sleep_recall": {
+        "support": 7624.0,
+        "recall": 0.8380115424973767,
+        "status": "pass"
+      }
+    }
+  },
+  "gate_evaluation": {
+    "livingroom_mae_improve_vs_full_bundle_ge_20pct": {
+      "status": "pass",
+      "required_min_improvement_pct": 0.2
+    },
+    "bedroom_sleep_mae_delta_le_2_minutes": {
+      "status": "pass",
+      "required_max_delta_minutes": 2.0
+    },
+    "hard_gate_pass_count_non_regression": {
+      "status": "pass",
+      "baseline_a0_passed": 4
+    },
+    "minority_recall_anti_collapse": {
+      "status": "pass",
+      "room_status": {
+        "bedroom": "pass",
+        "livingroom": "pass",
+        "bathroom": "pass",
+        "kitchen": "pass"
+      },
+      "room_details": {
+        "bedroom": {
+          "eligible_nonmasked_labels": [
+            "bedroom_normal_use",
+            "sleep"
+          ],
+          "positive_recall_labels": [
+            "bedroom_normal_use",
+            "sleep"
+          ],
+          "required_min_eligible_labels": 2
+        },
+        "livingroom": {
+          "eligible_nonmasked_labels": [
+            "livingroom_normal_use"
+          ],
+          "positive_recall_labels": [
+            "livingroom_normal_use"
+          ],
+          "required_min_eligible_labels": 1
+        },
+        "bathroom": {
+          "eligible_nonmasked_labels": [
+            "bathroom_normal_use",
+            "shower"
+          ],
+          "positive_recall_labels": [
+            "bathroom_normal_use",
+            "shower"
+          ],
+          "required_min_eligible_labels": 2
+        },
+        "kitchen": {
+          "eligible_nonmasked_labels": [
+            "kitchen_normal_use"
+          ],
+          "positive_recall_labels": [
+            "kitchen_normal_use"
+          ],
+          "required_min_eligible_labels": 1
+        }
+      },
+      "bedroom_sleep_recall": {
+        "support": 7624.0,
+        "recall": 0.8380115424973767,
+        "status": "pass"
+      }
+    },
+    "occupancy_head_safety_non_regression": {
+      "status": "pass",
+      "variants": {
+        "A0": {
+          "status": "pass",
+          "false_empty_rate": 0.030369915064818953,
+          "false_empty_delta_vs_a0": 0.0,
+          "home_empty_precision": 0.2575136612021858,
+          "home_empty_precision_drop_vs_a0": 0.0
+        },
+        "A1": {
+          "status": "pass",
+          "false_empty_rate": 0.030369915064818953,
+          "false_empty_delta_vs_a0": 0.0,
+          "home_empty_precision": 0.2575136612021858,
+          "home_empty_precision_drop_vs_a0": 0.0
+        },
+        "A2": {
+          "status": "pass",
+          "false_empty_rate": 0.030369915064818953,
+          "false_empty_delta_vs_a0": 0.0,
+          "home_empty_precision": 0.2575136612021858,
+          "home_empty_precision_drop_vs_a0": 0.0
+        }
+      },
+      "policy": {
+        "false_empty_rate_delta_max": 0.01,
+        "false_empty_rate_cap": 0.05,
+        "home_empty_precision_drop_max": 0.02
+      },
+      "note": "uses direct home_empty_summary when available; otherwise inferred occupancy confusion fallback"
+    },
+    "home_empty_operational_utility": {
+      "status": "pass",
+      "evaluated_variant": "A1",
+      "metrics": {
+        "home_empty_precision": 0.2575136612021858,
+        "home_empty_recall": 0.10285090710680671,
+        "predicted_empty_rate": 0.037103212317049994,
+        "predicted_empty_windows": 2928,
+        "total_windows": 78915
+      },
+      "policy": {
+        "home_empty_precision_min": 0.25,
+        "home_empty_recall_min": 0.1,
+        "predicted_empty_rate_min": 0.01
+      },
+      "reasons": []
+    }
+  },
+  "recommended_variant": "A1",
+  "decision": {
+    "status": "GO",
+    "reason_codes": [
+      "STEP1_ALL_GATES_PASS"
+    ]
+  },
+  "operational_recommendation": {
+    "status": "CANARY_ELIGIBLE",
+    "reason": "home_empty_utility_gate_passed",
+    "evaluated_variant": "A1"
+  }
+}

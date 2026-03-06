@@ -1,0 +1,34 @@
+Step 3 matrix run (A1 configuration)
+
+Environment prefix used in runs:
+ENABLE_TIMELINE_MULTITASK=true TIMELINE_NATIVE_ROOMS=bedroom,livingroom,bathroom,kitchen TIMELINE_ACTIVITY_REWEIGHT_MODE=occupied_only TIMELINE_ACTIVITY_UNOCCUPIED_WEIGHT_FLOOR=0.0
+
+Commands executed:
+
+1) Seed 11, day 7-10
+- /Users/dicksonng/DT/Development/Beta_6/backend/venv/bin/python /Users/dicksonng/DT/Development/Beta_6/backend/scripts/run_event_first_variant_backtest.py --profiles-yaml /Users/dicksonng/DT/Development/Beta_6/backend/config/event_first_matrix_profiles.yaml --variant anchor_top2_frag_v3 --data-dir /Users/dicksonng/DT/Development/Beta_6/data/raw --elder-id HK001_jessica --seed 11 --min-day 7 --max-day 10 --output /tmp/beta6_s1_a1_seed11_d7_10.json
+- Result: PASS
+
+2) Seed 22, day 7-10
+- /Users/dicksonng/DT/Development/Beta_6/backend/venv/bin/python /Users/dicksonng/DT/Development/Beta_6/backend/scripts/run_event_first_variant_backtest.py --profiles-yaml /Users/dicksonng/DT/Development/Beta_6/backend/config/event_first_matrix_profiles.yaml --variant anchor_top2_frag_v3 --data-dir /Users/dicksonng/DT/Development/Beta_6/data/raw --elder-id HK001_jessica --seed 22 --min-day 7 --max-day 10 --output /tmp/beta6_s1_a1_seed22.json
+- Result: PASS
+
+3) Seed 33, day 7-10
+- /Users/dicksonng/DT/Development/Beta_6/backend/venv/bin/python /Users/dicksonng/DT/Development/Beta_6/backend/scripts/run_event_first_variant_backtest.py --profiles-yaml /Users/dicksonng/DT/Development/Beta_6/backend/config/event_first_matrix_profiles.yaml --variant anchor_top2_frag_v3 --data-dir /Users/dicksonng/DT/Development/Beta_6/data/raw --elder-id HK001_jessica --seed 33 --min-day 7 --max-day 10 --output /tmp/beta6_s1_a1_seed33_d7_10.json
+- Result: PASS
+
+4) Seed 11, full window 4-10
+- /Users/dicksonng/DT/Development/Beta_6/backend/venv/bin/python /Users/dicksonng/DT/Development/Beta_6/backend/scripts/run_event_first_variant_backtest.py --profiles-yaml /Users/dicksonng/DT/Development/Beta_6/backend/config/event_first_matrix_profiles.yaml --variant anchor_top2_frag_v3 --data-dir /Users/dicksonng/DT/Development/Beta_6/data/raw --elder-id HK001_jessica --seed 11 --min-day 4 --max-day 10 --output /tmp/beta6_s1_a1_seed11_d4_10.json
+- Result: PASS
+
+5) Seed 22, full window 4-10
+- /Users/dicksonng/DT/Development/Beta_6/backend/venv/bin/python /Users/dicksonng/DT/Development/Beta_6/backend/scripts/run_event_first_variant_backtest.py --profiles-yaml /Users/dicksonng/DT/Development/Beta_6/backend/config/event_first_matrix_profiles.yaml --variant anchor_top2_frag_v3 --data-dir /Users/dicksonng/DT/Development/Beta_6/data/raw --elder-id HK001_jessica --seed 22 --min-day 4 --max-day 10 --output /tmp/beta6_s1_a1_seed22_d4_10.json
+- Result: PASS
+
+6) Seed 33, full window 4-10
+- /Users/dicksonng/DT/Development/Beta_6/backend/venv/bin/python /Users/dicksonng/DT/Development/Beta_6/backend/scripts/run_event_first_variant_backtest.py --profiles-yaml /Users/dicksonng/DT/Development/Beta_6/backend/config/event_first_matrix_profiles.yaml --variant anchor_top2_frag_v3 --data-dir /Users/dicksonng/DT/Development/Beta_6/data/raw --elder-id HK001_jessica --seed 33 --min-day 4 --max-day 10 --output /tmp/beta6_s1_a1_seed33_d4_10.json
+- Result: PASS
+
+7) Matrix summarization
+- python3 - <<script>> to aggregate 6 run artifacts into /tmp/beta6_step3_matrix_summary.json and docs/beta6_step3_matrix_report.md
+- Result: PASS

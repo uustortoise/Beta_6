@@ -14,6 +14,7 @@ from scripts.run_event_first_backtest import (
     _apply_room_passive_occupancy_hysteresis,
     _calibrate_duration_from_train,
     _compute_binary_episode_metrics,
+    _compute_home_empty_metrics,
     _daily_target_series,
     _duration_mae_from_labels,
     _extract_error_episodes,
@@ -43,6 +44,7 @@ from scripts.run_event_first_backtest import (
     _parse_tune_rooms,
     _rolling_linear_slope,
     _build_room_data_diagnostics,
+    _build_home_empty_status,
     _label_correction_reference_for_room_day,
     _build_room_model_config,
     _room_mae_tuning_flag_enabled,
@@ -962,6 +964,104 @@ def test_compute_binary_episode_metrics_reports_episode_and_window_scores():
     assert 0.0 <= float(out["episode_precision"]) <= 1.0
     assert 0.0 <= float(out["episode_recall"]) <= 1.0
     assert "timeline_metrics_binary" in out
+
+
+def test_build_home_empty_status_requires_all_rooms_unoccupied():
+    ts = pd.to_datetime(["2025-12-07 10:00:00", "2025-12-07 10:00:00", "2025-12-07 10:00:10", "2025-12-07 10:00:10"])
+    df = pd.DataFrame(
+        {
+            "timestamp": ts,
+            "room": ["bedroom", "livingroom", "bedroom", "livingroom"],
+            "label": ["unoccupied", "unoccupied", "sleep", "unoccupied"],
+        }
+    )
+    status = _build_home_empty_status(
+        df,
+        label_col="label",
+        min_empty_duration_seconds=0.0,
+    )
+    assert status[pd.Timestamp("2025-12-07 10:00:00")] is True
+    assert status[pd.Timestamp("2025-12-07 10:00:10")] is False
+
+
+def test_build_home_empty_status_aligns_misaligned_room_timestamps():
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2025-12-07 10:00:00",
+                    "2025-12-07 10:00:10",
+                    "2025-12-07 10:00:02",
+                    "2025-12-07 10:00:12",
+                ]
+            ),
+            "room": ["bedroom", "bedroom", "livingroom", "livingroom"],
+            "label": ["unoccupied", "sleep", "unoccupied", "unoccupied"],
+        }
+    )
+    status = _build_home_empty_status(
+        df,
+        label_col="label",
+        rooms=["bedroom", "livingroom"],
+        reference_timestamps=pd.Series(pd.to_datetime(["2025-12-07 10:00:00", "2025-12-07 10:00:10"])),
+        alignment_tolerance_seconds=5.0,
+        require_full_coverage=True,
+        min_empty_duration_seconds=0.0,
+    )
+    assert status[pd.Timestamp("2025-12-07 10:00:00")] is True
+    assert status[pd.Timestamp("2025-12-07 10:00:10")] is False
+
+
+def test_build_home_empty_status_requires_full_coverage_when_enabled():
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2025-12-07 10:00:00", "2025-12-07 10:00:02"]),
+            "room": ["bedroom", "livingroom"],
+            "label": ["unoccupied", "unoccupied"],
+        }
+    )
+    status = _build_home_empty_status(
+        df,
+        label_col="label",
+        rooms=["bedroom", "livingroom"],
+        reference_timestamps=pd.Series(pd.to_datetime(["2025-12-07 10:00:00"])),
+        alignment_tolerance_seconds=0.0,
+        require_full_coverage=True,
+        min_empty_duration_seconds=0.0,
+    )
+    assert status[pd.Timestamp("2025-12-07 10:00:00")] is False
+
+
+def test_compute_home_empty_metrics_reports_false_empty_rate():
+    ts = pd.to_datetime(["2025-12-07 10:00:00", "2025-12-07 10:00:10"])
+    gt = pd.DataFrame(
+        {
+            "timestamp": [ts[0], ts[0], ts[1], ts[1]],
+            "room": ["bedroom", "livingroom", "bedroom", "livingroom"],
+            "label": ["unoccupied", "unoccupied", "sleep", "unoccupied"],
+        }
+    )
+    pred = pd.DataFrame(
+        {
+            "timestamp": [ts[0], ts[0], ts[1], ts[1]],
+            "room": ["bedroom", "livingroom", "bedroom", "livingroom"],
+            "label": ["unoccupied", "unoccupied", "unoccupied", "unoccupied"],
+        }
+    )
+    out = _compute_home_empty_metrics(
+        pred_df=pred,
+        gt_df=gt,
+        tolerance_seconds=1.0,
+        min_empty_duration_seconds=0.0,
+    )
+    assert out["evaluated"] is True
+    assert out["tp"] == 1
+    assert out["fp"] == 1
+    assert out["fn"] == 0
+    assert out["tn"] == 0
+    assert out["home_empty_precision"] == pytest.approx(0.5, abs=1e-6)
+    assert out["home_empty_recall"] == pytest.approx(1.0, abs=1e-6)
+    assert out["home_empty_false_empty_rate"] == pytest.approx(1.0, abs=1e-6)
 
 
 def test_classification_metrics_include_occupied_binary_metrics():

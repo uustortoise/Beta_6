@@ -91,6 +91,93 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertGreater(float(debug.get("transition_count", 0)), 0.0)
         self.assertGreater(float(np.max(weights)), 1.0)
 
+    def test_timeline_activity_loss_weights_masks_unoccupied_and_unknown(self):
+        self.mock_platform.label_encoders["bedroom"] = MagicMock()
+        self.mock_platform.label_encoders["bedroom"].classes_ = ["unoccupied", "sleep", "unknown"]
+        y_train = np.array([0, 1, 0, 2, 1], dtype=np.int32)
+        global_weights = {0: 1.0, 1: 2.0, 2: 1.5}
+
+        with patch.dict(
+            os.environ,
+            {
+                "TIMELINE_ACTIVITY_UNOCCUPIED_WEIGHT_FLOOR": "0.05",
+                "TIMELINE_ACTIVITY_REWEIGHT_MODE": "global",
+            },
+            clear=False,
+        ):
+            weights, class_weights, debug = self.pipeline._build_timeline_activity_loss_weights(
+                room_name="bedroom",
+                y_train=y_train,
+                global_class_weight_dict=global_weights,
+                timeline_native_weights=np.ones_like(y_train, dtype=np.float32),
+                use_timeline_native_weighting=False,
+                clinical_policy=self.pipeline._active_policy().clinical_priority,
+            )
+
+        self.assertEqual(debug["activity_class_weight_mode"], "global")
+        self.assertAlmostEqual(debug["activity_loss_mask_coverage"], 3.0 / 5.0, places=6)
+        self.assertAlmostEqual(weights[0], 0.05, places=6)   # unoccupied masked
+        self.assertAlmostEqual(weights[3], 0.075, places=6)  # unknown masked
+        self.assertAlmostEqual(weights[1], 2.0, places=6)    # occupied unchanged
+        self.assertEqual(class_weights[1], 2.0)
+
+    def test_timeline_activity_loss_weights_reweights_on_occupied_subset(self):
+        self.mock_platform.label_encoders["bedroom"] = MagicMock()
+        self.mock_platform.label_encoders["bedroom"].classes_ = ["unoccupied", "sleep", "reading"]
+        y_train = np.array([0, 1, 1, 1, 1, 1, 1, 2, 2, 0], dtype=np.int32)
+        global_weights = {0: 1.0, 1: 1.0, 2: 1.0}
+
+        with patch.dict(
+            os.environ,
+            {
+                "TIMELINE_ACTIVITY_UNOCCUPIED_WEIGHT_FLOOR": "0.0",
+                "TIMELINE_ACTIVITY_REWEIGHT_MODE": "occupied_only",
+            },
+            clear=False,
+        ):
+            weights, class_weights, debug = self.pipeline._build_timeline_activity_loss_weights(
+                room_name="bedroom",
+                y_train=y_train,
+                global_class_weight_dict=global_weights,
+                timeline_native_weights=np.ones_like(y_train, dtype=np.float32),
+                use_timeline_native_weighting=False,
+                clinical_policy=self.pipeline._active_policy().clinical_priority,
+            )
+
+        self.assertEqual(debug["activity_class_weight_mode"], "occupied_only")
+        self.assertEqual(debug["activity_class_weight_support"], 8)
+        self.assertGreater(class_weights[2], class_weights[1])
+        self.assertAlmostEqual(weights[0], 0.0, places=6)  # masked unoccupied gets floor=0.0
+
+    def test_timeline_activity_loss_weights_fallbacks_to_global_when_occupied_support_small(self):
+        self.mock_platform.label_encoders["bedroom"] = MagicMock()
+        self.mock_platform.label_encoders["bedroom"].classes_ = ["unoccupied", "sleep"]
+        y_train = np.array([0, 0, 0, 1, 1], dtype=np.int32)
+        global_weights = {0: 1.0, 1: 2.0}
+
+        with patch.dict(
+            os.environ,
+            {
+                "TIMELINE_ACTIVITY_UNOCCUPIED_WEIGHT_FLOOR": "0.0",
+                "TIMELINE_ACTIVITY_REWEIGHT_MODE": "occupied_only",
+            },
+            clear=False,
+        ):
+            weights, class_weights, debug = self.pipeline._build_timeline_activity_loss_weights(
+                room_name="bedroom",
+                y_train=y_train,
+                global_class_weight_dict=global_weights,
+                timeline_native_weights=np.ones_like(y_train, dtype=np.float32),
+                use_timeline_native_weighting=False,
+                clinical_policy=self.pipeline._active_policy().clinical_priority,
+            )
+
+        self.assertEqual(debug["activity_class_weight_mode"], "global")
+        self.assertEqual(debug["activity_class_weight_support"], 2)
+        self.assertIn("activity_class_weight_fallback_reason", debug)
+        self.assertEqual(class_weights[1], 2.0)
+        self.assertAlmostEqual(weights[0], 0.0, places=6)
+
     @patch("ml.training.precision_recall_curve")
     def test_calibrate_two_stage_stage_a_threshold_uses_stage_a_bounds(self, mock_pr_curve):
         n = 80
@@ -1665,6 +1752,28 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertFalse(gate_pass)
         self.assertTrue(any("collapse_sleep_duration" in r for r in reasons))
         self.assertEqual(report.get("enforcement"), "hard_bootstrap_collapse_guard")
+
+    def test_evaluate_lane_b_event_gates_short_window_pilot_uses_min_support_10(self):
+        self.pipeline.policy.release_gate.evidence_profile = "pilot_stage_b"
+        gate_pass, reasons, report = self.pipeline._evaluate_lane_b_event_gates(
+            room_name="Bedroom",
+            candidate_metrics={
+                "training_days": 6.0,
+                "per_label_recall": {"sleep": 0.95},
+                "per_label_support": {"sleep": 12, "unoccupied": 200},
+            },
+        )
+        self.assertTrue(gate_pass)
+        self.assertEqual(reasons, [])
+        self.assertEqual(report.get("configured_min_support_for_tier_gates"), 10)
+        results_by_name = {
+            str(row.get("gate_name")): row
+            for row in report.get("results", [])
+            if isinstance(row, dict)
+        }
+        sleep_gate = results_by_name.get("recall_sleep_duration")
+        self.assertIsNotNone(sleep_gate)
+        self.assertEqual(sleep_gate.get("status"), "pass")
 
     def test_evaluate_lane_b_event_gates_warn_only_noncritical_room(self):
         gate_pass, reasons, report = self.pipeline._evaluate_lane_b_event_gates(

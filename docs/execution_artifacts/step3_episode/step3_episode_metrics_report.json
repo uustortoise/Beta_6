@@ -1,0 +1,87 @@
+{
+  "generated_at_utc": "2026-03-06T12:12:21+00:00",
+  "step": "Step3_S3-01",
+  "artifact_version": "beta6_step3_episode_metrics.v1",
+  "required_metrics": [
+    "duration_mae_minutes",
+    "fragmentation_rate",
+    "boundary_precision",
+    "boundary_recall",
+    "boundary_f1",
+    "episode_count_ratio"
+  ],
+  "metrics_presence": {
+    "duration_mae_minutes": true,
+    "fragmentation_rate": true,
+    "boundary_precision": true,
+    "boundary_recall": true,
+    "boundary_f1": true,
+    "episode_count_ratio": true
+  },
+  "metrics_values": {
+    "duration_mae_minutes": 4.0,
+    "fragmentation_rate": 0.2,
+    "boundary_precision": 0.5,
+    "boundary_recall": 0.75,
+    "boundary_f1": 0.6,
+    "episode_count_ratio": 1.5
+  },
+  "gate_consumption": {
+    "passed": true,
+    "reason_code": "pass",
+    "details": {
+      "room_type": "bedroom",
+      "capability_profile_id": "cap_profile_bedroom_v1",
+      "timeline_hard_gate_checked": true,
+      "timeline_hard_gate_passed": true,
+      "timeline_hard_gate": {
+        "duration_mae_minutes": 4.0,
+        "duration_mae_threshold_minutes": 10.0,
+        "fragmentation_rate": 0.2,
+        "fragmentation_rate_threshold": 0.22
+      },
+      "episode_count_ratio_watch": {
+        "episode_count_ratio": 3.0,
+        "status": "watch",
+        "watch_threshold_min": 0.5,
+        "watch_threshold_max": 2.0,
+        "blocking": false
+      }
+    }
+  },
+  "tests": [
+    {
+      "command": "pytest -q tests/test_beta6_shadow_compare.py",
+      "returncode": 0,
+      "passed": true,
+      "stdout_tail": "...                                                                      [100%]\n3 passed in 0.06s",
+      "stderr_tail": ""
+    },
+    {
+      "command": "pytest -q tests/test_beta6_orchestrator.py",
+      "returncode": 0,
+      "passed": true,
+      "stdout_tail": "......                                                                   [100%]\n6 passed in 0.08s",
+      "stderr_tail": ""
+    },
+    {
+      "command": "pytest -q tests/test_run_daily_analysis_thresholds.py",
+      "returncode": 0,
+      "passed": true,
+      "stdout_tail": "............................................                             [100%]\n44 passed in 0.30s",
+      "stderr_tail": ""
+    }
+  ],
+  "pass_requirements": {
+    "timeline_metrics_present_in_payload": true,
+    "gate_engine_consumes_metrics_without_schema_break": true,
+    "episode_count_ratio_watch_only_non_blocking": true,
+    "required_tests_passed": true
+  },
+  "decision": {
+    "status": "PASS",
+    "reason_codes": [
+      "STEP3_EPISODE_METRICS_PASS"
+    ]
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "required_metrics": [
+    "duration_mae_minutes",
+    "fragmentation_rate",
+    "boundary_precision",
+    "boundary_recall",
+    "boundary_f1",
+    "episode_count_ratio"
+  ],
+  "metrics_values": {
+    "duration_mae_minutes": 4.0,
+    "fragmentation_rate": 0.2,
+    "boundary_precision": 0.5,
+    "boundary_recall": 0.75,
+    "boundary_f1": 0.6,
+    "episode_count_ratio": 1.5
+  },
+  "metrics_presence": {
+    "duration_mae_minutes": true,
+    "fragmentation_rate": true,
+    "boundary_precision": true,
+    "boundary_recall": true,
+    "boundary_f1": true,
+    "episode_count_ratio": true
+  },
+  "gate_episode_count_ratio_watch": {
+    "episode_count_ratio": 3.0,
+    "status": "watch",
+    "watch_threshold_min": 0.5,
+    "watch_threshold_max": 2.0,
+    "blocking": false
+  }
+}

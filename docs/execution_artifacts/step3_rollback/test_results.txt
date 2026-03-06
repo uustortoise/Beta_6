@@ -1,0 +1,14 @@
+$ pytest -q tests/test_beta6_runtime_preflight.py
+returncode=0 passed=True
+--- stdout (tail) ---
+.........                                                                [100%]
+9 passed in 0.07s
+--- stderr (tail) ---
+
+
+$ pytest -q tests/test_prediction_beta6_runtime_hook_parity.py
+returncode=0 passed=True
+--- stdout (tail) ---
+...                                                                      [100%]
+3 passed in 0.07s
+--- stderr (tail) ---

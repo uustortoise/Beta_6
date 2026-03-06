@@ -1,0 +1,89 @@
+{
+  "generated_at_utc": "2026-03-06T00:24:12.988831Z",
+  "resident": "HK001_jessica",
+  "seed": 22,
+  "window": {
+    "min_day": 7,
+    "max_day": 10
+  },
+  "variants": {
+    "A0_anchor": {
+      "report_path": "/tmp/beta6_s1_a0_seed22.json",
+      "livingroom_active_mae_minutes": 88.39315807891133,
+      "bedroom_sleep_duration_mae_minutes": 44.717467701979196,
+      "home_empty_false_empty_rate": 0.3144860510219305,
+      "home_empty_precision": 0.8910143728673353,
+      "home_empty_recall": 0.8791960004081216,
+      "hard_gate_checks_passed": 4,
+      "hard_gate_checks_total": 5,
+      "timeline_gate_pass_rate": 1.0,
+      "false_empty_delta_vs_a0": 0.0,
+      "home_empty_precision_drop_vs_a0": 0.0
+    },
+    "A1_mask_floor0": {
+      "report_path": "/tmp/beta6_s1_a1_seed22.json",
+      "livingroom_active_mae_minutes": 88.39315807891133,
+      "bedroom_sleep_duration_mae_minutes": 44.717467701979196,
+      "home_empty_false_empty_rate": 0.3144860510219305,
+      "home_empty_precision": 0.8910143728673353,
+      "home_empty_recall": 0.8791960004081216,
+      "hard_gate_checks_passed": 4,
+      "hard_gate_checks_total": 5,
+      "timeline_gate_pass_rate": 1.0,
+      "false_empty_delta_vs_a0": 0.0,
+      "home_empty_precision_drop_vs_a0": 0.0
+    },
+    "A2_mask_floor005": {
+      "report_path": "/tmp/beta6_s1_a2_seed22.json",
+      "livingroom_active_mae_minutes": 88.39315807891133,
+      "bedroom_sleep_duration_mae_minutes": 44.717467701979196,
+      "home_empty_false_empty_rate": 0.3144860510219305,
+      "home_empty_precision": 0.8910143728673353,
+      "home_empty_recall": 0.8791960004081216,
+      "hard_gate_checks_passed": 4,
+      "hard_gate_checks_total": 5,
+      "timeline_gate_pass_rate": 1.0,
+      "false_empty_delta_vs_a0": 0.0,
+      "home_empty_precision_drop_vs_a0": 0.0
+    },
+    "lr_occ_focus_v1": {
+      "report_path": "/tmp/beta6_s1_occ_v1_seed22.json",
+      "livingroom_active_mae_minutes": 108.28316965053868,
+      "bedroom_sleep_duration_mae_minutes": 87.99008903598836,
+      "home_empty_false_empty_rate": 0.3488487741807151,
+      "home_empty_precision": 0.8834020344391995,
+      "home_empty_recall": 0.9038023330952624,
+      "hard_gate_checks_passed": 4,
+      "hard_gate_checks_total": 5,
+      "timeline_gate_pass_rate": 1.0,
+      "false_empty_delta_vs_a0": 0.03436272315878458,
+      "home_empty_precision_drop_vs_a0": 0.007612338428135801
+    },
+    "lr_occ_focus_v2": {
+      "report_path": "/tmp/beta6_s1_occ_v2_seed22.json",
+      "livingroom_active_mae_minutes": 108.28316965053868,
+      "bedroom_sleep_duration_mae_minutes": 90.95415926420738,
+      "home_empty_false_empty_rate": 0.3454672037396191,
+      "home_empty_precision": 0.8841065679061776,
+      "home_empty_recall": 0.9012005577662143,
+      "hard_gate_checks_passed": 4,
+      "hard_gate_checks_total": 5,
+      "timeline_gate_pass_rate": 1.0,
+      "false_empty_delta_vs_a0": 0.030981152717688587,
+      "home_empty_precision_drop_vs_a0": 0.006907804961157726
+    },
+    "lr_occ_focus_v3": {
+      "report_path": "/tmp/beta6_s1_occ_v3_seed22.json",
+      "livingroom_active_mae_minutes": 108.64248320814282,
+      "bedroom_sleep_duration_mae_minutes": 60.015750029835736,
+      "home_empty_false_empty_rate": 0.3902232831070665,
+      "home_empty_precision": 0.871768474033402,
+      "home_empty_recall": 0.9071693364622657,
+      "hard_gate_checks_passed": 4,
+      "hard_gate_checks_total": 5,
+      "timeline_gate_pass_rate": 1.0,
+      "false_empty_delta_vs_a0": 0.075737232085136,
+      "home_empty_precision_drop_vs_a0": 0.01924589883393335
+    }
+  }
+}

@@ -102,6 +102,25 @@ def test_decide_room_timeline_fragmentation_blocks():
     assert decision.reason_code == ReasonCode.FAIL_TIMELINE_FRAGMENTATION
 
 
+def test_decide_room_episode_count_ratio_is_watch_only():
+    decision = GateEngine().decide_room(
+        room="bedroom",
+        report={
+            "passed": True,
+            "metrics_passed": True,
+            "timeline_metrics": {
+                "duration_mae_minutes": 8.0,
+                "fragmentation_rate": 0.1,
+                "episode_count_ratio": 3.0,
+            },
+        },
+    )
+    assert decision.passed is True
+    assert decision.reason_code == ReasonCode.PASS
+    assert decision.details["episode_count_ratio_watch"]["status"] == "watch"
+    assert decision.details["episode_count_ratio_watch"]["blocking"] is False
+
+
 def test_decide_run_empty_is_incomplete():
     run_decision = GateEngine().decide_run([])
     assert run_decision.passed is False

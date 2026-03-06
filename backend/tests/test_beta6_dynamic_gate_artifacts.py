@@ -47,3 +47,28 @@ def test_gate_engine_emits_signed_eval_and_rejection_artifacts(tmp_path: Path):
 
     assert (tmp_path / "run_123_evaluation_report.json").exists()
     assert (tmp_path / "run_123_rejection_artifact.json").exists()
+
+
+def test_build_room_evaluation_report_normalizes_episode_timeline_metrics():
+    report = build_room_evaluation_report(
+        room="bedroom",
+        y_true=["sleep", "sleep", "out", "out"],
+        y_pred=["sleep", "out", "out", "out"],
+        timeline_metrics={
+            "timeline_metrics_binary": {
+                "segment_duration_mae_minutes": 4.0,
+                "fragmentation_rate": 0.2,
+                "num_pred_episodes": 6,
+                "num_gt_episodes": 4,
+                "matched_episodes": 3,
+            }
+        },
+    )
+
+    timeline = report["timeline_metrics"]
+    assert timeline["duration_mae_minutes"] == 4.0
+    assert timeline["fragmentation_rate"] == 0.2
+    assert timeline["episode_count_ratio"] == 1.5
+    assert timeline["boundary_precision"] == 0.5
+    assert timeline["boundary_recall"] == 0.75
+    assert abs(float(timeline["boundary_f1"]) - 0.6) < 1e-9

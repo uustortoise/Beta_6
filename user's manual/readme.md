@@ -1,6 +1,6 @@
-# Beta 5.5 User Manual Index
+# Beta 6 User Manual Index
 
-This index is the authoritative entrypoint for operations, ML, and labeling documentation in Beta 5.5.
+This index is the authoritative entrypoint for operations, ML, and labeling documentation in Beta 6 runtime.
 
 ## Start Here
 1. Operations and startup:
@@ -29,6 +29,11 @@ This index is the authoritative entrypoint for operations, ML, and labeling docu
 2. For day-to-day operations, use `operation_manual.md` and `golden_sample_harvesting.md`.
 3. For labeling decisions, use `labeling_guide.md`.
 4. If any older document conflicts with these files, treat the newer files above as authoritative.
+
+## Runtime notes
+1. Watcher training is resident-batched aggregate retraining (`run_daily_analysis.py` -> `train_files(...)`), not per-file immediate train+predict.
+2. Training promotion is gate-controlled and may be deferred to candidate versions until run-level gates pass.
+3. Non-train input files go through `process_file(...)` -> `UnifiedPipeline.predict(...)`.
 
 ## Current Runtime Endpoints
 - Web UI: `http://localhost:3002`

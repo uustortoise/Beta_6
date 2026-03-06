@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
 import subprocess
 import sys
@@ -64,6 +65,17 @@ ROOM_DURATION_KEY = {
     "bathroom": "bathroom_use_minutes",
     "entrance": "out_minutes",
 }
+HOME_EMPTY_EVAL_ROOMS = {"bedroom", "livingroom", "kitchen", "bathroom"}
+HOME_EMPTY_ALIGNMENT_TOLERANCE_SECONDS = float(
+    max(float(os.getenv("BACKTEST_HOME_EMPTY_ALIGNMENT_TOLERANCE_SECONDS", "15")), 0.0)
+)
+HOME_EMPTY_MIN_EMPTY_DURATION_SECONDS = float(
+    max(float(os.getenv("BACKTEST_HOME_EMPTY_MIN_EMPTY_DURATION_SECONDS", "600")), 0.0)
+)
+HOME_EMPTY_REQUIRE_FULL_COVERAGE = bool(
+    str(os.getenv("BACKTEST_HOME_EMPTY_REQUIRE_FULL_COVERAGE", "true")).strip().lower()
+    not in {"0", "false", "no", "off"}
+)
 
 
 @dataclass(frozen=True)
@@ -1579,6 +1591,311 @@ def _estimate_window_seconds(timestamps: pd.Series, *, default_seconds: int = 10
     if len(delta) == 0:
         return float(max(default_seconds, 1))
     return float(max(np.median(delta.to_numpy(dtype=float)), 1.0))
+
+
+def _apply_min_empty_duration_filter(
+    *,
+    timestamps: pd.Series,
+    empty_mask: np.ndarray,
+    min_empty_duration_seconds: float,
+) -> np.ndarray:
+    """
+    Suppress short empty runs to reduce transient false-empty declarations.
+    """
+    mask = np.asarray(empty_mask, dtype=bool).copy()
+    n = int(len(mask))
+    min_duration = float(max(min_empty_duration_seconds, 0.0))
+    if n <= 0 or min_duration <= 0.0:
+        return mask
+
+    window_seconds = _estimate_window_seconds(pd.to_datetime(timestamps, errors="coerce"), default_seconds=10)
+    min_windows = int(max(math.ceil(min_duration / max(window_seconds, 1.0)), 1))
+    if min_windows <= 1:
+        return mask
+
+    i = 0
+    while i < n:
+        if not bool(mask[i]):
+            i += 1
+            continue
+        start = i
+        while i < n and bool(mask[i]):
+            i += 1
+        end = i
+        if (end - start) < min_windows:
+            mask[start:end] = False
+    return mask
+
+
+def _build_aligned_home_empty_frame(
+    df: pd.DataFrame,
+    *,
+    label_col: str,
+    rooms: Optional[Sequence[str]] = None,
+    reference_timestamps: Optional[pd.Series] = None,
+    alignment_tolerance_seconds: float = HOME_EMPTY_ALIGNMENT_TOLERANCE_SECONDS,
+    require_full_coverage: bool = HOME_EMPTY_REQUIRE_FULL_COVERAGE,
+    min_empty_duration_seconds: float = HOME_EMPTY_MIN_EMPTY_DURATION_SECONDS,
+) -> pd.DataFrame:
+    """
+    Build timestamp-aligned household-empty status from room-level labels.
+    """
+    out_cols = ["timestamp", "home_empty", "room_coverage", "rooms_total", "rooms_required"]
+    if df.empty or "timestamp" not in df.columns or "room" not in df.columns or label_col not in df.columns:
+        return pd.DataFrame(columns=out_cols)
+
+    frame = df[["timestamp", "room", label_col]].copy()
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
+    frame = frame.dropna(subset=["timestamp"])
+    if frame.empty:
+        return pd.DataFrame(columns=out_cols)
+    frame["room"] = frame["room"].astype(str).str.strip().str.lower()
+    frame[label_col] = frame[label_col].astype(str).str.strip().str.lower()
+
+    if rooms is None:
+        room_list = sorted({str(r).strip().lower() for r in frame["room"].dropna().tolist() if str(r).strip()})
+    else:
+        room_list = sorted({str(r).strip().lower() for r in rooms if str(r).strip()})
+    if not room_list:
+        return pd.DataFrame(columns=out_cols)
+
+    room_frames: Dict[str, pd.DataFrame] = {}
+    for room in room_list:
+        room_df = frame.loc[frame["room"] == room, ["timestamp", label_col]].copy().sort_values("timestamp")
+        room_df = room_df.drop_duplicates(subset=["timestamp"], keep="last")
+        room_frames[room] = room_df
+
+    if reference_timestamps is None:
+        ref_ts = pd.Series(sorted(frame["timestamp"].unique()))
+    else:
+        ref_ts = (
+            pd.to_datetime(pd.Series(reference_timestamps), errors="coerce")
+            .dropna()
+            .sort_values()
+            .drop_duplicates()
+            .reset_index(drop=True)
+        )
+    if ref_ts.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    status_df = (
+        pd.DataFrame({"timestamp": pd.to_datetime(ref_ts, errors="coerce")})
+        .dropna(subset=["timestamp"])
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
+    if status_df.empty:
+        return pd.DataFrame(columns=out_cols)
+
+    tolerance = pd.Timedelta(seconds=float(max(alignment_tolerance_seconds, 0.0)))
+    label_cols: List[str] = []
+    for room in room_list:
+        col_name = f"label_{room}"
+        label_cols.append(col_name)
+        room_df = room_frames.get(room, pd.DataFrame(columns=["timestamp", label_col]))
+        if room_df.empty:
+            status_df[col_name] = np.nan
+            continue
+        aligned = pd.merge_asof(
+            status_df[["timestamp"]],
+            room_df[["timestamp", label_col]],
+            on="timestamp",
+            direction="nearest",
+            tolerance=tolerance,
+        )
+        status_df[col_name] = aligned[label_col].to_numpy()
+
+    rooms_total = int(len(room_list))
+    rooms_required = int(rooms_total if bool(require_full_coverage) else max(math.ceil(rooms_total * 0.75), 1))
+    coverage = status_df[label_cols].notna().sum(axis=1).astype(int)
+    all_unoccupied = (status_df[label_cols] == "unoccupied").all(axis=1)
+    if bool(require_full_coverage):
+        home_empty_mask = (coverage >= rooms_total) & all_unoccupied
+    else:
+        home_empty_mask = (coverage >= rooms_required) & all_unoccupied
+
+    home_empty_mask = _apply_min_empty_duration_filter(
+        timestamps=status_df["timestamp"],
+        empty_mask=np.asarray(home_empty_mask, dtype=bool),
+        min_empty_duration_seconds=float(max(min_empty_duration_seconds, 0.0)),
+    )
+
+    return pd.DataFrame(
+        {
+            "timestamp": status_df["timestamp"].to_numpy(),
+            "home_empty": np.asarray(home_empty_mask, dtype=bool),
+            "room_coverage": coverage.to_numpy(dtype=int),
+            "rooms_total": np.full(shape=(len(status_df),), fill_value=rooms_total, dtype=int),
+            "rooms_required": np.full(shape=(len(status_df),), fill_value=rooms_required, dtype=int),
+        }
+    )
+
+
+def _build_home_empty_status(
+    df: pd.DataFrame,
+    *,
+    label_col: str,
+    rooms: Optional[Sequence[str]] = None,
+    reference_timestamps: Optional[pd.Series] = None,
+    alignment_tolerance_seconds: float = HOME_EMPTY_ALIGNMENT_TOLERANCE_SECONDS,
+    require_full_coverage: bool = HOME_EMPTY_REQUIRE_FULL_COVERAGE,
+    min_empty_duration_seconds: float = HOME_EMPTY_MIN_EMPTY_DURATION_SECONDS,
+) -> Dict[pd.Timestamp, bool]:
+    """
+    Compute timestamp-aligned home-empty status.
+    """
+    aligned = _build_aligned_home_empty_frame(
+        df,
+        label_col=label_col,
+        rooms=rooms,
+        reference_timestamps=reference_timestamps,
+        alignment_tolerance_seconds=alignment_tolerance_seconds,
+        require_full_coverage=bool(require_full_coverage),
+        min_empty_duration_seconds=float(max(min_empty_duration_seconds, 0.0)),
+    )
+    if aligned.empty:
+        return {}
+    return {pd.Timestamp(ts): bool(val) for ts, val in zip(aligned["timestamp"], aligned["home_empty"])}
+
+
+def _compute_home_empty_metrics(
+    *,
+    pred_df: pd.DataFrame,
+    gt_df: pd.DataFrame,
+    tolerance_seconds: float = 15.0,
+    min_empty_duration_seconds: Optional[float] = None,
+    require_full_room_coverage: Optional[bool] = None,
+) -> Dict[str, object]:
+    """
+    Compute direct home-empty safety metrics from room-window predictions/ground-truth.
+    """
+    pred_rooms = {
+        str(v).strip().lower()
+        for v in pred_df.get("room", pd.Series(dtype=object)).tolist()
+        if str(v).strip()
+    }
+    gt_rooms = {
+        str(v).strip().lower()
+        for v in gt_df.get("room", pd.Series(dtype=object)).tolist()
+        if str(v).strip()
+    }
+    room_scope = sorted((pred_rooms & gt_rooms) & set(HOME_EMPTY_EVAL_ROOMS))
+    if not room_scope:
+        room_scope = sorted(pred_rooms & gt_rooms)
+
+    if not room_scope:
+        return {
+            "evaluated": False,
+            "reason": "missing_room_scope",
+            "home_empty_precision": None,
+            "home_empty_recall": None,
+            "home_empty_false_empty_rate": None,
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "tn": 0,
+            "total_occupied_windows": 0,
+            "total_empty_windows": 0,
+            "rooms": [],
+        }
+
+    ref_timestamps = pd.to_datetime(gt_df["timestamp"], errors="coerce").dropna().sort_values().drop_duplicates()
+    if ref_timestamps.empty:
+        return {
+            "evaluated": False,
+            "reason": "missing_reference_timestamps",
+            "home_empty_precision": None,
+            "home_empty_recall": None,
+            "home_empty_false_empty_rate": None,
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "tn": 0,
+            "total_occupied_windows": 0,
+            "total_empty_windows": 0,
+            "rooms": room_scope,
+        }
+
+    duration_seconds = (
+        float(max(min_empty_duration_seconds, 0.0))
+        if min_empty_duration_seconds is not None
+        else float(max(HOME_EMPTY_MIN_EMPTY_DURATION_SECONDS, 0.0))
+    )
+    full_coverage = (
+        bool(require_full_room_coverage)
+        if require_full_room_coverage is not None
+        else bool(HOME_EMPTY_REQUIRE_FULL_COVERAGE)
+    )
+    gt_aligned = _build_aligned_home_empty_frame(
+        gt_df,
+        label_col="label",
+        rooms=room_scope,
+        reference_timestamps=ref_timestamps,
+        alignment_tolerance_seconds=float(max(tolerance_seconds, 0.0)),
+        require_full_coverage=bool(full_coverage),
+        min_empty_duration_seconds=float(max(duration_seconds, 0.0)),
+    )
+    pred_aligned = _build_aligned_home_empty_frame(
+        pred_df,
+        label_col="label",
+        rooms=room_scope,
+        reference_timestamps=ref_timestamps,
+        alignment_tolerance_seconds=float(max(tolerance_seconds, 0.0)),
+        require_full_coverage=bool(full_coverage),
+        min_empty_duration_seconds=float(max(duration_seconds, 0.0)),
+    )
+    if gt_aligned.empty or pred_aligned.empty:
+        return {
+            "evaluated": False,
+            "reason": "missing_home_empty_status",
+            "home_empty_precision": None,
+            "home_empty_recall": None,
+            "home_empty_false_empty_rate": None,
+            "tp": 0,
+            "fp": 0,
+            "fn": 0,
+            "tn": 0,
+            "total_occupied_windows": 0,
+            "total_empty_windows": 0,
+            "rooms": room_scope,
+        }
+    y_true_empty = gt_aligned["home_empty"].astype(bool).to_numpy(dtype=bool)
+    y_pred_empty = pred_aligned["home_empty"].astype(bool).to_numpy(dtype=bool)
+    tp = int(np.sum(y_pred_empty & y_true_empty))
+    fp = int(np.sum(y_pred_empty & (~y_true_empty)))  # false-empty windows (safety-critical)
+    fn = int(np.sum((~y_pred_empty) & y_true_empty))
+    tn = int(np.sum((~y_pred_empty) & (~y_true_empty)))
+
+    precision = float(tp / (tp + fp)) if (tp + fp) > 0 else 0.0
+    recall = float(tp / (tp + fn)) if (tp + fn) > 0 else 0.0
+    total_occupied_windows = int(np.sum(~y_true_empty))
+    false_empty_rate = (
+        float(fp / total_occupied_windows) if total_occupied_windows > 0 else 0.0
+    )
+
+    return {
+        "evaluated": True,
+        "reason": "ok",
+        "home_empty_precision": precision,
+        "home_empty_recall": recall,
+        "home_empty_false_empty_rate": false_empty_rate,
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "tn": tn,
+        "total_occupied_windows": total_occupied_windows,
+        "total_empty_windows": int(np.sum(y_true_empty)),
+        "rooms": room_scope,
+        "alignment_tolerance_seconds": float(max(tolerance_seconds, 0.0)),
+        "min_empty_duration_seconds": float(max(duration_seconds, 0.0)),
+        "require_full_room_coverage": bool(full_coverage),
+        "gt_room_coverage_mean": (
+            float(gt_aligned["room_coverage"].mean()) if "room_coverage" in gt_aligned.columns else None
+        ),
+        "pred_room_coverage_mean": (
+            float(pred_aligned["room_coverage"].mean()) if "room_coverage" in pred_aligned.columns else None
+        ),
+    }
 
 
 def _compute_binary_episode_metrics(
@@ -5304,6 +5621,7 @@ def run_backtest(
         "splits": [],
         "summary": {},
         "classification_summary": {},
+        "home_empty_summary": {},
         "gate_summary": {},
         "leakage_checklist": [
             "temporal_train_fit_then_calib_then_test",
@@ -5564,6 +5882,12 @@ def run_backtest(
     hard_gate_results_eligible: List[bool] = []
     timeline_gate_totals: List[int] = []
     timeline_gate_passed: List[int] = []
+    home_empty_tp_total = 0
+    home_empty_fp_total = 0
+    home_empty_fn_total = 0
+    home_empty_tn_total = 0
+    home_empty_evaluated_splits = 0
+    home_empty_total_splits = 0
     room_failure_replay_bank: Dict[str, Dict[int, Dict[str, np.ndarray]]] = defaultdict(dict)
 
     for split in splits:
@@ -5574,6 +5898,8 @@ def run_backtest(
             "rooms": {},
         }
         split_room_outputs: Dict[str, Dict[str, object]] = {}
+        split_pred_rows: List[pd.DataFrame] = []
+        split_gt_rows: List[pd.DataFrame] = []
 
         for room in ROOMS:
             room_data = room_day_data.get(room, {})
@@ -6661,6 +6987,26 @@ def run_backtest(
             test_df = work["test_df"]
             y_test = np.asarray(work["y_test"], dtype=object)
             y_pred = np.asarray(work["y_pred"], dtype=object)
+            room_key_eval = str(work.get("room_key", "")).strip().lower()
+            if room_key_eval in HOME_EMPTY_EVAL_ROOMS:
+                split_pred_rows.append(
+                    pd.DataFrame(
+                        {
+                            "timestamp": pd.to_datetime(test_df["timestamp"], errors="coerce"),
+                            "room": str(room_key_eval),
+                            "label": np.asarray(y_pred, dtype=object),
+                        }
+                    )
+                )
+                split_gt_rows.append(
+                    pd.DataFrame(
+                        {
+                            "timestamp": pd.to_datetime(test_df["timestamp"], errors="coerce"),
+                            "room": str(room_key_eval),
+                            "label": np.asarray(y_test, dtype=object),
+                        }
+                    )
+                )
             pred_df = test_df[["timestamp"]].copy()
             pred_df["activity"] = y_pred
 
@@ -6701,7 +7047,6 @@ def run_backtest(
 
             cls = _classification_metrics(y_test, y_pred)
             label_recall_summary = _label_recall_summary(y_test, y_pred)
-            room_key_eval = str(work.get("room_key", "")).strip().lower()
             prediction_smoothing_applied = bool(
                 ((work.get("room_prediction_smoothing") or {}) if isinstance(work, dict) else {}).get("applied", False)
             )
@@ -6859,6 +7204,35 @@ def run_backtest(
                 "error_episodes": error_episodes,
             }
 
+        home_empty_total_splits += 1
+        if split_pred_rows and split_gt_rows:
+            split_home_empty = _compute_home_empty_metrics(
+                pred_df=pd.concat(split_pred_rows, ignore_index=True),
+                gt_df=pd.concat(split_gt_rows, ignore_index=True),
+                tolerance_seconds=15.0,
+            )
+        else:
+            split_home_empty = {
+                "evaluated": False,
+                "reason": "no_room_predictions_in_scope",
+                "home_empty_precision": None,
+                "home_empty_recall": None,
+                "home_empty_false_empty_rate": None,
+                "tp": 0,
+                "fp": 0,
+                "fn": 0,
+                "tn": 0,
+                "total_occupied_windows": 0,
+                "total_empty_windows": 0,
+            }
+        split_payload["home_empty_metrics"] = split_home_empty
+        if bool(split_home_empty.get("evaluated", False)):
+            home_empty_evaluated_splits += 1
+            home_empty_tp_total += int(split_home_empty.get("tp", 0))
+            home_empty_fp_total += int(split_home_empty.get("fp", 0))
+            home_empty_fn_total += int(split_home_empty.get("fn", 0))
+            home_empty_tn_total += int(split_home_empty.get("tn", 0))
+
         report["splits"].append(split_payload)
 
     summary: Dict[str, Dict[str, float]] = {}
@@ -6870,6 +7244,34 @@ def run_backtest(
     for room, metrics_map in room_cls_metrics.items():
         cls_summary[room] = {metric: _safe_mean_std(values) for metric, values in metrics_map.items()}
     report["classification_summary"] = cls_summary
+
+    home_empty_precision = (
+        float(home_empty_tp_total / (home_empty_tp_total + home_empty_fp_total))
+        if (home_empty_tp_total + home_empty_fp_total) > 0
+        else 0.0
+    )
+    home_empty_recall = (
+        float(home_empty_tp_total / (home_empty_tp_total + home_empty_fn_total))
+        if (home_empty_tp_total + home_empty_fn_total) > 0
+        else 0.0
+    )
+    home_empty_false_empty_rate = (
+        float(home_empty_fp_total / (home_empty_fp_total + home_empty_tn_total))
+        if (home_empty_fp_total + home_empty_tn_total) > 0
+        else 0.0
+    )
+    report["home_empty_summary"] = {
+        "evaluated": bool(home_empty_evaluated_splits > 0),
+        "splits_evaluated": int(home_empty_evaluated_splits),
+        "splits_total": int(home_empty_total_splits),
+        "home_empty_precision": home_empty_precision if home_empty_evaluated_splits > 0 else None,
+        "home_empty_recall": home_empty_recall if home_empty_evaluated_splits > 0 else None,
+        "home_empty_false_empty_rate": home_empty_false_empty_rate if home_empty_evaluated_splits > 0 else None,
+        "tp": int(home_empty_tp_total),
+        "fp": int(home_empty_fp_total),
+        "fn": int(home_empty_fn_total),
+        "tn": int(home_empty_tn_total),
+    }
 
     total_checks_all = int(len(hard_gate_results_all))
     pass_checks_all = int(sum(1 for v in hard_gate_results_all if v))
@@ -6900,6 +7302,10 @@ def run_backtest(
         "timeline_gate_pass_rate": (
             float(timeline_pass_checks / timeline_total_checks) if timeline_total_checks > 0 else 1.0
         ),
+        "home_empty_evaluated": bool(home_empty_evaluated_splits > 0),
+        "home_empty_precision": home_empty_precision if home_empty_evaluated_splits > 0 else None,
+        "home_empty_false_empty_rate": home_empty_false_empty_rate if home_empty_evaluated_splits > 0 else None,
+        "home_empty_splits_evaluated": int(home_empty_evaluated_splits),
     }
 
     return report

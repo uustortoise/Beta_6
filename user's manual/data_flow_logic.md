@@ -1,59 +1,77 @@
-# Beta 5.5 Data Flow Logic
+# Beta 6 Data Flow Logic
 
 ## 1. Scope
-This document summarizes the operational data flow from raw sensor files to final ADL timeline output.
+This document summarizes the active Beta 6 runtime data flow from raw files to timeline outputs.
 
-For code-level details, use:
+For code-level detail, use:
 - `ml_adl_e2e_technical_flow.md`
 
 ## 2. High-Level Pipeline
 
 ```mermaid
 flowchart LR
-  A[Raw files in data/raw] --> B[Watcher scan: run_daily_analysis.py]
-  B --> C[Load + clean + resample to 10s]
-  C --> D{File type}
-  D -->|Train| E[Train and predict]
-  D -->|Input| F[Predict only]
-  E --> G[Persist row predictions to adl_history]
-  F --> G
-  G --> H[Regenerate activity_segments]
-  H --> I[Timeline/ADL APIs + UI]
-  G --> J[Household/context/trajectory/anomaly sidecars]
+  A[Raw files in data/raw] --> B[Watcher scan every 30s: run_daily_analysis.py]
+  B --> C{File type}
+  C -->|*_train_*| D[Batch by resident and resolve retrain set]
+  C -->|non-train| E[process_file predict path]
+  D --> F[UnifiedPipeline.train_from_files]
+  F --> G[Per-room gates and versioned candidate save]
+  G --> H[Run-level gate checks and promote/rollback decisions]
+  H --> I[Training-label timeline fallback payload]
+  E --> J[UnifiedPipeline.predict + golden sample overlay]
+  I --> K[Persist ADL rows to adl_history]
+  J --> K
+  K --> L[Regenerate activity_segments]
+  L --> M[Web UI / APIs]
+  K --> N[Sleep + ICOPE + insight + household + optional sidecars]
 ```
 
-## 3. Core Runtime Sequence
-1. File arrives in `data/raw`.
-2. `backend/run_daily_analysis.py` detects and routes file.
-3. `backend/process_data.py` loads sheets via `backend/utils/data_loader.py`.
-4. Data is normalized to canonical 10-second timeline.
-5. `backend/ml/pipeline.py` performs train+predict (train files) or predict-only (input files).
-6. Per-row outputs are stored in `adl_history`.
-7. Segmentation logic regenerates `activity_segments` for timeline consumption.
-8. Downstream services compute household/context/sleep/ICOPE/anomaly outputs.
+## 3. Runtime Sequence (actual)
+1. Watcher `backend/run_daily_analysis.py` scans `data/raw` every 30 seconds.
+2. It ignores transient/system files (`~$*`, dotfiles) and `_manual_` files.
+3. Training files are grouped by resident and executed once per resident batch via `train_files(...)`.
+4. Inference files are processed one-by-one via `process_file(...)`.
 
-## 4. Label Authority Chain
-1. Manual correction / golden sample (`is_corrected=1`)
-2. Training file label (`activity` in train sheets)
-3. Model prediction
+## 4. Training Path
+1. Retrain input set is resolved by `RETRAIN_INPUT_MODE`:
+   - `auto_aggregate` (default): incoming + archived history (deduplicated by training identity).
+   - `incoming_only`: current incoming batch only.
+   - `manifest_only`: explicit list from `RETRAIN_MANIFEST_PATH`.
+2. `UnifiedPipeline.train_from_files(...)` performs room-level training with:
+   - leakage-free preprocessing/scaling,
+   - pre-training gate stack (`CoverageContract`, `PostGapRetention`, `ClassCoverage`),
+   - post-training checks (`StatisticalValidity`, release/lane-B checks),
+   - versioned artifact save via model registry.
+3. Run-level promotion control in watcher then applies:
+   - decision-trace artifact gate,
+   - optional walk-forward promotion gate,
+   - backbone alignment gate,
+   - Beta6 authority gate,
+   - global gate with rollback/deactivation safeguards.
+4. Timeline rows for training runs are materialized from labels using `_build_legacy_training_timeline_results(...)`, then persisted and segmented.
 
-The system protects corrected rows from accidental overwrite.
+## 5. Inference Path
+1. `process_file(...)` calls `UnifiedPipeline.predict(...)`.
+2. Prediction pipeline includes:
+   - calibrated class thresholds to emit `low_confidence`,
+   - optional inference hysteresis,
+   - Beta6 HMM runtime hook,
+   - Beta6 unknown-abstain runtime hook,
+   - scoped runtime unknown conversion caps.
+3. Golden samples are then overlaid before persistence.
 
-## 5. Event-First Evaluation Path
-Evaluation for model promotion is separate from runtime inference.
+## 6. Label Authority Chain
+1. Manual correction / golden sample (`is_corrected=1`) is highest authority.
+2. Training labels (`activity` in train sheets) are next.
+3. Model prediction is last.
 
-1. Validate incoming pack (`validate_label_pack.py`).
-2. Diff baseline vs candidate (`diff_label_pack.py`).
-3. Run smoke (`run_event_first_smoke.py`).
-4. Run matrix profile (`run_event_first_matrix.py`).
-5. Apply go/no-go policy (`backend/config/event_first_go_no_go.yaml`).
+Corrected rows are protected from overwrite in persistence logic.
 
-## 6. Output Tables Most Used by Team
-- `adl_history`: atomic predictions and corrected labels
-- `activity_segments`: timeline blocks shown to users
-- `household_segments`, `context_episodes`, `trajectory_events`: downstream context outputs
+## 7. Primary Output Tables
+- `adl_history`: atomic row-level timeline source with correction/model metadata.
+- `activity_segments`: contiguous timeline blocks consumed by UI.
+- `household_segments`, `context_episodes`, `trajectory_events`, `routine_anomalies`: downstream analytics outputs.
 
-## 7. Operational Truth
-- Runtime pipeline creates the resident timeline.
-- Event-first matrix pipeline controls release/promotion decisions.
-- Keep these paths separate in analysis and incident triage.
+## 8. Operational Truth
+- Watcher runtime builds product timeline outputs.
+- Event-first scripts are evaluation/release tooling and remain a separate path.

@@ -1,7 +1,7 @@
-# Beta 5.5 Operation Manual
+# Beta 6 Operation Manual
 
 ## 1. Purpose
-This manual is for engineering and ops execution of Beta 5.5 runtime and model operations.
+This manual is for engineering and ops execution of Beta 6 runtime and model operations.
 
 ## 2. Runtime Prerequisites
 - macOS/Linux shell with `bash`/`zsh`
@@ -13,7 +13,7 @@ This manual is for engineering and ops execution of Beta 5.5 runtime and model o
 
 ### Recommended team entrypoint
 ```bash
-cd /Users/dicksonng/DT/Development/Beta_5.5
+cd /Users/dicksonng/DT/Development/Beta_6
 ./ops_doctor.sh preflight
 ./start-ops.sh --no-scan --skip-pull --skip-install
 ./ops_doctor.sh running
@@ -21,7 +21,7 @@ cd /Users/dicksonng/DT/Development/Beta_5.5
 
 ### Stop services
 ```bash
-cd /Users/dicksonng/DT/Development/Beta_5.5
+cd /Users/dicksonng/DT/Development/Beta_6
 ./stop.sh
 ```
 
@@ -48,12 +48,12 @@ Use this workflow when a new corrected training pack arrives.
 
 ### 6.1 Validate pack schema
 ```bash
-cd /Users/dicksonng/DT/Development/Beta_5.5
+cd /Users/dicksonng/DT/Development/Beta_6
 python3 backend/scripts/validate_label_pack.py \
   --pack-dir "/Users/dicksonng/DT/Development/New training files" \
   --elder-id HK0011_jessica \
   --min-day 4 --max-day 10 \
-  --output /tmp/beta55_label_pack_validation.json
+  --output /tmp/beta6_label_pack_validation.json
 ```
 
 ### 6.2 Diff old vs new labels
@@ -63,8 +63,8 @@ python3 backend/scripts/diff_label_pack.py \
   --candidate-dir "/Users/dicksonng/DT/Development/New training files" \
   --elder-id HK0011_jessica \
   --min-day 4 --max-day 10 \
-  --json-output /tmp/beta55_label_pack_diff.json \
-  --csv-output /tmp/beta55_label_pack_diff.csv
+  --json-output /tmp/beta6_label_pack_diff.json \
+  --csv-output /tmp/beta6_label_pack_diff.csv
 ```
 
 ### 6.3 Run smoke gate
@@ -74,8 +74,8 @@ python3 backend/scripts/run_event_first_smoke.py \
   --elder-id HK0011_jessica \
   --day 7 --seed 11 \
   --expectation-config backend/config/event_first_go_no_go.yaml \
-  --diff-report /tmp/beta55_label_pack_diff.json \
-  --output /tmp/beta55_smoke.json
+  --diff-report /tmp/beta6_label_pack_diff.json \
+  --output /tmp/beta6_smoke.json
 ```
 
 ### 6.4 Run matrix profile
@@ -85,19 +85,20 @@ python3 backend/scripts/run_event_first_matrix.py \
   --profile anchor_top2_frag_v3 \
   --data-dir "/Users/dicksonng/DT/Development/New training files" \
   --elder-id HK0011_jessica \
-  --output-dir /tmp/beta55_matrix \
+  --output-dir /tmp/beta6_matrix \
   --max-workers 3
 ```
 
 ## 7. Release Policy Notes (Current)
-- Beta 5.5 release policy is configured in `backend/config/event_first_go_no_go.yaml`.
+- Release policy is configured in `backend/config/event_first_go_no_go.yaml`.
 - LivingRoom episode metrics are currently treated as informational for release (Option Y policy), while core room quality and MAE non-regression guards remain enforced.
 
-## 8. Scoped Runtime `unknown` (Default Off)
-Use this only for targeted ambiguity handling (for example LivingRoom night windows).
+## 8. Scoped Runtime `unknown` (Fail-Closed Enabled)
+Runtime scoped `unknown` handling is enabled by default in current Beta 6 prediction code and is room-scoped by policy (default includes `livingroom`).
+Use these settings for targeted ambiguity handling windows (for example LivingRoom at night).
 
 Flags:
-- `RUNTIME_UNKNOWN_ENABLED` (`true|false`)
+- `RUNTIME_UNKNOWN_ENABLED` (should remain `true` in fail-closed runtime)
 - `RUNTIME_UNKNOWN_ROOMS` (comma-separated normalized rooms, example `livingroom`)
 - `RUNTIME_UNKNOWN_NIGHT_ONLY` (`true|false`)
 - `RUNTIME_UNKNOWN_NIGHT_HOURS` (`22-6` format)
@@ -129,4 +130,4 @@ export RUNTIME_UNKNOWN_RATE_ROOM_CAP=0.25
 - Technical flow: `ml_adl_e2e_technical_flow.md`
 - Labeling rules: `labeling_guide.md`
 - Golden sample SOP: `golden_sample_harvesting.md`
-- Planning SOP: `/Users/dicksonng/DT/Development/Beta_5.5/docs/planning/golden_sample_ops_sop_2026-02-25.md`
+- Planning SOP: `/Users/dicksonng/DT/Development/Beta_6/docs/planning/golden_sample_ops_sop_2026-02-25.md`

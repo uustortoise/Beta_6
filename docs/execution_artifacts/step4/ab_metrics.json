@@ -1,0 +1,34 @@
+{
+  "runtime_flag_check": {
+    "ENABLE_BETA6_HMM_RUNTIME": {
+      "expected": "true",
+      "actual": "true",
+      "pass": true
+    },
+    "ENABLE_BETA6_CRF_RUNTIME": {
+      "expected": "false",
+      "actual": "false",
+      "pass": true
+    },
+    "BETA6_RUNTIME_ALLOW_CRF_CANARY": {
+      "expected": "true",
+      "actual": "true",
+      "pass": true
+    }
+  },
+  "runtime_preflight_reason": "ok",
+  "resident_coverage": {
+    "available_residents": [
+      "HK001_jessica"
+    ],
+    "available_resident_count": 1,
+    "required_min_residents_for_matrix": 2,
+    "status": "insufficient"
+  },
+  "pass_requirements": {
+    "runtime_flags_configured": true,
+    "runtime_preflight_ok": true,
+    "soak_test_subset_passed": true,
+    "resident_coverage_min2": false
+  }
+}

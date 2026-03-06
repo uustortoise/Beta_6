@@ -1,0 +1,124 @@
+Step 1 validation run (2026-03-06)
+
+1) cd /Users/dicksonng/DT/Development/Beta_6/backend && pytest -q tests/test_run_daily_analysis_thresholds.py
+- Result: PASS
+- Summary: 44 passed in 0.50s
+
+2) cd /Users/dicksonng/DT/Development/Beta_6/backend && pytest -q tests/test_training.py -k "timeline_multitask or timeline_native or lane_b_event_gates"
+- Result: PASS
+- Summary: 12 passed, 58 deselected in 2.98s
+
+2b) cd /Users/dicksonng/DT/Development/Beta_6/backend && pytest -q tests/test_training.py -k "timeline_activity_loss_weights"
+- Result: PASS
+- Summary: 3 passed, 67 deselected in 0.15s
+
+Additional plan gate checks (sanity pass):
+
+3) pytest -q tests/test_process_data_arbitration.py
+- PASS (2 passed)
+
+4) pytest -q tests/test_training.py -k "lane_b_event_gates or bootstrap"
+- PASS (8 passed, 62 deselected)
+
+5) pytest -q tests/test_beta6_shadow_compare.py
+- PASS (3 passed)
+
+6) pytest -q tests/test_beta6_orchestrator.py
+- PASS (6 passed)
+
+7) pytest -q tests/test_beta6_runtime_preflight.py
+- PASS (9 passed)
+
+8) pytest -q tests/test_prediction_beta6_runtime_hook_parity.py
+- PASS (3 passed)
+
+9) pytest -q tests/test_run_daily_analysis_thresholds.py -k "beta6_authority or runtime"
+- PASS (4 passed, 40 deselected)
+
+10) A0 backtest (anchor no-mask reference)
+- Command:
+  cd /Users/dicksonng/DT/Development/Beta_6/backend && /Users/dicksonng/DT/Development/Beta_6/backend/venv/bin/python /Users/dicksonng/DT/Development/Beta_6/backend/scripts/run_event_first_variant_backtest.py --profiles-yaml /Users/dicksonng/DT/Development/Beta_6/backend/config/event_first_matrix_profiles.yaml --variant anchor_top2_frag_v3 --data-dir /Users/dicksonng/DT/Development/Beta_6/data/raw --elder-id HK001_jessica --seed 22 --min-day 7 --max-day 10 --output /tmp/beta6_s1_a0_seed22.json
+- Result: PASS (artifact written)
+
+11) A1 backtest (mask + floor 0.0)
+- Command:
+  cd /Users/dicksonng/DT/Development/Beta_6/backend && ENABLE_TIMELINE_MULTITASK=true TIMELINE_NATIVE_ROOMS=bedroom,livingroom,bathroom,kitchen TIMELINE_ACTIVITY_REWEIGHT_MODE=occupied_only TIMELINE_ACTIVITY_UNOCCUPIED_WEIGHT_FLOOR=0.0 /Users/dicksonng/DT/Development/Beta_6/backend/venv/bin/python /Users/dicksonng/DT/Development/Beta_6/backend/scripts/run_event_first_variant_backtest.py --profiles-yaml /Users/dicksonng/DT/Development/Beta_6/backend/config/event_first_matrix_profiles.yaml --variant anchor_top2_frag_v3 --data-dir /Users/dicksonng/DT/Development/Beta_6/data/raw --elder-id HK001_jessica --seed 22 --min-day 7 --max-day 10 --output /tmp/beta6_s1_a1_seed22.json
+- Result: PASS (artifact written)
+
+12) A2 backtest (mask + floor 0.05)
+- Command:
+  cd /Users/dicksonng/DT/Development/Beta_6/backend && ENABLE_TIMELINE_MULTITASK=true TIMELINE_NATIVE_ROOMS=bedroom,livingroom,bathroom,kitchen TIMELINE_ACTIVITY_REWEIGHT_MODE=occupied_only TIMELINE_ACTIVITY_UNOCCUPIED_WEIGHT_FLOOR=0.05 /Users/dicksonng/DT/Development/Beta_6/backend/venv/bin/python /Users/dicksonng/DT/Development/Beta_6/backend/scripts/run_event_first_variant_backtest.py --profiles-yaml /Users/dicksonng/DT/Development/Beta_6/backend/config/event_first_matrix_profiles.yaml --variant anchor_top2_frag_v3 --data-dir /Users/dicksonng/DT/Development/Beta_6/data/raw --elder-id HK001_jessica --seed 22 --min-day 7 --max-day 10 --output /tmp/beta6_s1_a2_seed22.json
+- Result: PASS (artifact written)
+
+13) Summarize Step-1 A/B gates
+- Command:
+  cd /Users/dicksonng/DT/Development/Beta_6/backend && python3 scripts/summarize_step1_ab.py --a0-report /tmp/beta6_s1_a0_seed22.json --a1-report /tmp/beta6_s1_a1_seed22.json --a2-report /tmp/beta6_s1_a2_seed22.json --resident HK001_jessica --seed 22 --min-day 7 --max-day 10 --full-bundle-lr-mae 242.95 --baseline-anchor-lr-mae 88.39 --output-json /tmp/beta6_step1_ab_summary.json --output-md /Users/dicksonng/DT/Development/Beta_6/docs/beta6_step1_ab_report.md
+- Result: PASS (summary + report written)
+
+14) Backtest helper regression tests after direct home-empty wiring
+- Command:
+  cd /Users/dicksonng/DT/Development/Beta_6/backend && pytest -q tests/test_event_first_backtest_script.py
+- Result: PASS
+- Summary: 84 passed in 0.31s
+
+15) Re-run A0/A1/A2 with direct home-empty summary emission
+- Commands:
+  - cd /Users/dicksonng/DT/Development/Beta_6/backend && /Users/dicksonng/DT/Development/Beta_6/backend/venv/bin/python /Users/dicksonng/DT/Development/Beta_6/backend/scripts/run_event_first_variant_backtest.py --profiles-yaml /Users/dicksonng/DT/Development/Beta_6/backend/config/event_first_matrix_profiles.yaml --variant anchor_top2_frag_v3 --data-dir /Users/dicksonng/DT/Development/Beta_6/data/raw --elder-id HK001_jessica --seed 22 --min-day 7 --max-day 10 --output /tmp/beta6_s1_a0_seed22.json
+  - cd /Users/dicksonng/DT/Development/Beta_6/backend && ENABLE_TIMELINE_MULTITASK=true TIMELINE_NATIVE_ROOMS=bedroom,livingroom,bathroom,kitchen TIMELINE_ACTIVITY_REWEIGHT_MODE=occupied_only TIMELINE_ACTIVITY_UNOCCUPIED_WEIGHT_FLOOR=0.0 /Users/dicksonng/DT/Development/Beta_6/backend/venv/bin/python /Users/dicksonng/DT/Development/Beta_6/backend/scripts/run_event_first_variant_backtest.py --profiles-yaml /Users/dicksonng/DT/Development/Beta_6/backend/config/event_first_matrix_profiles.yaml --variant anchor_top2_frag_v3 --data-dir /Users/dicksonng/DT/Development/Beta_6/data/raw --elder-id HK001_jessica --seed 22 --min-day 7 --max-day 10 --output /tmp/beta6_s1_a1_seed22.json
+  - cd /Users/dicksonng/DT/Development/Beta_6/backend && ENABLE_TIMELINE_MULTITASK=true TIMELINE_NATIVE_ROOMS=bedroom,livingroom,bathroom,kitchen TIMELINE_ACTIVITY_REWEIGHT_MODE=occupied_only TIMELINE_ACTIVITY_UNOCCUPIED_WEIGHT_FLOOR=0.05 /Users/dicksonng/DT/Development/Beta_6/backend/venv/bin/python /Users/dicksonng/DT/Development/Beta_6/backend/scripts/run_event_first_variant_backtest.py --profiles-yaml /Users/dicksonng/DT/Development/Beta_6/backend/config/event_first_matrix_profiles.yaml --variant anchor_top2_frag_v3 --data-dir /Users/dicksonng/DT/Development/Beta_6/data/raw --elder-id HK001_jessica --seed 22 --min-day 7 --max-day 10 --output /tmp/beta6_s1_a2_seed22.json
+- Result: PASS (all three artifacts written)
+
+16) Occupancy-focused variants (seed22, day7-10)
+- Commands:
+  - cd /Users/dicksonng/DT/Development/Beta_6/backend && ENABLE_TIMELINE_MULTITASK=true TIMELINE_NATIVE_ROOMS=bedroom,livingroom,bathroom,kitchen TIMELINE_ACTIVITY_REWEIGHT_MODE=occupied_only TIMELINE_ACTIVITY_UNOCCUPIED_WEIGHT_FLOOR=0.0 /Users/dicksonng/DT/Development/Beta_6/backend/venv/bin/python /Users/dicksonng/DT/Development/Beta_6/backend/scripts/run_event_first_variant_backtest.py --profiles-yaml /Users/dicksonng/DT/Development/Beta_6/backend/config/event_first_matrix_profiles.yaml --variant lr_occ_focus_v1 --data-dir /Users/dicksonng/DT/Development/Beta_6/data/raw --elder-id HK001_jessica --seed 22 --min-day 7 --max-day 10 --output /tmp/beta6_s1_occ_v1_seed22.json
+  - cd /Users/dicksonng/DT/Development/Beta_6/backend && ENABLE_TIMELINE_MULTITASK=true TIMELINE_NATIVE_ROOMS=bedroom,livingroom,bathroom,kitchen TIMELINE_ACTIVITY_REWEIGHT_MODE=occupied_only TIMELINE_ACTIVITY_UNOCCUPIED_WEIGHT_FLOOR=0.0 /Users/dicksonng/DT/Development/Beta_6/backend/venv/bin/python /Users/dicksonng/DT/Development/Beta_6/backend/scripts/run_event_first_variant_backtest.py --profiles-yaml /Users/dicksonng/DT/Development/Beta_6/backend/config/event_first_matrix_profiles.yaml --variant lr_occ_focus_v2 --data-dir /Users/dicksonng/DT/Development/Beta_6/data/raw --elder-id HK001_jessica --seed 22 --min-day 7 --max-day 10 --output /tmp/beta6_s1_occ_v2_seed22.json
+  - cd /Users/dicksonng/DT/Development/Beta_6/backend && ENABLE_TIMELINE_MULTITASK=true TIMELINE_NATIVE_ROOMS=bedroom,livingroom,bathroom,kitchen TIMELINE_ACTIVITY_REWEIGHT_MODE=occupied_only TIMELINE_ACTIVITY_UNOCCUPIED_WEIGHT_FLOOR=0.0 /Users/dicksonng/DT/Development/Beta_6/backend/venv/bin/python /Users/dicksonng/DT/Development/Beta_6/backend/scripts/run_event_first_variant_backtest.py --profiles-yaml /Users/dicksonng/DT/Development/Beta_6/backend/config/event_first_matrix_profiles.yaml --variant lr_occ_focus_v3 --data-dir /Users/dicksonng/DT/Development/Beta_6/data/raw --elder-id HK001_jessica --seed 22 --min-day 7 --max-day 10 --output /tmp/beta6_s1_occ_v3_seed22.json
+- Result: PASS (artifacts written; metrics did not improve occupancy safety)
+
+17) Root-cause fix tests (timestamp-aligned household-empty metrics)
+- Commands:
+  - cd /Users/dicksonng/DT/Development/Beta_6/backend && pytest -q tests/test_event_first_backtest_script.py -k "home_empty"
+  - cd /Users/dicksonng/DT/Development/Beta_6/backend && pytest -q tests/test_event_first_backtest_script.py
+- Result: PASS
+- Summary: 4 passed (home_empty subset), 86 passed total
+
+18) Re-run canonical A0/A1/A2 after household-empty alignment fix
+- Commands:
+  - cd /Users/dicksonng/DT/Development/Beta_6/backend && /Users/dicksonng/DT/Development/Beta_6/backend/venv/bin/python /Users/dicksonng/DT/Development/Beta_6/backend/scripts/run_event_first_variant_backtest.py --profiles-yaml /Users/dicksonng/DT/Development/Beta_6/backend/config/event_first_matrix_profiles.yaml --variant anchor_top2_frag_v3 --data-dir /Users/dicksonng/DT/Development/Beta_6/data/raw --elder-id HK001_jessica --seed 22 --min-day 7 --max-day 10 --output /tmp/beta6_s1_a0_seed22.json
+  - cd /Users/dicksonng/DT/Development/Beta_6/backend && ENABLE_TIMELINE_MULTITASK=true TIMELINE_NATIVE_ROOMS=bedroom,livingroom,bathroom,kitchen TIMELINE_ACTIVITY_REWEIGHT_MODE=occupied_only TIMELINE_ACTIVITY_UNOCCUPIED_WEIGHT_FLOOR=0.0 /Users/dicksonng/DT/Development/Beta_6/backend/venv/bin/python /Users/dicksonng/DT/Development/Beta_6/backend/scripts/run_event_first_variant_backtest.py --profiles-yaml /Users/dicksonng/DT/Development/Beta_6/backend/config/event_first_matrix_profiles.yaml --variant anchor_top2_frag_v3 --data-dir /Users/dicksonng/DT/Development/Beta_6/data/raw --elder-id HK001_jessica --seed 22 --min-day 7 --max-day 10 --output /tmp/beta6_s1_a1_seed22.json
+  - cd /Users/dicksonng/DT/Development/Beta_6/backend && ENABLE_TIMELINE_MULTITASK=true TIMELINE_NATIVE_ROOMS=bedroom,livingroom,bathroom,kitchen TIMELINE_ACTIVITY_REWEIGHT_MODE=occupied_only TIMELINE_ACTIVITY_UNOCCUPIED_WEIGHT_FLOOR=0.05 /Users/dicksonng/DT/Development/Beta_6/backend/venv/bin/python /Users/dicksonng/DT/Development/Beta_6/backend/scripts/run_event_first_variant_backtest.py --profiles-yaml /Users/dicksonng/DT/Development/Beta_6/backend/config/event_first_matrix_profiles.yaml --variant anchor_top2_frag_v3 --data-dir /Users/dicksonng/DT/Development/Beta_6/data/raw --elder-id HK001_jessica --seed 22 --min-day 7 --max-day 10 --output /tmp/beta6_s1_a2_seed22.json
+- Result: PASS (artifacts written)
+
+19) Re-summarize Step-1 A/B gates after fix
+- Command:
+  cd /Users/dicksonng/DT/Development/Beta_6/backend && python3 scripts/summarize_step1_ab.py --a0-report /tmp/beta6_s1_a0_seed22.json --a1-report /tmp/beta6_s1_a1_seed22.json --a2-report /tmp/beta6_s1_a2_seed22.json --resident HK001_jessica --seed 22 --min-day 7 --max-day 10 --full-bundle-lr-mae 242.95 --baseline-anchor-lr-mae 88.39 --output-json /tmp/beta6_step1_ab_summary.json --output-md /Users/dicksonng/DT/Development/Beta_6/docs/beta6_step1_ab_report.md
+- Result: PASS
+- Summary: decision `GO`, occupancy safety `PASS`, direct FER `0.0223`
+
+20) Add utility-gate summarizer checks
+- Commands:
+  - cd /Users/dicksonng/DT/Development/Beta_6/backend && python3 -m py_compile scripts/summarize_step1_ab.py
+  - cd /Users/dicksonng/DT/Development/Beta_6/backend && python3 scripts/summarize_step1_ab.py --a0-report /tmp/beta6_s1_a0_seed22.json --a1-report /tmp/beta6_s1_a1_seed22.json --a2-report /tmp/beta6_s1_a2_seed22.json --resident HK001_jessica --seed 22 --min-day 7 --max-day 10 --full-bundle-lr-mae 242.95 --baseline-anchor-lr-mae 88.39 --output-json /tmp/beta6_step1_ab_summary.json --output-md /Users/dicksonng/DT/Development/Beta_6/docs/beta6_step1_ab_report.md
+- Result: PASS
+- Summary: utility gate + operational recommendation emitted (`SHADOW_ONLY` at 900s setting).
+
+21) 3-seed x 3-duration sweep (`600/900/1200`)
+- Command:
+  cd /Users/dicksonng/DT/Development/Beta_6/backend && for d in 600 900 1200; do for s in 11 22 33; do BACKTEST_HOME_EMPTY_MIN_EMPTY_DURATION_SECONDS=$d ENABLE_TIMELINE_MULTITASK=true TIMELINE_NATIVE_ROOMS=bedroom,livingroom,bathroom,kitchen TIMELINE_ACTIVITY_REWEIGHT_MODE=occupied_only TIMELINE_ACTIVITY_UNOCCUPIED_WEIGHT_FLOOR=0.0 /Users/dicksonng/DT/Development/Beta_6/backend/venv/bin/python /Users/dicksonng/DT/Development/Beta_6/backend/scripts/run_event_first_variant_backtest.py --profiles-yaml /Users/dicksonng/DT/Development/Beta_6/backend/config/event_first_matrix_profiles.yaml --variant anchor_top2_frag_v3 --data-dir /Users/dicksonng/DT/Development/Beta_6/data/raw --elder-id HK001_jessica --seed $s --min-day 7 --max-day 10 --output /tmp/beta6_s1_a1_d${d}_s${s}.json; done; done
+- Result: PASS (9/9 reports written)
+- Summary:
+  - all durations satisfied safety cap across all seeds
+  - `600s` provided best utility balance (2/3 seeds passed utility thresholds)
+  - sweep report generated at `/Users/dicksonng/DT/Development/Beta_6/docs/beta6_home_empty_duration_sweep_report.md`
+
+22) Adopt sweep-selected default (`600s`) and refresh canonical artifacts
+- Commands:
+  - pytest -q tests/test_event_first_backtest_script.py -k "home_empty"
+  - canonical A0/A1/A2 reruns at default 600s
+  - summarize step1 gates
+- Result: PASS
+- Summary:
+  - Step-1 decision `GO`
+  - occupancy safety `PASS`
+  - utility gate `PASS`
+  - operational recommendation `CANARY_ELIGIBLE`

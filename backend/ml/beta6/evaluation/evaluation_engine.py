@@ -14,6 +14,7 @@ import numpy as np
 from .calibration import evaluate_calibration
 from ..data.feature_store import Window, has_resident_leakage, has_time_leakage, has_window_overlap
 from ..serving.prediction import UnknownPolicy
+from ...timeline_metrics import compute_timeline_metrics
 
 
 def _utc_now() -> str:
@@ -38,6 +39,127 @@ def _safe_div(numerator: float, denominator: float) -> float:
 
 def _to_label_array(values: Sequence[Any]) -> list[str]:
     return [str(v).strip().lower() for v in values]
+
+
+def _to_optional_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(out):
+        return None
+    return float(out)
+
+
+def _normalize_timeline_metrics(timeline_metrics: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Normalize timeline metrics into the Step3 S3-01 payload contract."""
+    if not isinstance(timeline_metrics, Mapping):
+        return {}
+
+    payload: Dict[str, Any] = dict(timeline_metrics)
+    binary = payload.get("timeline_metrics_binary")
+    binary_map = binary if isinstance(binary, Mapping) else {}
+
+    derived_timeline = None
+    pred_episodes = payload.get("pred_episodes")
+    gt_episodes = payload.get("gt_episodes")
+    if isinstance(pred_episodes, list) and isinstance(gt_episodes, list):
+        try:
+            derived_timeline = compute_timeline_metrics(
+                pred_episodes=pred_episodes,
+                gt_episodes=gt_episodes,
+            )
+        except Exception:
+            derived_timeline = None
+
+    duration_mae = _to_optional_float(payload.get("duration_mae_minutes"))
+    if duration_mae is None:
+        duration_mae = _to_optional_float(payload.get("segment_duration_mae_minutes"))
+    if duration_mae is None:
+        duration_mae = _to_optional_float(binary_map.get("segment_duration_mae_minutes"))
+    if duration_mae is None and derived_timeline is not None:
+        duration_mae = _to_optional_float(derived_timeline.segment_duration_mae_minutes)
+    if duration_mae is not None:
+        payload["duration_mae_minutes"] = duration_mae
+
+    fragmentation = _to_optional_float(payload.get("fragmentation_rate"))
+    if fragmentation is None:
+        fragmentation = _to_optional_float(binary_map.get("fragmentation_rate"))
+    if fragmentation is None and derived_timeline is not None:
+        fragmentation = _to_optional_float(derived_timeline.fragmentation_rate)
+    if fragmentation is not None:
+        payload["fragmentation_rate"] = fragmentation
+
+    num_pred = _to_optional_float(payload.get("num_pred_episodes"))
+    if num_pred is None:
+        num_pred = _to_optional_float(binary_map.get("num_pred_episodes"))
+    if num_pred is None and derived_timeline is not None:
+        num_pred = float(derived_timeline.num_pred_episodes)
+
+    num_gt = _to_optional_float(payload.get("num_gt_episodes"))
+    if num_gt is None:
+        num_gt = _to_optional_float(binary_map.get("num_gt_episodes"))
+    if num_gt is None and derived_timeline is not None:
+        num_gt = float(derived_timeline.num_gt_episodes)
+
+    matched = _to_optional_float(payload.get("matched_episodes"))
+    if matched is None:
+        matched = _to_optional_float(binary_map.get("matched_episodes"))
+    if matched is None and derived_timeline is not None:
+        matched = float(derived_timeline.matched_episodes)
+
+    if num_pred is not None:
+        payload["num_pred_episodes"] = int(num_pred)
+    if num_gt is not None:
+        payload["num_gt_episodes"] = int(num_gt)
+    if matched is not None:
+        payload["matched_episodes"] = int(matched)
+
+    boundary_precision = _to_optional_float(payload.get("boundary_precision"))
+    if boundary_precision is None:
+        boundary_precision = _to_optional_float(payload.get("episode_precision"))
+    if boundary_precision is None:
+        boundary_precision = _to_optional_float(binary_map.get("boundary_precision"))
+    if boundary_precision is None and matched is not None and num_pred is not None and num_pred > 0:
+        boundary_precision = float(matched / num_pred)
+
+    boundary_recall = _to_optional_float(payload.get("boundary_recall"))
+    if boundary_recall is None:
+        boundary_recall = _to_optional_float(payload.get("episode_recall"))
+    if boundary_recall is None:
+        boundary_recall = _to_optional_float(binary_map.get("boundary_recall"))
+    if boundary_recall is None and matched is not None and num_gt is not None and num_gt > 0:
+        boundary_recall = float(matched / num_gt)
+
+    boundary_f1 = _to_optional_float(payload.get("boundary_f1"))
+    if boundary_f1 is None:
+        boundary_f1 = _to_optional_float(payload.get("episode_f1"))
+    if boundary_f1 is None:
+        boundary_f1 = _to_optional_float(binary_map.get("boundary_f1"))
+    if boundary_f1 is None and boundary_precision is not None and boundary_recall is not None:
+        if (boundary_precision + boundary_recall) > 0.0:
+            boundary_f1 = float(
+                2.0 * boundary_precision * boundary_recall / (boundary_precision + boundary_recall)
+            )
+        else:
+            boundary_f1 = 0.0
+
+    if boundary_precision is not None:
+        payload["boundary_precision"] = boundary_precision
+    if boundary_recall is not None:
+        payload["boundary_recall"] = boundary_recall
+    if boundary_f1 is not None:
+        payload["boundary_f1"] = boundary_f1
+
+    episode_count_ratio = _to_optional_float(payload.get("episode_count_ratio"))
+    if episode_count_ratio is None and num_pred is not None and num_gt is not None and num_gt > 0.0:
+        episode_count_ratio = float(num_pred / num_gt)
+    if episode_count_ratio is not None:
+        payload["episode_count_ratio"] = episode_count_ratio
+
+    return payload
 
 
 def _classification_metrics(y_true: Sequence[str], y_pred: Sequence[str]) -> Dict[str, Any]:
@@ -195,6 +317,7 @@ def build_room_evaluation_report(
     details: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     metrics: Dict[str, Any] = {}
+    normalized_timeline_metrics = _normalize_timeline_metrics(timeline_metrics)
 
     y_true_norm = _to_label_array(y_true) if y_true is not None else None
     y_pred_norm = _to_label_array(y_pred) if y_pred is not None else None
@@ -227,7 +350,7 @@ def build_room_evaluation_report(
         "metrics_passed": bool(metrics_passed),
         "data_viable": bool(data_viable),
         "metrics": metrics,
-        "timeline_metrics": dict(timeline_metrics or {}),
+        "timeline_metrics": normalized_timeline_metrics,
         "leakage": {
             "resident_overlap": bool((leakage or {}).get("resident_overlap", False)),
             "time_overlap": bool((leakage or {}).get("time_overlap", False)),

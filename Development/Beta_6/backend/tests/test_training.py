@@ -387,6 +387,62 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertEqual(str(tuning.get("reason")), "no_regress_rescue")
         self.assertGreater(float(tuning.get("selected_threshold", 0.0)), 0.20)
 
+    def test_two_stage_threshold_tuning_uses_macro_f1_when_no_regress_unmet(self):
+        n = 40
+        x_eval = np.zeros((n, 5, 3), dtype=np.float32)
+        y_eval = np.concatenate([np.zeros(n // 2, dtype=np.int32), np.ones(n // 2, dtype=np.int32)])
+        stage_a_model = MagicMock()
+        stage_a_model.predict.return_value = np.tile(np.array([[0.5, 0.5]], dtype=np.float32), (n, 1))
+        two_stage_result = {
+            "num_classes": 2,
+            "excluded_class_ids": [1],
+            "occupied_class_ids": [0],
+            "primary_occupied_class_id": 0,
+            "stage_a_model": stage_a_model,
+            "stage_b_model": None,
+        }
+        champion_meta = {"metrics": {"macro_f1": 0.90}}
+        release_cfg = {
+            "release_gates": {
+                "no_regress": {
+                    "max_drop_from_champion": 0.05,
+                    "exempt_rooms": [],
+                }
+            }
+        }
+
+        def _fake_compose(**kwargs):
+            threshold = float(kwargs.get("stage_a_threshold", 0.0))
+            return np.full((n, 2), threshold, dtype=np.float32)
+
+        def _fake_summary(room_name, y_true, y_pred_probs):
+            threshold = float(np.asarray(y_pred_probs)[0, 0])
+            # None of these meet no-regress floor (0.85), but higher threshold
+            # yields clearly better macro-F1 while having lower gate score.
+            if threshold < 0.30:
+                return {"gate_aligned_score": 2.0, "collapsed": False, "macro_f1": 0.60}
+            return {"gate_aligned_score": 1.0, "collapsed": False, "macro_f1": 0.80}
+
+        with patch.dict(os.environ, {"GATE_ALIGNED_NO_REGRESS_FALLBACK_MODE": "macro_f1"}, clear=False):
+            with patch("ml.training.get_release_gates_config", return_value=release_cfg):
+                with patch.object(self.pipeline, "_compose_two_stage_core_probabilities", side_effect=_fake_compose):
+                    with patch.object(self.pipeline, "_summarize_gate_aligned_validation", side_effect=_fake_summary):
+                        tuning = self.pipeline._tune_two_stage_stage_a_threshold_gate_aligned(
+                            room_name="Kitchen",
+                            two_stage_result=two_stage_result,
+                            X_eval=x_eval,
+                            y_eval=y_eval,
+                            baseline_threshold=0.10,
+                            champion_meta=champion_meta,
+                        )
+
+        no_regress = tuning.get("no_regress", {})
+        self.assertTrue(bool(no_regress.get("enabled")))
+        self.assertEqual(str(no_regress.get("fallback")), "all_candidates_macro_f1")
+        self.assertEqual(str(tuning.get("reason")), "best_macro_f1_no_regress_fallback")
+        self.assertTrue(bool(tuning.get("applied")))
+        self.assertGreaterEqual(float(tuning.get("selected_threshold", 0.0)), 0.30)
+
     @patch("ml.training.get_release_gates_config")
     def test_resolve_checkpoint_no_regress_floor_uses_release_policy(self, mock_get_policy):
         mock_get_policy.return_value = {
@@ -423,6 +479,22 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertIn("sleep_duration", lane_b_stats)
         self.assertTrue(any(str(item) == "sleep_duration" for item in (summary.get("lane_b_floor_failures") or [])))
         self.assertLess(float(summary.get("lane_b_recall_mean", 1.0)), 0.5)
+
+    def test_summarize_gate_aligned_validation_enforces_entrance_out_precision_floor(self):
+        self.mock_platform.label_encoders["Entrance"] = MagicMock()
+        self.mock_platform.label_encoders["Entrance"].classes_ = np.array(
+            ["out", "unoccupied"],
+            dtype=object,
+        )
+        y_true = np.asarray(([0] * 20) + ([1] * 180), dtype=np.int32)
+        # Predict "out" everywhere to induce poor out precision.
+        y_pred_probs = np.tile(np.asarray([[0.99, 0.01]], dtype=np.float32), (len(y_true), 1))
+        summary = self.pipeline._summarize_gate_aligned_validation(
+            room_name="Entrance",
+            y_true=y_true,
+            y_pred_probs=y_pred_probs,
+        )
+        self.assertIn("out", {str(x).lower() for x in (summary.get("precision_floor_failures") or [])})
 
     @patch.dict(
         os.environ,
@@ -476,6 +548,64 @@ class TestTrainingPipeline(unittest.TestCase):
         pred_ids = np.argmax(out, axis=1).astype(int).tolist()
         # Short unoccupied gap between sleep runs should be bridged back to sleep.
         self.assertEqual(pred_ids, [0, 0, 0, 0, 0, 0])
+
+    @patch.dict(
+        os.environ,
+        {
+            "ENABLE_BEDROOM_SLEEP_CONTINUITY": "true",
+            "BEDROOM_SLEEP_BRIDGE_MAX_STEPS": "3",
+            "BEDROOM_SLEEP_BRIDGE_MIN_OCC_PROB": "0.30",
+            "BEDROOM_SLEEP_BRIDGE_BOUNDARY_SLEEP_MIN_PROB": "0.95",
+        },
+        clear=False,
+    )
+    def test_compose_two_stage_probabilities_respects_boundary_sleep_confidence(self):
+        self.mock_platform.label_encoders["Bedroom"] = MagicMock()
+        self.mock_platform.label_encoders["Bedroom"].classes_ = np.array(
+            ["sleep", "bedroom_normal_use", "unoccupied"],
+            dtype=object,
+        )
+
+        stage_a_probs = np.asarray(
+            [
+                [0.05, 0.95],
+                [0.05, 0.95],
+                [0.60, 0.40],
+                [0.60, 0.40],
+                [0.05, 0.95],
+                [0.05, 0.95],
+            ],
+            dtype=np.float32,
+        )
+        # Boundary sleep confidence is below configured floor (0.95), so no bridge.
+        stage_b_probs = np.asarray(
+            [
+                [0.90, 0.10],
+                [0.90, 0.10],
+                [0.10, 0.90],
+                [0.10, 0.90],
+                [0.90, 0.10],
+                [0.90, 0.10],
+            ],
+            dtype=np.float32,
+        )
+        out = self.pipeline._compose_two_stage_core_probabilities(
+            room_name="Bedroom",
+            stage_a_probs=stage_a_probs,
+            stage_b_probs=stage_b_probs,
+            n_classes=3,
+            excluded_ids=[2],
+            occupied_ids=[0, 1],
+            primary_occupied_class_id=0,
+            stage_a_threshold=0.5,
+        )
+        pred_ids = np.argmax(out, axis=1).astype(int).tolist()
+        self.assertEqual(pred_ids[2:4], [2, 2])
+
+    def test_two_stage_core_rooms_default_includes_entrance(self):
+        with patch.dict(os.environ, {}, clear=True):
+            rooms = TrainingPipeline._resolve_two_stage_core_rooms()
+        self.assertIn("entrance", rooms)
 
     def test_build_collapse_retry_class_weights_boosts_critical_minority(self):
         self.mock_platform.label_encoders["room1"].classes_ = np.array(["unoccupied", "sleep"], dtype=object)

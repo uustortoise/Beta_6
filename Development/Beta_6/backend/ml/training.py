@@ -111,6 +111,10 @@ class _GateAlignedCheckpointCallback(tf.keras.callbacks.Callback):
         self.best_floor_epoch = -1
         self.best_floor_weights = None
         self.best_floor_summary: Dict[str, Any] = {}
+        self.best_macro_f1 = float("-inf")
+        self.best_macro_epoch = -1
+        self.best_macro_weights = None
+        self.best_macro_summary: Dict[str, Any] = {}
         self.selection_mode = "overall_best"
         self.last_summary: Dict[str, Any] = {}
         self.last_error: Optional[str] = None
@@ -154,6 +158,18 @@ class _GateAlignedCheckpointCallback(tf.keras.callbacks.Callback):
                 self.best_floor_epoch = int(epoch)
                 self.best_floor_weights = self.model.get_weights()
                 self.best_floor_summary = dict(self.last_summary)
+            if macro_f1 is not None:
+                macro_f1_value = float(macro_f1)
+                better_macro = macro_f1_value > (self.best_macro_f1 + 1e-8)
+                tie_macro_better_score = (
+                    abs(macro_f1_value - self.best_macro_f1) <= 1e-8
+                    and score > float(self.best_macro_summary.get("score", float("-inf")))
+                )
+                if better_macro or tie_macro_better_score:
+                    self.best_macro_f1 = macro_f1_value
+                    self.best_macro_epoch = int(epoch)
+                    self.best_macro_weights = self.model.get_weights()
+                    self.best_macro_summary = dict(self.last_summary)
         except Exception as e:
             self.last_error = f"{type(e).__name__}: {e}"
 
@@ -165,6 +181,17 @@ class _GateAlignedCheckpointCallback(tf.keras.callbacks.Callback):
             self.best_weights = self.best_floor_weights
             self.best_summary = dict(self.best_floor_summary)
             self.selection_mode = "no_regress_floor"
+        elif (
+            self.no_regress_macro_f1_floor is not None
+            and self.best_macro_weights is not None
+            and self.pipeline._resolve_gate_aligned_no_regress_fallback_mode() == "macro_f1"
+        ):
+            self.model.set_weights(self.best_macro_weights)
+            self.best_score = float(self.best_macro_summary.get("score", float("-inf")))
+            self.best_epoch = int(self.best_macro_epoch)
+            self.best_weights = self.best_macro_weights
+            self.best_summary = dict(self.best_macro_summary)
+            self.selection_mode = "no_regress_macro_f1_fallback"
         elif self.best_weights is not None:
             self.model.set_weights(self.best_weights)
             self.selection_mode = "overall_best"
@@ -181,6 +208,9 @@ class _GateAlignedCheckpointCallback(tf.keras.callbacks.Callback):
             "best_floor_epoch": int(self.best_floor_epoch) if self.best_floor_epoch >= 0 else None,
             "best_floor_score": float(self.best_floor_score) if np.isfinite(self.best_floor_score) else None,
             "best_floor_summary": dict(self.best_floor_summary),
+            "best_macro_epoch": int(self.best_macro_epoch) if self.best_macro_epoch >= 0 else None,
+            "best_macro_f1": float(self.best_macro_f1) if np.isfinite(self.best_macro_f1) else None,
+            "best_macro_summary": dict(self.best_macro_summary),
         }
         if self.last_error:
             payload["error"] = self.last_error
@@ -370,21 +400,79 @@ class TrainingPipeline:
             max_value=3.0,
         )
 
+    @staticmethod
+    def _resolve_gate_aligned_no_regress_fallback_mode() -> str:
+        raw = str(os.getenv("GATE_ALIGNED_NO_REGRESS_FALLBACK_MODE", "macro_f1")).strip().lower()
+        if raw in {"score", "macro_f1"}:
+            return raw
+        return "macro_f1"
+
+    def _resolve_gate_aligned_precision_floor_penalty(self) -> float:
+        return self._env_float(
+            "GATE_ALIGNED_PRECISION_FLOOR_PENALTY",
+            0.35,
+            min_value=0.0,
+            max_value=3.0,
+        )
+
+    def _resolve_gate_aligned_precision_floors(self, room_name: str) -> Dict[str, float]:
+        room_key = normalize_room_name(room_name)
+        # Conservative default: prevent entrance "out" from collapsing precision.
+        floors: Dict[str, float] = {"out": 0.20} if room_key == "entrance" else {}
+
+        raw = str(os.getenv("GATE_ALIGNED_PRECISION_FLOOR_BY_ROOM_LABEL", "")).strip()
+        if not raw:
+            return floors
+
+        for token in raw.split(","):
+            part = str(token).strip()
+            if not part or ":" not in part or "." not in part:
+                continue
+            key, value = part.split(":", 1)
+            room_label = str(key).strip().lower()
+            if "." not in room_label:
+                continue
+            room_name_part, label_part = room_label.split(".", 1)
+            if normalize_room_name(room_name_part) != room_key:
+                continue
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                continue
+            floors[str(label_part).strip().lower()] = float(np.clip(parsed, 0.0, 1.0))
+        return floors
+
     def _resolve_two_stage_bedroom_continuity_enabled(self) -> bool:
         return self._env_bool("ENABLE_BEDROOM_SLEEP_CONTINUITY", True)
 
     def _resolve_two_stage_bedroom_bridge_max_steps(self) -> int:
         raw = os.getenv("BEDROOM_SLEEP_BRIDGE_MAX_STEPS")
         try:
-            value = int(raw) if raw is not None else 36
+            value = int(raw) if raw is not None else 18
         except (TypeError, ValueError):
-            value = 36
+            value = 18
         return max(1, int(value))
 
     def _resolve_two_stage_bedroom_bridge_min_occ_prob(self) -> float:
         return self._env_float(
             "BEDROOM_SLEEP_BRIDGE_MIN_OCC_PROB",
-            0.35,
+            0.45,
+            min_value=0.0,
+            max_value=1.0,
+        )
+
+    def _resolve_two_stage_bedroom_bridge_boundary_sleep_min_prob(self) -> float:
+        return self._env_float(
+            "BEDROOM_SLEEP_BRIDGE_BOUNDARY_SLEEP_MIN_PROB",
+            0.75,
+            min_value=0.0,
+            max_value=1.0,
+        )
+
+    def _resolve_two_stage_bedroom_bridge_max_conversion_ratio(self) -> float:
+        return self._env_float(
+            "BEDROOM_SLEEP_BRIDGE_MAX_CONVERSION_RATIO",
+            0.04,
             min_value=0.0,
             max_value=1.0,
         )
@@ -2317,6 +2405,7 @@ class TrainingPipeline:
 
         label_encoder = self.platform.label_encoders.get(room_name)
         classes = getattr(label_encoder, "classes_", None) if label_encoder is not None else None
+        per_label_precision: Dict[str, float] = {}
         per_label_recall: Dict[str, float] = {}
         per_label_support: Dict[str, int] = {}
         if classes is not None:
@@ -2324,6 +2413,7 @@ class TrainingPipeline:
                 class_key = str(int(class_id))
                 label_name = str(classes[int(class_id)]).strip().lower()
                 class_metrics = report.get(class_key, {})
+                per_label_precision[label_name] = float(class_metrics.get("precision", 0.0) or 0.0)
                 per_label_recall[label_name] = float(class_metrics.get("recall", 0.0) or 0.0)
                 per_label_support[label_name] = int(class_metrics.get("support", 0) or 0)
 
@@ -2395,6 +2485,28 @@ class TrainingPipeline:
                     lane_b_floor_failures.append(str(event_name))
         lane_b_recall_mean = float(np.mean(lane_b_recalls)) if lane_b_recalls else 0.0
 
+        precision_floor_by_label = self._resolve_gate_aligned_precision_floors(room_name)
+        precision_floor_failures: List[str] = []
+        precision_floor_stats: Dict[str, Dict[str, Any]] = {}
+        for label, floor in precision_floor_by_label.items():
+            selected_label, support, precision = self._select_best_label_variant(
+                label,
+                per_label_support=per_label_support,
+                per_label_recall=per_label_precision,
+                equivalents=equivalents,
+            )
+            precision_value = float(precision) if precision is not None else 0.0
+            eligible = int(support) >= int(critical_support_floor)
+            precision_floor_stats[str(label)] = {
+                "selected_label": str(selected_label),
+                "support": int(support),
+                "precision": float(precision_value),
+                "required_precision": float(floor),
+                "eligible_for_floor": bool(eligible),
+            }
+            if eligible and float(precision_value) < float(floor):
+                precision_floor_failures.append(str(selected_label))
+
         dominant_class_id = -1
         dominant_class_count = 0
         dominant_class_share = 0.0
@@ -2414,6 +2526,7 @@ class TrainingPipeline:
         collapsed = bool(dominant_class_share >= float(collapse_ratio))
         critical_floor_failed = bool(len(critical_floor_failures) > 0)
         lane_b_floor_failed = bool(len(lane_b_floor_failures) > 0)
+        precision_floor_failed = bool(len(precision_floor_failures) > 0)
 
         score = float(macro_f1)
         score += float(self._resolve_gate_aligned_critical_weight()) * float(critical_recall_mean)
@@ -2424,6 +2537,8 @@ class TrainingPipeline:
             score -= float(self._resolve_gate_aligned_floor_penalty())
         if lane_b_floor_failed:
             score -= float(self._resolve_gate_aligned_lane_b_floor_penalty())
+        if precision_floor_failed:
+            score -= float(self._resolve_gate_aligned_precision_floor_penalty())
 
         dominant_label = self._get_label_name(room_name, dominant_class_id)
         return {
@@ -2435,6 +2550,10 @@ class TrainingPipeline:
             "critical_recall_min": float(critical_recall_min),
             "critical_floor_failures": critical_floor_failures,
             "critical_stats": critical_stats,
+            "per_label_precision": per_label_precision,
+            "precision_floor_by_label": precision_floor_by_label,
+            "precision_floor_failures": precision_floor_failures,
+            "precision_floor_stats": precision_floor_stats,
             "dominant_class_id": int(dominant_class_id),
             "dominant_class_label": (
                 str(dominant_label).strip().lower()
@@ -2496,7 +2615,7 @@ class TrainingPipeline:
 
     @staticmethod
     def _resolve_two_stage_core_rooms() -> set[str]:
-        default_rooms = "bathroom,bedroom,kitchen,livingroom"
+        default_rooms = "bathroom,bedroom,entrance,kitchen,livingroom"
         raw = str(os.getenv("TWO_STAGE_CORE_ROOMS", default_rooms))
         return {
             normalize_room_name(token)
@@ -3362,6 +3481,17 @@ class TrainingPipeline:
             )
             return ranked[0]
 
+        def _pick_best_macro_f1(records: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+            ranked = sorted(
+                list(records),
+                key=lambda item: (
+                    1 if bool(item.get("collapsed", False)) else 0,
+                    -float(item.get("macro_f1", float("-inf"))),
+                    -float(item.get("score", float("-inf"))),
+                ),
+            )
+            return ranked[0]
+
         baseline_record = min(
             candidate_records,
             key=lambda item: abs(float(item.get("threshold", baseline)) - baseline),
@@ -3381,27 +3511,48 @@ class TrainingPipeline:
                 selected_record = _pick_best(eligible_records)
                 no_regress_context["fallback"] = "eligible_only"
             else:
-                no_regress_context["fallback"] = "all_candidates_no_eligible"
-            selected_reason = "best_gate_aligned_no_regress"
+                fallback_mode = self._resolve_gate_aligned_no_regress_fallback_mode()
+                if fallback_mode == "macro_f1":
+                    selected_record = _pick_best_macro_f1(candidate_records)
+                    no_regress_context["fallback"] = "all_candidates_macro_f1"
+                    selected_reason = "best_macro_f1_no_regress_fallback"
+                else:
+                    no_regress_context["fallback"] = "all_candidates_no_eligible"
+                    selected_reason = "best_gate_aligned_no_regress"
+            if selected_reason == "best_gate_aligned":
+                selected_reason = "best_gate_aligned_no_regress"
         selected_summary = dict(selected_record.get("summary", {}))
         best_threshold = float(selected_record.get("threshold", baseline))
         best_score = float(selected_record.get("score", float("-inf")))
         best_collapsed = bool(selected_record.get("collapsed", False))
+        baseline_macro_f1 = (
+            float(baseline_record.get("macro_f1"))
+            if baseline_record.get("macro_f1") is not None
+            else float("-inf")
+        )
+        selected_macro_f1 = (
+            float(selected_record.get("macro_f1"))
+            if selected_record.get("macro_f1") is not None
+            else float("-inf")
+        )
         selected_no_regress_ok = bool(selected_record.get("no_regress_ok", True))
         no_regress_context["selected_pass"] = selected_no_regress_ok
 
         improve = best_score > (baseline_score + 1e-8)
         collapse_rescue = baseline_collapsed and not bool(selected_summary.get("collapsed", False))
+        macro_f1_rescue = selected_macro_f1 > (baseline_macro_f1 + 1e-8)
         no_regress_rescue = bool(
             no_regress_context.get("enabled")
             and (not baseline_no_regress_ok)
             and selected_no_regress_ok
         )
-        if (improve or collapse_rescue or no_regress_rescue) and abs(best_threshold - baseline) > 1e-9:
+        if (improve or collapse_rescue or no_regress_rescue or macro_f1_rescue) and abs(best_threshold - baseline) > 1e-9:
             tuning["applied"] = True
             tuning["selected_threshold"] = float(best_threshold)
             if no_regress_rescue:
                 tuning["reason"] = "no_regress_rescue"
+            elif selected_reason == "best_macro_f1_no_regress_fallback" and macro_f1_rescue:
+                tuning["reason"] = "best_macro_f1_no_regress_fallback"
             else:
                 tuning["reason"] = selected_reason
         else:
@@ -3541,16 +3692,21 @@ class TrainingPipeline:
 
         max_gap_steps = self._resolve_two_stage_bedroom_bridge_max_steps()
         min_occ_prob = self._resolve_two_stage_bedroom_bridge_min_occ_prob()
+        min_boundary_sleep_prob = self._resolve_two_stage_bedroom_bridge_boundary_sleep_min_prob()
+        max_conversion_ratio = self._resolve_two_stage_bedroom_bridge_max_conversion_ratio()
         # Guard: require a weak proximity to occupied decision boundary.
         min_boundary_occ = max(
             float(min_occ_prob),
             float(np.clip(float(stage_a_threshold) * 0.70, 0.0, 1.0)),
         )
+        max_converted = max(2, int(np.ceil(float(out.shape[0]) * float(max_conversion_ratio))))
 
         converted = 0
         n = int(len(pred_ids))
         i = 0
         while i < n:
+            if converted >= max_converted:
+                break
             if int(pred_ids[i]) != int(unoccupied_id):
                 i += 1
                 continue
@@ -3565,33 +3721,46 @@ class TrainingPipeline:
             right_is_sleep = end < n and int(pred_ids[end]) == int(sleep_id)
             if not (left_is_sleep and right_is_sleep):
                 continue
+            if (
+                float(out[start - 1, int(sleep_id)]) < float(min_boundary_sleep_prob)
+                or float(out[end, int(sleep_id)]) < float(min_boundary_sleep_prob)
+            ):
+                continue
 
             gap_occ = np.asarray(stage_a_occ[start:end], dtype=np.float32)
             if gap_occ.size <= 0:
                 continue
-            if float(np.max(gap_occ)) < float(min_boundary_occ):
+            if (
+                float(np.max(gap_occ)) < float(min_boundary_occ)
+                or float(np.mean(gap_occ)) < float(min_occ_prob)
+            ):
                 continue
 
             for idx in range(start, end):
+                if converted >= max_converted:
+                    break
                 unocc_prob = float(out[idx, int(unoccupied_id)])
                 if unocc_prob <= 0.0:
                     continue
                 # Route the majority of gap mass to sleep while keeping a small
                 # residual for uncertainty.
-                transfer = float(max(unocc_prob * 0.85, 0.50))
-                transfer = float(min(transfer, 0.98))
+                transfer = float(max(unocc_prob * 0.55, 0.35))
+                transfer = float(min(transfer, 0.85))
                 out[idx, int(sleep_id)] = float(max(float(out[idx, int(sleep_id)]), transfer))
-                out[idx, int(unoccupied_id)] = float(min(float(out[idx, int(unoccupied_id)]), 0.02))
+                out[idx, int(unoccupied_id)] = float(min(float(out[idx, int(unoccupied_id)]), 0.12))
                 converted += 1
 
         if converted > 0:
             row_sums = np.sum(out, axis=1, keepdims=True)
             out = out / np.clip(row_sums, 1e-8, None)
             logger.info(
-                "Bedroom continuity bridge converted %d windows (max_gap_steps=%d, min_occ_prob=%.3f)",
+                "Bedroom continuity bridge converted %d windows "
+                "(max_gap_steps=%d, min_occ_prob=%.3f, boundary_sleep_min=%.3f, max_ratio=%.3f)",
                 int(converted),
                 int(max_gap_steps),
                 float(min_boundary_occ),
+                float(min_boundary_sleep_prob),
+                float(max_conversion_ratio),
             )
         return out.astype(np.float32, copy=False)
 

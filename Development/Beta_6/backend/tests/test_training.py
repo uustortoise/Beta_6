@@ -501,6 +501,68 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertEqual(str(tuning.get("reason")), "label_floor_rescue")
         self.assertGreater(float(tuning.get("selected_threshold", 0.0)), 0.20)
 
+    def test_two_stage_threshold_tuning_rescues_lane_b_floor(self):
+        n = 40
+        x_eval = np.zeros((n, 5, 3), dtype=np.float32)
+        y_eval = np.concatenate([np.zeros(n // 2, dtype=np.int32), np.ones(n // 2, dtype=np.int32)])
+        stage_a_model = MagicMock()
+        stage_a_model.predict.return_value = np.tile(np.array([[0.5, 0.5]], dtype=np.float32), (n, 1))
+        two_stage_result = {
+            "num_classes": 2,
+            "excluded_class_ids": [1],
+            "occupied_class_ids": [0],
+            "primary_occupied_class_id": 0,
+            "stage_a_model": stage_a_model,
+            "stage_b_model": None,
+        }
+
+        def _fake_compose(**kwargs):
+            threshold = float(kwargs.get("stage_a_threshold", 0.0))
+            return np.full((n, 2), threshold, dtype=np.float32)
+
+        def _fake_summary(room_name, y_true, y_pred_probs):
+            threshold = float(np.asarray(y_pred_probs)[0, 0])
+            if threshold < 0.20:
+                return {
+                    "gate_aligned_score": 2.0,
+                    "collapsed": False,
+                    "macro_f1": 0.70,
+                    "lane_b_floor_failures": ["bathroom_use"],
+                }
+            return {
+                "gate_aligned_score": 1.0,
+                "collapsed": False,
+                "macro_f1": 0.68,
+                "lane_b_floor_failures": [],
+            }
+
+        with patch.dict(
+            os.environ,
+            {
+                "ENABLE_TWO_STAGE_STAGE_A_LANE_B_FLOOR_GUARD": "true",
+                "TWO_STAGE_STAGE_A_LANE_B_REQUIRED_ROOMS": "bathroom",
+            },
+            clear=False,
+        ):
+            with patch.object(self.pipeline, "_compose_two_stage_core_probabilities", side_effect=_fake_compose):
+                with patch.object(self.pipeline, "_summarize_gate_aligned_validation", side_effect=_fake_summary):
+                    tuning = self.pipeline._tune_two_stage_stage_a_threshold_gate_aligned(
+                        room_name="Bathroom",
+                        two_stage_result=two_stage_result,
+                        X_eval=x_eval,
+                        y_eval=y_eval,
+                        baseline_threshold=0.10,
+                        champion_meta=None,
+                    )
+
+        no_regress = tuning.get("no_regress", {})
+        self.assertFalse(bool(no_regress.get("enabled")))
+        self.assertFalse(bool(no_regress.get("baseline_lane_b_floor_pass")))
+        self.assertTrue(bool(no_regress.get("selected_lane_b_floor_pass")))
+        self.assertTrue(bool(tuning.get("applied")))
+        self.assertEqual(str(tuning.get("reason")), "lane_b_floor_rescue")
+        self.assertGreater(float(tuning.get("selected_threshold", 0.0)), 0.20)
+
     def test_resolve_two_stage_restart_attempts_applies_room_filter_and_bounds(self):
         with patch.dict(
             os.environ,

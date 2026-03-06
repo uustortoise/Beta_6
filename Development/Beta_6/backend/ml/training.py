@@ -477,12 +477,22 @@ class TrainingPipeline:
             floors[str(label_part).strip().lower()] = float(np.clip(parsed, 0.0, 1.0))
         return floors
 
+    def _resolve_two_stage_stage_a_lane_b_floor_required(self, room_name: str) -> bool:
+        if not self._env_bool("ENABLE_TWO_STAGE_STAGE_A_LANE_B_FLOOR_GUARD", True):
+            return False
+        required_rooms = self._env_room_set(
+            "TWO_STAGE_STAGE_A_LANE_B_REQUIRED_ROOMS",
+            ("bathroom",),
+        )
+        room_key = normalize_room_name(room_name)
+        return (not required_rooms) or (room_key in required_rooms)
+
     def _resolve_two_stage_restart_attempts(self, room_name: str) -> int:
         if not self._env_bool("ENABLE_TWO_STAGE_CORE_RESTART_SELECTION", True):
             return 1
         restart_rooms = self._env_room_set(
             "TWO_STAGE_CORE_RESTART_ROOMS",
-            ("bedroom", "entrance"),
+            ("bedroom", "bathroom", "livingroom", "entrance"),
         )
         room_key = normalize_room_name(room_name)
         if restart_rooms and room_key not in restart_rooms:
@@ -3649,7 +3659,9 @@ class TrainingPipeline:
         }
         label_recall_floors = self._resolve_two_stage_stage_a_label_recall_floors(room_name)
         label_equivalents = self._resolve_room_label_equivalents(room_name)
+        lane_b_floor_required = self._resolve_two_stage_stage_a_lane_b_floor_required(room_name)
         tuning["label_recall_floors"] = dict(label_recall_floors)
+        tuning["lane_b_floor_required"] = bool(lane_b_floor_required)
         try:
             candidate_f1 = None
             if isinstance(champion_meta, Mapping):
@@ -3711,6 +3723,13 @@ class TrainingPipeline:
             label_floor_failures: List[str] = []
             label_floor_stats: Dict[str, Dict[str, Any]] = {}
             label_floor_ok = True
+            raw_lane_b_floor_failures = summary.get("lane_b_floor_failures") or []
+            lane_b_floor_failures = (
+                [str(item).strip() for item in raw_lane_b_floor_failures if str(item).strip()]
+                if isinstance(raw_lane_b_floor_failures, (list, tuple, set))
+                else []
+            )
+            lane_b_floor_ok = not bool(lane_b_floor_failures)
             if label_recall_floors:
                 raw_summary_recall = summary.get("per_label_recall") or {}
                 raw_summary_support = summary.get("per_label_support") or {}
@@ -3761,6 +3780,8 @@ class TrainingPipeline:
                     "label_floor_ok": bool(label_floor_ok),
                     "label_floor_failures": list(label_floor_failures),
                     "label_floor_stats": label_floor_stats,
+                    "lane_b_floor_ok": bool(lane_b_floor_ok),
+                    "lane_b_floor_failures": list(lane_b_floor_failures),
                 }
             )
 
@@ -3798,24 +3819,35 @@ class TrainingPipeline:
         baseline_collapsed = bool(baseline_record.get("collapsed", False))
         baseline_no_regress_ok = bool(baseline_record.get("no_regress_ok", True))
         baseline_label_floor_ok = bool(baseline_record.get("label_floor_ok", True))
+        baseline_lane_b_floor_ok = bool(baseline_record.get("lane_b_floor_ok", True))
         no_regress_context["baseline_pass"] = baseline_no_regress_ok
 
-        floor_required = bool(label_recall_floors)
-        floor_eligible_records = [
+        label_floor_required = bool(label_recall_floors)
+        label_floor_eligible_records = [
             item for item in candidate_records if bool(item.get("label_floor_ok", True))
         ]
-        no_regress_context["label_floor_required"] = floor_required
-        no_regress_context["label_floor_eligible_count"] = int(len(floor_eligible_records))
+        constrained_eligible_records = [
+            item
+            for item in candidate_records
+            if (not label_floor_required or bool(item.get("label_floor_ok", True)))
+            and (not lane_b_floor_required or bool(item.get("lane_b_floor_ok", True)))
+        ]
+        no_regress_context["label_floor_required"] = label_floor_required
+        no_regress_context["label_floor_eligible_count"] = int(len(label_floor_eligible_records))
         no_regress_context["baseline_label_floor_pass"] = baseline_label_floor_ok
+        no_regress_context["lane_b_floor_required"] = bool(lane_b_floor_required)
+        no_regress_context["lane_b_floor_eligible_count"] = int(len(constrained_eligible_records))
+        no_regress_context["baseline_lane_b_floor_pass"] = baseline_lane_b_floor_ok
 
-        selected_record = _pick_best(floor_eligible_records or candidate_records)
+        selected_record = _pick_best(constrained_eligible_records or candidate_records)
         selected_reason = "best_gate_aligned"
         if bool(no_regress_context.get("enabled")):
             eligible_records = [
                 item
                 for item in candidate_records
                 if bool(item.get("no_regress_ok", False))
-                and (not floor_required or bool(item.get("label_floor_ok", True)))
+                and (not label_floor_required or bool(item.get("label_floor_ok", True)))
+                and (not lane_b_floor_required or bool(item.get("lane_b_floor_ok", True)))
             ]
             no_regress_context["eligible_count"] = int(len(eligible_records))
             if eligible_records:
@@ -3823,12 +3855,12 @@ class TrainingPipeline:
                 no_regress_context["fallback"] = "eligible_only"
             else:
                 fallback_mode = self._resolve_gate_aligned_no_regress_fallback_mode()
-                fallback_pool = floor_eligible_records or candidate_records
+                fallback_pool = constrained_eligible_records or candidate_records
                 if fallback_mode == "macro_f1":
                     selected_record = _pick_best_macro_f1(fallback_pool)
                     no_regress_context["fallback"] = (
                         "all_floor_eligible_macro_f1"
-                        if floor_required and floor_eligible_records
+                        if (label_floor_required or lane_b_floor_required) and constrained_eligible_records
                         else "all_candidates_macro_f1"
                     )
                     selected_reason = "best_macro_f1_no_regress_fallback"
@@ -3836,14 +3868,14 @@ class TrainingPipeline:
                     selected_record = _pick_best(fallback_pool)
                     no_regress_context["fallback"] = (
                         "all_floor_eligible_no_eligible"
-                        if floor_required and floor_eligible_records
+                        if (label_floor_required or lane_b_floor_required) and constrained_eligible_records
                         else "all_candidates_no_eligible"
                     )
                     selected_reason = "best_gate_aligned_no_regress"
             if selected_reason == "best_gate_aligned":
                 selected_reason = "best_gate_aligned_no_regress"
-        elif floor_required and floor_eligible_records:
-            selected_record = _pick_best(floor_eligible_records)
+        elif (label_floor_required or lane_b_floor_required) and constrained_eligible_records:
+            selected_record = _pick_best(constrained_eligible_records)
             selected_reason = "best_gate_aligned_label_floor"
         selected_summary = dict(selected_record.get("summary", {}))
         best_threshold = float(selected_record.get("threshold", baseline))
@@ -3861,25 +3893,39 @@ class TrainingPipeline:
         )
         selected_no_regress_ok = bool(selected_record.get("no_regress_ok", True))
         selected_label_floor_ok = bool(selected_record.get("label_floor_ok", True))
+        selected_lane_b_floor_ok = bool(selected_record.get("lane_b_floor_ok", True))
         no_regress_context["selected_pass"] = selected_no_regress_ok
         no_regress_context["selected_label_floor_pass"] = selected_label_floor_ok
+        no_regress_context["selected_lane_b_floor_pass"] = selected_lane_b_floor_ok
 
         improve = best_score > (baseline_score + 1e-8)
         collapse_rescue = baseline_collapsed and not bool(selected_summary.get("collapsed", False))
         macro_f1_rescue = selected_macro_f1 > (baseline_macro_f1 + 1e-8)
-        label_floor_rescue = bool(floor_required and (not baseline_label_floor_ok) and selected_label_floor_ok)
+        label_floor_rescue = bool(
+            label_floor_required and (not baseline_label_floor_ok) and selected_label_floor_ok
+        )
+        lane_b_floor_rescue = bool(
+            lane_b_floor_required and (not baseline_lane_b_floor_ok) and selected_lane_b_floor_ok
+        )
         no_regress_rescue = bool(
             no_regress_context.get("enabled")
             and (not baseline_no_regress_ok)
             and selected_no_regress_ok
         )
         if (
-            improve or collapse_rescue or no_regress_rescue or macro_f1_rescue or label_floor_rescue
+            improve
+            or collapse_rescue
+            or no_regress_rescue
+            or macro_f1_rescue
+            or label_floor_rescue
+            or lane_b_floor_rescue
         ) and abs(best_threshold - baseline) > 1e-9:
             tuning["applied"] = True
             tuning["selected_threshold"] = float(best_threshold)
             if no_regress_rescue:
                 tuning["reason"] = "no_regress_rescue"
+            elif lane_b_floor_rescue:
+                tuning["reason"] = "lane_b_floor_rescue"
             elif label_floor_rescue:
                 tuning["reason"] = "label_floor_rescue"
             elif selected_reason == "best_macro_f1_no_regress_fallback" and macro_f1_rescue:

@@ -442,6 +442,66 @@ class TrainingPipeline:
             floors[str(label_part).strip().lower()] = float(np.clip(parsed, 0.0, 1.0))
         return floors
 
+    def _resolve_release_gate_precision_floor_block_enabled(self) -> bool:
+        return self._env_bool("RELEASE_GATE_BLOCK_ON_PRECISION_FLOOR_FAILURE", True)
+
+    def _resolve_release_gate_precision_floor_block_rooms(self) -> set[str]:
+        return self._env_room_set(
+            "RELEASE_GATE_PRECISION_FLOOR_BLOCK_ROOMS",
+            ("entrance",),
+        )
+
+    def _resolve_two_stage_stage_a_label_recall_floors(self, room_name: str) -> Dict[str, float]:
+        room_key = normalize_room_name(room_name)
+        # Bedroom-specific guardrail: avoid aggressive occupied routing that
+        # collapses unoccupied recall during stage-A threshold tuning.
+        floors: Dict[str, float] = {"unoccupied": 0.18} if room_key == "bedroom" else {}
+        raw = str(os.getenv("TWO_STAGE_STAGE_A_LABEL_RECALL_FLOOR_BY_ROOM_LABEL", "")).strip()
+        if not raw:
+            return floors
+        for token in raw.split(","):
+            part = str(token).strip()
+            if not part or ":" not in part or "." not in part:
+                continue
+            key, value = part.split(":", 1)
+            room_label = str(key).strip().lower()
+            if "." not in room_label:
+                continue
+            room_name_part, label_part = room_label.split(".", 1)
+            if normalize_room_name(room_name_part) != room_key:
+                continue
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                continue
+            floors[str(label_part).strip().lower()] = float(np.clip(parsed, 0.0, 1.0))
+        return floors
+
+    def _resolve_two_stage_restart_attempts(self, room_name: str) -> int:
+        if not self._env_bool("ENABLE_TWO_STAGE_CORE_RESTART_SELECTION", True):
+            return 1
+        restart_rooms = self._env_room_set(
+            "TWO_STAGE_CORE_RESTART_ROOMS",
+            ("bedroom", "entrance"),
+        )
+        room_key = normalize_room_name(room_name)
+        if restart_rooms and room_key not in restart_rooms:
+            return 1
+        raw = os.getenv("TWO_STAGE_CORE_RESTART_ATTEMPTS")
+        try:
+            value = int(raw) if raw is not None else 2
+        except (TypeError, ValueError):
+            value = 2
+        return int(np.clip(value, 1, 4))
+
+    def _resolve_two_stage_restart_base_seed(self) -> int:
+        raw = os.getenv("TWO_STAGE_CORE_RESTART_BASE_SEED")
+        try:
+            value = int(raw) if raw is not None else 1729
+        except (TypeError, ValueError):
+            value = 1729
+        return int(value)
+
     def _resolve_two_stage_bedroom_continuity_enabled(self) -> bool:
         return self._env_bool("ENABLE_BEDROOM_SLEEP_CONTINUITY", True)
 
@@ -1513,8 +1573,14 @@ class TrainingPipeline:
         calibration_low_support_count = int(candidate_metrics.get("calibration_low_support_count", 0) or 0)
         metric_source = str(candidate_metrics.get("metric_source") or "")
         data_viability = candidate_metrics.get("data_viability") or {}
+        raw_per_label_precision = candidate_metrics.get("per_label_precision") or {}
         raw_per_label_recall = candidate_metrics.get("per_label_recall") or {}
         raw_per_label_support = candidate_metrics.get("per_label_support") or {}
+        per_label_precision = {
+            str(k).strip().lower(): float(v)
+            for k, v in raw_per_label_precision.items()
+            if v is not None
+        } if isinstance(raw_per_label_precision, dict) else {}
         per_label_recall = {
             str(k).strip().lower(): float(v)
             for k, v in raw_per_label_recall.items()
@@ -1557,6 +1623,8 @@ class TrainingPipeline:
         collapse_block_enabled = self._resolve_release_gate_collapse_block_enabled()
         collapse_block_ratio = self._resolve_release_gate_collapse_ratio()
         collapse_block_rooms = self._resolve_release_gate_collapse_block_rooms()
+        precision_floor_block_enabled = self._resolve_release_gate_precision_floor_block_enabled()
+        precision_floor_block_rooms = self._resolve_release_gate_precision_floor_block_rooms()
         training_days_epsilon = 1e-3
         insufficient_validation_evidence = bool(candidate_metrics.get("insufficient_validation_evidence", False))
         validation_evaluable = (
@@ -1703,6 +1771,34 @@ class TrainingPipeline:
                     f"label_recall_failed:{room_key}:{label_name}:{float(label_recall):.3f}"
                     f"<{float(threshold):.3f}"
                 )
+        precision_floor_by_label = self._resolve_gate_aligned_precision_floors(room_name)
+        if precision_floor_by_label:
+            for label_name, threshold in precision_floor_by_label.items():
+                _, label_support, label_precision = self._select_best_label_variant(
+                    label_name,
+                    per_label_support=per_label_support,
+                    per_label_recall=per_label_precision,
+                    equivalents=label_equivalents,
+                )
+                if label_precision is None:
+                    _add_watch(f"label_precision_missing:{room_key}:{label_name}")
+                    continue
+                if label_support < int(effective_min_recall_support):
+                    _add_watch(
+                        f"label_precision_insufficient_support:{room_key}:{label_name}:{label_support}"
+                        f"<{int(effective_min_recall_support)}"
+                    )
+                    continue
+                if float(label_precision) < float(threshold):
+                    precision_reason = (
+                        f"label_precision_failed:{room_key}:{label_name}:{float(label_precision):.3f}"
+                        f"<{float(threshold):.3f}"
+                    )
+                    is_block_room = (not precision_floor_block_rooms) or (room_key in precision_floor_block_rooms)
+                    if precision_floor_block_enabled and is_block_room and validation_evaluable:
+                        _add_blocking(precision_reason)
+                    else:
+                        _add_watch(precision_reason.replace("_failed:", "_watch:", 1))
         if metric_source == "holdout_validation":
             critical_labels = self._resolve_critical_labels(room_name)
             collapse_min_support = max(5, int(effective_min_recall_support // 2))
@@ -2550,6 +2646,8 @@ class TrainingPipeline:
             "critical_recall_min": float(critical_recall_min),
             "critical_floor_failures": critical_floor_failures,
             "critical_stats": critical_stats,
+            "per_label_recall": per_label_recall,
+            "per_label_support": per_label_support,
             "per_label_precision": per_label_precision,
             "precision_floor_by_label": precision_floor_by_label,
             "precision_floor_failures": precision_floor_failures,
@@ -2873,6 +2971,7 @@ class TrainingPipeline:
         X_train: np.ndarray,
         y_train: np.ndarray,
         validation_data: Optional[Tuple[np.ndarray, np.ndarray]],
+        champion_meta: Optional[Mapping[str, Any]] = None,
         max_epochs: int,
     ) -> Dict[str, Any]:
         """
@@ -2906,18 +3005,7 @@ class TrainingPipeline:
             return result
 
         input_shape = (int(seq_length), int(len(self.platform.sensor_columns)))
-        stage_a_model = build_transformer_model(
-            input_shape=input_shape,
-            num_classes=2,
-            dropout_rate=DEFAULT_DROPOUT_RATE,
-        )
-        stage_a_model.compile(
-            optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
-            loss="sparse_categorical_crossentropy",
-            metrics=["accuracy"],
-            jit_compile=False,
-        )
-
+        X_train_arr = np.asarray(X_train, dtype=np.float32)
         X_val = None
         y_val = None
         if validation_data is not None:
@@ -2928,94 +3016,254 @@ class TrainingPipeline:
         if X_val is not None and y_val is not None and len(y_val) > 0:
             y_val_stage_a = np.isin(y_val, occupied_class_ids).astype(np.int32)
             validation_stage_a = (X_val, y_val_stage_a)
-
-        stage_a_callbacks = [
-            tf.keras.callbacks.EarlyStopping(
-                monitor="val_loss" if validation_stage_a is not None else "loss",
-                patience=2,
-                restore_best_weights=True,
-                verbose=0,
-            )
-        ]
-        stage_a_model.fit(
-            np.asarray(X_train, dtype=np.float32),
-            y_train_stage_a,
-            epochs=max(1, int(max_epochs)),
-            batch_size=32,
-            validation_data=validation_stage_a,
-            shuffle=False,
-            verbose=0,
-            class_weight=self._balanced_class_weight_dict(y_train_stage_a),
-            callbacks=stage_a_callbacks,
+        no_regress_context = self._resolve_no_regress_macro_f1_floor(
+            room_name=room_name,
+            champion_meta=champion_meta,
         )
+        no_regress_floor = (
+            float(no_regress_context.get("target_macro_f1_floor"))
+            if bool(no_regress_context.get("enabled", False))
+            and no_regress_context.get("target_macro_f1_floor") is not None
+            else None
+        )
+        restart_attempts = self._resolve_two_stage_restart_attempts(room_name)
+        restart_base_seed = self._resolve_two_stage_restart_base_seed()
 
-        stage_b_model = None
-        stage_b_enabled = False
-        stage_b_reason = "single_occupied_class"
-        occupied_label_to_stage_idx = {int(class_id): idx for idx, class_id in enumerate(occupied_class_ids)}
-        primary_occupied_class_id = int(class_profile.get("primary_occupied_class_id", occupied_class_ids[0]))
+        def _fit_two_stage_attempt(attempt_index: int) -> Dict[str, Any]:
+            attempt_seed = int(restart_base_seed + int(attempt_index))
+            try:
+                tf.keras.utils.set_random_seed(attempt_seed)
+            except Exception:
+                pass
 
-        if len(occupied_class_ids) >= 2 and int(np.sum(occupied_mask_train)) > 0:
-            X_train_stage_b = np.asarray(X_train[occupied_mask_train], dtype=np.float32)
-            y_train_stage_b = np.asarray(
-                [occupied_label_to_stage_idx[int(item)] for item in y_train_arr[occupied_mask_train]],
-                dtype=np.int32,
+            stage_a_model_attempt = build_transformer_model(
+                input_shape=input_shape,
+                num_classes=2,
+                dropout_rate=DEFAULT_DROPOUT_RATE,
             )
-            if len(np.unique(y_train_stage_b)) > 1:
-                stage_b_model = build_transformer_model(
-                    input_shape=input_shape,
-                    num_classes=len(occupied_class_ids),
-                    dropout_rate=DEFAULT_DROPOUT_RATE,
-                )
-                stage_b_model.compile(
-                    optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
-                    loss="sparse_categorical_crossentropy",
-                    metrics=["accuracy"],
-                    jit_compile=False,
-                )
-                validation_stage_b = None
-                if X_val is not None and y_val is not None and len(y_val) > 0:
-                    occupied_mask_val = np.isin(y_val, occupied_class_ids)
-                    if int(np.sum(occupied_mask_val)) > 0:
-                        y_val_stage_b = np.asarray(
-                            [occupied_label_to_stage_idx[int(item)] for item in y_val[occupied_mask_val]],
-                            dtype=np.int32,
-                        )
-                        validation_stage_b = (
-                            np.asarray(X_val[occupied_mask_val], dtype=np.float32),
-                            y_val_stage_b,
-                        )
-                stage_b_callbacks = [
-                    tf.keras.callbacks.EarlyStopping(
-                        monitor="val_loss" if validation_stage_b is not None else "loss",
-                        patience=2,
-                        restore_best_weights=True,
-                        verbose=0,
-                    )
-                ]
-                stage_b_model.fit(
-                    X_train_stage_b,
-                    y_train_stage_b,
-                    epochs=max(1, int(max_epochs)),
-                    batch_size=32,
-                    validation_data=validation_stage_b,
-                    shuffle=False,
+            stage_a_model_attempt.compile(
+                optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+                loss="sparse_categorical_crossentropy",
+                metrics=["accuracy"],
+                jit_compile=False,
+            )
+            stage_a_callbacks = [
+                tf.keras.callbacks.EarlyStopping(
+                    monitor="val_loss" if validation_stage_a is not None else "loss",
+                    patience=2,
+                    restore_best_weights=True,
                     verbose=0,
-                    class_weight=self._balanced_class_weight_dict(y_train_stage_b),
-                    callbacks=stage_b_callbacks,
                 )
-                stage_b_enabled = True
-                stage_b_reason = "trained"
-                occupied_counts = {
-                    int(class_id): int(np.sum(y_train_arr == int(class_id)))
-                    for class_id in occupied_class_ids
+            ]
+            stage_a_model_attempt.fit(
+                X_train_arr,
+                y_train_stage_a,
+                epochs=max(1, int(max_epochs)),
+                batch_size=32,
+                validation_data=validation_stage_a,
+                shuffle=False,
+                verbose=0,
+                class_weight=self._balanced_class_weight_dict(y_train_stage_a),
+                callbacks=stage_a_callbacks,
+            )
+
+            stage_b_model_attempt = None
+            stage_b_enabled_attempt = False
+            stage_b_reason_attempt = "single_occupied_class"
+            occupied_label_to_stage_idx = {
+                int(class_id): idx for idx, class_id in enumerate(occupied_class_ids)
+            }
+            primary_occupied_class_id_attempt = int(
+                class_profile.get("primary_occupied_class_id", occupied_class_ids[0])
+            )
+            if len(occupied_class_ids) >= 2 and int(np.sum(occupied_mask_train)) > 0:
+                X_train_stage_b = np.asarray(X_train_arr[occupied_mask_train], dtype=np.float32)
+                y_train_stage_b = np.asarray(
+                    [occupied_label_to_stage_idx[int(item)] for item in y_train_arr[occupied_mask_train]],
+                    dtype=np.int32,
+                )
+                if len(np.unique(y_train_stage_b)) > 1:
+                    stage_b_model_attempt = build_transformer_model(
+                        input_shape=input_shape,
+                        num_classes=len(occupied_class_ids),
+                        dropout_rate=DEFAULT_DROPOUT_RATE,
+                    )
+                    stage_b_model_attempt.compile(
+                        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+                        loss="sparse_categorical_crossentropy",
+                        metrics=["accuracy"],
+                        jit_compile=False,
+                    )
+                    validation_stage_b = None
+                    if X_val is not None and y_val is not None and len(y_val) > 0:
+                        occupied_mask_val = np.isin(y_val, occupied_class_ids)
+                        if int(np.sum(occupied_mask_val)) > 0:
+                            y_val_stage_b = np.asarray(
+                                [occupied_label_to_stage_idx[int(item)] for item in y_val[occupied_mask_val]],
+                                dtype=np.int32,
+                            )
+                            validation_stage_b = (
+                                np.asarray(X_val[occupied_mask_val], dtype=np.float32),
+                                y_val_stage_b,
+                            )
+                    stage_b_callbacks = [
+                        tf.keras.callbacks.EarlyStopping(
+                            monitor="val_loss" if validation_stage_b is not None else "loss",
+                            patience=2,
+                            restore_best_weights=True,
+                            verbose=0,
+                        )
+                    ]
+                    stage_b_model_attempt.fit(
+                        X_train_stage_b,
+                        y_train_stage_b,
+                        epochs=max(1, int(max_epochs)),
+                        batch_size=32,
+                        validation_data=validation_stage_b,
+                        shuffle=False,
+                        verbose=0,
+                        class_weight=self._balanced_class_weight_dict(y_train_stage_b),
+                        callbacks=stage_b_callbacks,
+                    )
+                    stage_b_enabled_attempt = True
+                    stage_b_reason_attempt = "trained"
+                    occupied_counts = {
+                        int(class_id): int(np.sum(y_train_arr == int(class_id)))
+                        for class_id in occupied_class_ids
+                    }
+                    primary_occupied_class_id_attempt = max(
+                        occupied_counts.keys(),
+                        key=lambda key: occupied_counts[key],
+                    )
+                else:
+                    stage_b_reason_attempt = "insufficient_stage_b_class_diversity"
+
+            attempt_summary: Dict[str, Any] = {}
+            attempt_no_regress_ok = True
+            if X_val is not None and y_val is not None and len(y_val) > 0:
+                try:
+                    raw_stage_a_eval = stage_a_model_attempt.predict(X_val, verbose=0)
+                    if isinstance(raw_stage_a_eval, dict):
+                        raw_stage_a_eval = raw_stage_a_eval.get("activity_logits")
+                    stage_a_eval_probs = self._to_probability_matrix(raw_stage_a_eval)
+                    stage_b_eval_probs = None
+                    if stage_b_model_attempt is not None:
+                        raw_stage_b_eval = stage_b_model_attempt.predict(X_val, verbose=0)
+                        if isinstance(raw_stage_b_eval, dict):
+                            raw_stage_b_eval = raw_stage_b_eval.get("activity_logits")
+                        stage_b_eval_probs = self._to_probability_matrix(raw_stage_b_eval)
+                    eval_probs = self._compose_two_stage_core_probabilities(
+                        room_name=room_name,
+                        stage_a_probs=stage_a_eval_probs,
+                        stage_b_probs=stage_b_eval_probs,
+                        n_classes=int(len(class_profile.get("classes", []))),
+                        excluded_ids=excluded_class_ids,
+                        occupied_ids=occupied_class_ids,
+                        primary_occupied_class_id=int(primary_occupied_class_id_attempt),
+                        stage_a_threshold=self._resolve_two_stage_stage_a_default_threshold(),
+                    )
+                    attempt_summary = self._summarize_gate_aligned_validation(
+                        room_name=room_name,
+                        y_true=y_val,
+                        y_pred_probs=eval_probs,
+                    )
+                    if no_regress_floor is not None:
+                        macro_val = attempt_summary.get("macro_f1")
+                        attempt_no_regress_ok = bool(
+                            macro_val is not None and float(macro_val) + 1e-9 >= float(no_regress_floor)
+                        )
+                except Exception as e:
+                    attempt_summary = {
+                        "error": f"{type(e).__name__}: {e}",
+                        "collapsed": True,
+                        "gate_aligned_score": float("-inf"),
+                        "macro_f1": None,
+                    }
+                    attempt_no_regress_ok = False if no_regress_floor is not None else True
+
+            return {
+                "attempt_index": int(attempt_index),
+                "seed": int(attempt_seed),
+                "stage_a_model": stage_a_model_attempt,
+                "stage_b_model": stage_b_model_attempt,
+                "stage_b_enabled": bool(stage_b_enabled_attempt),
+                "stage_b_reason": str(stage_b_reason_attempt),
+                "primary_occupied_class_id": int(primary_occupied_class_id_attempt),
+                "summary": attempt_summary,
+                "no_regress_ok": bool(attempt_no_regress_ok),
+            }
+
+        attempt_records = [_fit_two_stage_attempt(idx) for idx in range(int(restart_attempts))]
+        selected_attempt = attempt_records[0]
+        if len(attempt_records) > 1:
+            def _attempt_rank(item: Mapping[str, Any]) -> Tuple[Any, ...]:
+                summary = item.get("summary") if isinstance(item.get("summary"), Mapping) else {}
+                no_reg_ok = bool(item.get("no_regress_ok", True))
+                collapsed = bool(summary.get("collapsed", False))
+                score = float(summary.get("gate_aligned_score", float("-inf")))
+                macro_f1 = summary.get("macro_f1")
+                macro_val = float(macro_f1) if macro_f1 is not None else float("-inf")
+                return (
+                    1 if (no_regress_floor is not None and not no_reg_ok) else 0,
+                    1 if collapsed else 0,
+                    -score,
+                    -macro_val,
+                    int(item.get("attempt_index", 0)),
+                )
+
+            selected_attempt = sorted(attempt_records, key=_attempt_rank)[0]
+            selected_idx = int(selected_attempt.get("attempt_index", 0))
+            logger.info(
+                "Two-stage restart selection for %s: selected attempt %d/%d (seed=%d, no_regress_ok=%s)",
+                room_name,
+                selected_idx + 1,
+                int(len(attempt_records)),
+                int(selected_attempt.get("seed", 0)),
+                bool(selected_attempt.get("no_regress_ok", True)),
+            )
+
+        stage_a_model = selected_attempt.get("stage_a_model")
+        stage_b_model = selected_attempt.get("stage_b_model")
+        stage_b_enabled = bool(selected_attempt.get("stage_b_enabled", False))
+        stage_b_reason = str(selected_attempt.get("stage_b_reason", "single_occupied_class"))
+        primary_occupied_class_id = int(
+            selected_attempt.get(
+                "primary_occupied_class_id",
+                class_profile.get("primary_occupied_class_id", occupied_class_ids[0]),
+            )
+        )
+        restart_selection = {
+            "enabled": bool(int(restart_attempts) > 1),
+            "attempts": int(restart_attempts),
+            "base_seed": int(restart_base_seed),
+            "selected_attempt_index": int(selected_attempt.get("attempt_index", 0)),
+            "selected_seed": int(selected_attempt.get("seed", restart_base_seed)),
+            "no_regress_floor": float(no_regress_floor) if no_regress_floor is not None else None,
+            "eligible_no_regress_count": int(
+                sum(1 for item in attempt_records if bool(item.get("no_regress_ok", True)))
+            ),
+            "attempt_summaries": [
+                {
+                    "attempt_index": int(item.get("attempt_index", 0)),
+                    "seed": int(item.get("seed", 0)),
+                    "no_regress_ok": bool(item.get("no_regress_ok", True)),
+                    "stage_b_enabled": bool(item.get("stage_b_enabled", False)),
+                    "stage_b_reason": str(item.get("stage_b_reason", "")),
+                    "macro_f1": (
+                        float((item.get("summary") or {}).get("macro_f1"))
+                        if (item.get("summary") or {}).get("macro_f1") is not None
+                        else None
+                    ),
+                    "gate_aligned_score": (
+                        float((item.get("summary") or {}).get("gate_aligned_score"))
+                        if (item.get("summary") or {}).get("gate_aligned_score") is not None
+                        else None
+                    ),
+                    "collapsed": bool((item.get("summary") or {}).get("collapsed", False)),
                 }
-                primary_occupied_class_id = max(
-                    occupied_counts.keys(),
-                    key=lambda key: occupied_counts[key],
-                )
-            else:
-                stage_b_reason = "insufficient_stage_b_class_diversity"
+                for item in attempt_records
+            ],
+        }
 
         result.update(
             {
@@ -3030,6 +3278,7 @@ class TrainingPipeline:
                 "stage_b_model": stage_b_model,
                 "stage_b_enabled": bool(stage_b_enabled),
                 "stage_b_reason": str(stage_b_reason),
+                "restart_selection": restart_selection,
             }
         )
         return result
@@ -3398,6 +3647,9 @@ class TrainingPipeline:
             "selected_pass": None,
             "fallback": None,
         }
+        label_recall_floors = self._resolve_two_stage_stage_a_label_recall_floors(room_name)
+        label_equivalents = self._resolve_room_label_equivalents(room_name)
+        tuning["label_recall_floors"] = dict(label_recall_floors)
         try:
             candidate_f1 = None
             if isinstance(champion_meta, Mapping):
@@ -3456,6 +3708,48 @@ class TrainingPipeline:
             floor = no_regress_context.get("target_macro_f1_floor")
             if no_regress_context.get("enabled") and floor is not None:
                 no_regress_ok = bool(macro_f1_val is not None and macro_f1_val + 1e-9 >= float(floor))
+            label_floor_failures: List[str] = []
+            label_floor_stats: Dict[str, Dict[str, Any]] = {}
+            label_floor_ok = True
+            if label_recall_floors:
+                raw_summary_recall = summary.get("per_label_recall") or {}
+                raw_summary_support = summary.get("per_label_support") or {}
+                summary_recall = {
+                    str(k).strip().lower(): float(v)
+                    for k, v in raw_summary_recall.items()
+                    if v is not None
+                } if isinstance(raw_summary_recall, Mapping) else {}
+                summary_support = {
+                    str(k).strip().lower(): int(v)
+                    for k, v in raw_summary_support.items()
+                    if v is not None
+                } if isinstance(raw_summary_support, Mapping) else {}
+                support_floor = int(
+                    summary.get("critical_support_floor", self._resolve_gate_aligned_critical_support_floor())
+                )
+                for label, recall_floor in label_recall_floors.items():
+                    selected_label, support, recall = self._select_best_label_variant(
+                        label,
+                        per_label_support=summary_support,
+                        per_label_recall=summary_recall,
+                        equivalents=label_equivalents,
+                    )
+                    recall_value = float(recall) if recall is not None else None
+                    eligible = int(support) >= int(support_floor)
+                    label_floor_stats[str(label)] = {
+                        "selected_label": str(selected_label),
+                        "support": int(support),
+                        "recall": float(recall_value) if recall_value is not None else None,
+                        "required_recall": float(recall_floor),
+                        "eligible_for_floor": bool(eligible),
+                    }
+                    if recall_value is None:
+                        label_floor_ok = False
+                        label_floor_failures.append(str(selected_label))
+                        continue
+                    if eligible and float(recall_value) + 1e-9 < float(recall_floor):
+                        label_floor_ok = False
+                        label_floor_failures.append(str(selected_label))
             candidate_records.append(
                 {
                     "threshold": float(threshold),
@@ -3464,6 +3758,9 @@ class TrainingPipeline:
                     "collapsed": collapsed,
                     "macro_f1": macro_f1_val,
                     "no_regress_ok": bool(no_regress_ok),
+                    "label_floor_ok": bool(label_floor_ok),
+                    "label_floor_failures": list(label_floor_failures),
+                    "label_floor_stats": label_floor_stats,
                 }
             )
 
@@ -3500,27 +3797,54 @@ class TrainingPipeline:
         baseline_score = float(baseline_record.get("score", float("-inf")))
         baseline_collapsed = bool(baseline_record.get("collapsed", False))
         baseline_no_regress_ok = bool(baseline_record.get("no_regress_ok", True))
+        baseline_label_floor_ok = bool(baseline_record.get("label_floor_ok", True))
         no_regress_context["baseline_pass"] = baseline_no_regress_ok
 
-        selected_record = _pick_best(candidate_records)
+        floor_required = bool(label_recall_floors)
+        floor_eligible_records = [
+            item for item in candidate_records if bool(item.get("label_floor_ok", True))
+        ]
+        no_regress_context["label_floor_required"] = floor_required
+        no_regress_context["label_floor_eligible_count"] = int(len(floor_eligible_records))
+        no_regress_context["baseline_label_floor_pass"] = baseline_label_floor_ok
+
+        selected_record = _pick_best(floor_eligible_records or candidate_records)
         selected_reason = "best_gate_aligned"
         if bool(no_regress_context.get("enabled")):
-            eligible_records = [item for item in candidate_records if bool(item.get("no_regress_ok", False))]
+            eligible_records = [
+                item
+                for item in candidate_records
+                if bool(item.get("no_regress_ok", False))
+                and (not floor_required or bool(item.get("label_floor_ok", True)))
+            ]
             no_regress_context["eligible_count"] = int(len(eligible_records))
             if eligible_records:
                 selected_record = _pick_best(eligible_records)
                 no_regress_context["fallback"] = "eligible_only"
             else:
                 fallback_mode = self._resolve_gate_aligned_no_regress_fallback_mode()
+                fallback_pool = floor_eligible_records or candidate_records
                 if fallback_mode == "macro_f1":
-                    selected_record = _pick_best_macro_f1(candidate_records)
-                    no_regress_context["fallback"] = "all_candidates_macro_f1"
+                    selected_record = _pick_best_macro_f1(fallback_pool)
+                    no_regress_context["fallback"] = (
+                        "all_floor_eligible_macro_f1"
+                        if floor_required and floor_eligible_records
+                        else "all_candidates_macro_f1"
+                    )
                     selected_reason = "best_macro_f1_no_regress_fallback"
                 else:
-                    no_regress_context["fallback"] = "all_candidates_no_eligible"
+                    selected_record = _pick_best(fallback_pool)
+                    no_regress_context["fallback"] = (
+                        "all_floor_eligible_no_eligible"
+                        if floor_required and floor_eligible_records
+                        else "all_candidates_no_eligible"
+                    )
                     selected_reason = "best_gate_aligned_no_regress"
             if selected_reason == "best_gate_aligned":
                 selected_reason = "best_gate_aligned_no_regress"
+        elif floor_required and floor_eligible_records:
+            selected_record = _pick_best(floor_eligible_records)
+            selected_reason = "best_gate_aligned_label_floor"
         selected_summary = dict(selected_record.get("summary", {}))
         best_threshold = float(selected_record.get("threshold", baseline))
         best_score = float(selected_record.get("score", float("-inf")))
@@ -3536,21 +3860,28 @@ class TrainingPipeline:
             else float("-inf")
         )
         selected_no_regress_ok = bool(selected_record.get("no_regress_ok", True))
+        selected_label_floor_ok = bool(selected_record.get("label_floor_ok", True))
         no_regress_context["selected_pass"] = selected_no_regress_ok
+        no_regress_context["selected_label_floor_pass"] = selected_label_floor_ok
 
         improve = best_score > (baseline_score + 1e-8)
         collapse_rescue = baseline_collapsed and not bool(selected_summary.get("collapsed", False))
         macro_f1_rescue = selected_macro_f1 > (baseline_macro_f1 + 1e-8)
+        label_floor_rescue = bool(floor_required and (not baseline_label_floor_ok) and selected_label_floor_ok)
         no_regress_rescue = bool(
             no_regress_context.get("enabled")
             and (not baseline_no_regress_ok)
             and selected_no_regress_ok
         )
-        if (improve or collapse_rescue or no_regress_rescue or macro_f1_rescue) and abs(best_threshold - baseline) > 1e-9:
+        if (
+            improve or collapse_rescue or no_regress_rescue or macro_f1_rescue or label_floor_rescue
+        ) and abs(best_threshold - baseline) > 1e-9:
             tuning["applied"] = True
             tuning["selected_threshold"] = float(best_threshold)
             if no_regress_rescue:
                 tuning["reason"] = "no_regress_rescue"
+            elif label_floor_rescue:
+                tuning["reason"] = "label_floor_rescue"
             elif selected_reason == "best_macro_f1_no_regress_fallback" and macro_f1_rescue:
                 tuning["reason"] = "best_macro_f1_no_regress_fallback"
             else:
@@ -5621,6 +5952,7 @@ class TrainingPipeline:
                     if validation_data is not None
                     else None
                 ),
+                champion_meta=champion_meta,
                 max_epochs=max_epochs,
             )
             if bool(two_stage_result.get("enabled", False)):
@@ -5754,6 +6086,7 @@ class TrainingPipeline:
                         two_stage_result.get('stage_a_threshold_source', 'env_default')
                     ),
                     'stage_a_calibration': dict(two_stage_result.get('stage_a_calibration', {})),
+                    'restart_selection': dict(two_stage_result.get('restart_selection', {})),
                 },
             }
             metrics["split_support"] = split_support_debug
@@ -5879,6 +6212,7 @@ class TrainingPipeline:
                     metrics['macro_f1'] = float(report['macro avg']['f1-score'])
                     metrics['macro_recall'] = float(report['macro avg']['recall'])
                     metrics['macro_precision'] = float(report['macro avg']['precision'])
+                    per_label_precision = {}
                     per_label_recall = {}
                     per_label_support = {}
                     if classes is not None:
@@ -5888,11 +6222,14 @@ class TrainingPipeline:
                             label_name = str(classes[class_id]).strip().lower()
                             class_key = str(int(class_id))
                             label_metrics = report.get(class_key, {})
+                            per_label_precision[label_name] = float(label_metrics.get("precision", 0.0))
                             per_label_recall[label_name] = float(label_metrics.get("recall", 0.0))
                             per_label_support[label_name] = int(label_metrics.get("support", 0) or 0)
                     for critical_label in self._resolve_critical_labels(room_name):
                         per_label_support.setdefault(str(critical_label).strip().lower(), 0)
+                        per_label_precision.setdefault(str(critical_label).strip().lower(), 0.0)
                     metrics["per_label_recall"] = per_label_recall
+                    metrics["per_label_precision"] = per_label_precision
                     metrics["per_label_support"] = per_label_support
                     logger.info(f"Validation metrics for {room_name}: F1={metrics['macro_f1']:.3f}, Recall={metrics['macro_recall']:.3f}")
                 except Exception as e:

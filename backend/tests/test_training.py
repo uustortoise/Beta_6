@@ -50,6 +50,11 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertEqual(h1, h2)
         self.assertEqual(len(h1), 64)
 
+    def test_policy_hash_changes_when_two_stage_core_policy_changes(self):
+        p1 = load_policy_from_env({"ENABLE_TWO_STAGE_CORE_MODELING": "true"})
+        p2 = load_policy_from_env({"ENABLE_TWO_STAGE_CORE_MODELING": "false"})
+        self.assertNotEqual(self.pipeline._policy_hash(p1), self.pipeline._policy_hash(p2))
+
     def test_active_policy_uses_snapshot_when_present(self):
         p1 = load_policy_from_env({"MINORITY_TARGET_SHARE": "0.11"})
         p2 = load_policy_from_env({"MINORITY_TARGET_SHARE": "0.33"})
@@ -278,6 +283,59 @@ class TestTrainingPipeline(unittest.TestCase):
             float(result.get("predicted_occupied_rate", 0.0)),
             float(result.get("min_predicted_occupied_rate", 0.0)) - 1e-6,
         )
+
+    @patch("ml.training.build_transformer_model")
+    def test_train_two_stage_core_models_uses_typed_policy_over_conflicting_env(self, mock_build_model):
+        self.mock_platform.label_encoders["Bathroom"] = MagicMock()
+        self.mock_platform.label_encoders["Bathroom"].classes_ = [
+            "bathroom_normal_use",
+            "shower",
+            "unoccupied",
+        ]
+        policy = load_policy_from_env(
+            {
+                "ENABLE_TWO_STAGE_CORE_MODELING": "true",
+                "TWO_STAGE_CORE_ROOMS": "bathroom",
+                "TWO_STAGE_CORE_GATE_MODE": "primary",
+                "TWO_STAGE_CORE_STAGE_A_OCCUPIED_THRESHOLD": "0.42",
+            }
+        )
+        pipeline = TrainingPipeline(self.mock_platform, self.mock_registry, policy=policy)
+
+        stage_a_model = MagicMock()
+        stage_b_model = MagicMock()
+        mock_build_model.side_effect = [stage_a_model, stage_b_model]
+
+        X_train = np.zeros((12, 5, 3), dtype=np.float32)
+        y_train = np.asarray([0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2], dtype=np.int32)
+        validation_data = (
+            np.zeros((6, 5, 3), dtype=np.float32),
+            np.asarray([0, 1, 2, 0, 1, 2], dtype=np.int32),
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "ENABLE_TWO_STAGE_CORE_MODELING": "false",
+                "TWO_STAGE_CORE_ROOMS": "",
+                "TWO_STAGE_CORE_GATE_MODE": "shadow",
+                "TWO_STAGE_CORE_STAGE_A_OCCUPIED_THRESHOLD": "0.91",
+            },
+            clear=False,
+        ):
+            result = pipeline._train_two_stage_core_models(
+                room_name="Bathroom",
+                seq_length=5,
+                X_train=X_train,
+                y_train=y_train,
+                validation_data=validation_data,
+                max_epochs=2,
+            )
+
+        self.assertTrue(bool(result.get("enabled")))
+        self.assertEqual(result.get("gate_mode"), "primary")
+        self.assertAlmostEqual(float(result.get("stage_a_occupied_threshold", 0.0)), 0.42, places=6)
+        self.assertEqual(result.get("stage_a_threshold_source"), "policy_default")
 
     def test_write_decision_trace_persists_latest_and_versioned(self):
         with TemporaryDirectory() as tmp:

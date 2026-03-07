@@ -1864,34 +1864,17 @@ class TrainingPipeline:
         result["class_ids"] = sorted(set(required_ids))
         return result
 
-    @staticmethod
-    def _resolve_two_stage_core_rooms() -> set[str]:
-        default_rooms = "bathroom,bedroom,kitchen,livingroom"
-        raw = str(os.getenv("TWO_STAGE_CORE_ROOMS", default_rooms))
-        return {
-            normalize_room_name(token)
-            for token in raw.split(",")
-            if str(token).strip()
-        }
+    def _resolve_two_stage_core_rooms(self) -> set[str]:
+        return self._active_policy().two_stage_core.normalized_rooms()
 
-    @staticmethod
-    def _resolve_two_stage_gate_mode() -> str:
-        raw = str(os.getenv("TWO_STAGE_CORE_GATE_MODE", "shadow")).strip().lower()
-        if raw in {"primary", "shadow"}:
-            return raw
-        return "shadow"
+    def _resolve_two_stage_gate_mode(self) -> str:
+        return self._active_policy().two_stage_core.resolved_gate_mode()
 
-    @staticmethod
-    def _resolve_two_stage_stage_a_default_threshold() -> float:
-        raw = os.getenv("TWO_STAGE_CORE_STAGE_A_OCCUPIED_THRESHOLD", "0.5")
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            value = 0.5
+    def _resolve_two_stage_stage_a_default_threshold(self) -> float:
+        value = self._active_policy().two_stage_core.stage_a_occupied_threshold
         return float(np.clip(value, 0.0, 1.0))
 
-    @staticmethod
-    def _resolve_two_stage_stage_a_threshold_bounds() -> Tuple[float, float]:
+    def _resolve_two_stage_stage_a_threshold_bounds(self) -> Tuple[float, float]:
         """
         Resolve stage-A occupancy threshold bounds.
 
@@ -1899,24 +1882,9 @@ class TrainingPipeline:
         because stage-A (occupied-vs-unoccupied) needs room to lower threshold
         aggressively when collapse pressure is high.
         """
-        raw_min = os.getenv("TWO_STAGE_CORE_STAGE_A_THRESHOLD_MIN", "0.00")
-        raw_max = os.getenv("TWO_STAGE_CORE_STAGE_A_THRESHOLD_MAX", "0.95")
-        try:
-            min_thr = float(raw_min)
-        except (TypeError, ValueError):
-            min_thr = 0.00
-        try:
-            max_thr = float(raw_max)
-        except (TypeError, ValueError):
-            max_thr = 0.95
-        min_thr = float(np.clip(min_thr, 0.0, 1.0))
-        max_thr = float(np.clip(max_thr, 0.0, 1.0))
-        if min_thr > max_thr:
-            min_thr, max_thr = max_thr, min_thr
-        return min_thr, max_thr
+        return self._active_policy().two_stage_core.resolved_threshold_bounds()
 
-    @staticmethod
-    def _resolve_two_stage_stage_a_min_predicted_occupied_floor() -> Tuple[float, float]:
+    def _resolve_two_stage_stage_a_min_predicted_occupied_floor(self) -> Tuple[float, float]:
         """
         Resolve safeguards for minimum predicted occupied rate on calibration.
 
@@ -1925,27 +1893,15 @@ class TrainingPipeline:
         where:
             min_pred_rate = max(absolute_floor, true_occupied_rate * relative_ratio)
         """
-        raw_ratio = os.getenv("TWO_STAGE_CORE_STAGE_A_MIN_PRED_OCCUPIED_RATIO", "0.50")
-        raw_abs = os.getenv("TWO_STAGE_CORE_STAGE_A_MIN_PRED_OCCUPIED_ABS", "0.05")
-        try:
-            ratio = float(raw_ratio)
-        except (TypeError, ValueError):
-            ratio = 0.50
-        try:
-            abs_floor = float(raw_abs)
-        except (TypeError, ValueError):
-            abs_floor = 0.05
+        two_stage_policy = self._active_policy().two_stage_core
+        ratio = float(two_stage_policy.stage_a_min_predicted_occupied_ratio)
+        abs_floor = float(two_stage_policy.stage_a_min_predicted_occupied_abs)
         ratio = float(np.clip(ratio, 0.0, 1.0))
         abs_floor = float(np.clip(abs_floor, 0.0, 1.0))
         return ratio, abs_floor
 
     def _two_stage_core_enabled_for_room(self, room_name: str) -> bool:
-        enabled = str(os.getenv("ENABLE_TWO_STAGE_CORE_MODELING", "false")).strip().lower() in {
-            "1", "true", "yes", "on", "enabled"
-        }
-        if not enabled:
-            return False
-        return normalize_room_name(room_name) in self._resolve_two_stage_core_rooms()
+        return self._active_policy().two_stage_core.enabled_for_room(room_name)
 
     def _resolve_two_stage_class_profile(self, room_name: str) -> Dict[str, Any]:
         """
@@ -2041,7 +1997,7 @@ class TrainingPipeline:
             "gate_mode": self._resolve_two_stage_gate_mode(),
             "room": normalize_room_name(room_name),
             "stage_a_occupied_threshold": self._resolve_two_stage_stage_a_default_threshold(),
-            "stage_a_threshold_source": "env_default",
+            "stage_a_threshold_source": "policy_default",
         }
         if not self._two_stage_core_enabled_for_room(room_name):
             return result
@@ -2207,7 +2163,7 @@ class TrainingPipeline:
         result: Dict[str, Any] = {
             "threshold": float(default_thr),
             "status": "fallback_default",
-            "source": "env_default",
+            "source": "policy_default",
             "support_occupied": 0,
             "samples": 0,
             "target_precision": None,
@@ -2274,18 +2230,24 @@ class TrainingPipeline:
             return result
 
         calibration_policy = self._active_policy().calibration
-        raw_target_precision = os.getenv(
-            "TWO_STAGE_CORE_STAGE_A_TARGET_PRECISION",
-            str(calibration_policy.default_precision_target),
+        two_stage_policy = self._active_policy().two_stage_core
+        target_precision = float(
+            np.clip(
+                float(two_stage_policy.stage_a_target_precision),
+                0.0,
+                1.0,
+            )
         )
-        raw_recall_floor = os.getenv("TWO_STAGE_CORE_STAGE_A_RECALL_FLOOR", "0.20")
-        try:
-            target_precision = float(raw_target_precision)
-        except (TypeError, ValueError):
+        recall_floor = float(
+            np.clip(
+                float(two_stage_policy.stage_a_recall_floor),
+                0.0,
+                1.0,
+            )
+        )
+        if not np.isfinite(target_precision):
             target_precision = float(calibration_policy.default_precision_target)
-        try:
-            recall_floor = float(raw_recall_floor)
-        except (TypeError, ValueError):
+        if not np.isfinite(recall_floor):
             recall_floor = 0.20
         result["target_precision"] = target_precision
         result["recall_floor"] = recall_floor
@@ -2483,7 +2445,7 @@ class TrainingPipeline:
                     self._resolve_two_stage_stage_a_default_threshold(),
                 )
             ),
-            "stage_a_threshold_source": str(two_stage_result.get("stage_a_threshold_source") or "env_default"),
+            "stage_a_threshold_source": str(two_stage_result.get("stage_a_threshold_source") or "policy_default"),
             "stage_a_calibration": dict(two_stage_result.get("stage_a_calibration") or {}),
             "num_classes": int(two_stage_result.get("num_classes", 0) or 0),
             "classes": list((two_stage_result.get("class_profile") or {}).get("classes", [])),
@@ -4258,7 +4220,7 @@ class TrainingPipeline:
                     )
                 )
                 two_stage_result["stage_a_threshold_source"] = str(
-                    stage_a_calibration.get("source", "env_default")
+                    stage_a_calibration.get("source", "policy_default")
                 )
                 two_stage_result["stage_a_calibration"] = stage_a_calibration
             
@@ -4338,7 +4300,7 @@ class TrainingPipeline:
                         )
                     ),
                     'stage_a_threshold_source': str(
-                        two_stage_result.get('stage_a_threshold_source', 'env_default')
+                        two_stage_result.get('stage_a_threshold_source', 'policy_default')
                     ),
                     'stage_a_calibration': dict(two_stage_result.get('stage_a_calibration', {})),
                 },

@@ -24,6 +24,16 @@ def test_load_policy_defaults_match_legacy_knobs():
     assert policy.reproducibility.random_seed == 42
     assert policy.reproducibility.skip_if_same_data_and_policy is True
     assert policy.promotion_eligibility.min_training_days_with_champion == 7.0
+    assert policy.two_stage_core.enabled is True
+    assert policy.two_stage_core.rooms == ["bedroom", "livingroom", "kitchen", "bathroom"]
+    assert policy.two_stage_core.gate_mode == "primary"
+    assert policy.two_stage_core.stage_a_occupied_threshold == 0.50
+    assert policy.two_stage_core.stage_a_target_precision == 0.70
+    assert policy.two_stage_core.stage_a_recall_floor == 0.20
+    assert policy.two_stage_core.stage_a_threshold_min == 0.00
+    assert policy.two_stage_core.stage_a_threshold_max == 0.95
+    assert policy.two_stage_core.stage_a_min_predicted_occupied_ratio == 0.50
+    assert policy.two_stage_core.stage_a_min_predicted_occupied_abs == 0.05
 
 
 def test_load_policy_env_overrides_unoccupied_and_minority():
@@ -141,6 +151,32 @@ def test_release_gate_and_reproducibility_env_overrides():
     assert policy.reproducibility.skip_if_same_data_and_policy is False
     assert policy.release_gate.allow_gate_config_fallback_pass is False
     assert policy.promotion_eligibility.min_training_days_with_champion == 9.0
+
+
+def test_load_policy_supports_two_stage_core_controls():
+    env = {
+        "ENABLE_TWO_STAGE_CORE_MODELING": "false",
+        "TWO_STAGE_CORE_ROOMS": "bathroom",
+        "TWO_STAGE_CORE_GATE_MODE": "shadow",
+        "TWO_STAGE_CORE_STAGE_A_OCCUPIED_THRESHOLD": "0.42",
+        "TWO_STAGE_CORE_STAGE_A_TARGET_PRECISION": "0.76",
+        "TWO_STAGE_CORE_STAGE_A_RECALL_FLOOR": "0.33",
+        "TWO_STAGE_CORE_STAGE_A_THRESHOLD_MIN": "0.10",
+        "TWO_STAGE_CORE_STAGE_A_THRESHOLD_MAX": "0.88",
+        "TWO_STAGE_CORE_STAGE_A_MIN_PRED_OCCUPIED_RATIO": "0.61",
+        "TWO_STAGE_CORE_STAGE_A_MIN_PRED_OCCUPIED_ABS": "0.14",
+    }
+    policy = load_policy_from_env(env)
+    assert policy.two_stage_core.enabled is False
+    assert policy.two_stage_core.rooms == ["bathroom"]
+    assert policy.two_stage_core.gate_mode == "shadow"
+    assert policy.two_stage_core.stage_a_occupied_threshold == 0.42
+    assert policy.two_stage_core.stage_a_target_precision == 0.76
+    assert policy.two_stage_core.stage_a_recall_floor == 0.33
+    assert policy.two_stage_core.stage_a_threshold_min == 0.10
+    assert policy.two_stage_core.stage_a_threshold_max == 0.88
+    assert policy.two_stage_core.stage_a_min_predicted_occupied_ratio == 0.61
+    assert policy.two_stage_core.stage_a_min_predicted_occupied_abs == 0.14
 
 
 def test_release_gate_evidence_profile_pilot_stage_a_defaults():

@@ -1,0 +1,32 @@
+2026-03-07 00:00:00 UTC | TASK-BETA6-BINARY-STABILITY | Planned binary-room stability fixes
+- Action: Added design doc and implementation plan for bounded collapse-retry and representative calibration split selection.
+- Code change: docs/plans/2026-03-07-binary-room-stability-design.md, docs/plans/2026-03-07-binary-room-stability-implementation.md
+- Testing: Not run yet
+- Decision: Fix structure before collecting more pilot data because current blockers are caused by training/calibration behavior, not lack of realistic user samples.
+2026-03-07 07:00:00 UTC | TASK-BETA6-BINARY-STABILITY | Implemented and verified structural fixes
+- Action: Added binary-room collapse-retry ratio bound and prevalence-aware calibration split selection in backend/ml/training.py.
+- Code change: backend/ml/training.py, backend/tests/test_training.py
+- Testing:
+  - pytest backend/tests/test_training.py -q -k 'collapse_retry_class_weights_caps_binary_ratio_growth or select_calibration_size_prefers_representative_class_mix' -> 2 passed
+  - pytest backend/tests/test_training.py -q -> 94 passed
+  - pytest backend/tests/test_prediction.py -q -> 16 passed
+- Decision: Keep gates unchanged; fix model behavior rather than relaxing policy.
+2026-03-07 07:10:00 UTC | TASK-BETA6-BINARY-STABILITY | Started same-cohort Jessica retrain for outcome verification
+- Action: Restored the 7 archived Jessica parquet files into data/raw, confirmed the watcher environment mismatch (pilot_stage_a + auto_aggregate), then ran a direct one-shot retrain with RETRAIN_INPUT_MODE=incoming_only.
+- Code change: none
+- Testing: Retrain entered the room-training loop successfully, but PostgreSQL remained unavailable inside the sandbox and the full run was too long to complete within this turn.
+- Decision: Treat the code/test verification as complete; treat full model-performance verification as pending a longer or unsandboxed run.
+2026-03-07 08:35:00 UTC | TASK-BETA6-WATCHER-ALIGNMENT | Fixed pilot watcher config alignment and verified unsandboxed retrain startup
+- Action: Changed retrain-mode defaulting so Beta 6 authority / pilot evidence profiles default to `incoming_only`, and updated `start.sh` to persist an aligned watcher config instead of relaunching with `auto_aggregate`.
+- Code change: backend/run_daily_analysis.py, backend/tests/test_run_daily_analysis_thresholds.py, start.sh
+- Testing:
+  - pytest backend/tests/test_run_daily_analysis_thresholds.py backend/tests/test_run_daily_analysis_beta6_authority.py -q -> 61 passed
+  - bash -n start.sh -> pass
+- Operational note: Started an unsandboxed Jessica one-shot retrain from `/tmp/jessica_retrain_20260307`; PostgreSQL initialized successfully and the run progressed into live room training, clearing the prior sandbox DB blocker, but full room outcomes were still pending because the retrain is hour-scale.
+- Decision: Treat watcher/env mismatch as fixed; treat final Entrance/Kitchen outcome comparison as pending completion of the live unsandboxed retrain.
+2026-03-07 04:04:00 UTC | TASK-BETA61-AUTHORITY-BEDROOM | Recorded full Beta 6.1 verification bundle
+- Action: Ran the combined authority, timeline, runtime-parity, training, and prediction regression bundle after the fail-closed authority patch and the holdout-fallback Bedroom gate fix.
+- Code change: dev_history.log
+- Testing:
+  - PYTHONDONTWRITEBYTECODE=1 pytest backend/tests/test_run_daily_analysis_beta6_authority.py backend/tests/test_beta6_gate_engine.py backend/tests/test_beta6_timeline_hard_gates.py backend/tests/test_beta6_dynamic_gate_artifacts.py backend/tests/test_beta6_runtime_eval_parity.py backend/tests/test_prediction_beta6_runtime_hook_parity.py backend/tests/test_training.py backend/tests/test_prediction.py -q -> exit 0, 153 passed, 3 warnings in 3.84s
+- Decision: Proceed to one fresh daily analysis run and inspect Bedroom, Entrance, and Kitchen outcomes on live artifacts.

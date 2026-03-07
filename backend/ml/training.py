@@ -10,6 +10,8 @@ import pandas as pd
 import re
 import random
 import uuid
+import copy
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Any, Optional, Mapping, Sequence
 
@@ -66,6 +68,7 @@ from ml.transformer_timeline_heads import (
     TimelineHeadConfig,
     create_timeline_heads,
 )
+from ml.beta6.sequence.hmm_decoder import DEFAULT_DECODER_POLICY
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +89,8 @@ class TrainingPipeline:
         self._policy_snapshot: Optional[TrainingPolicy] = None
         self._last_calibration_debug: List[Dict[str, Any]] = []
         self._last_release_gate_watch_reasons: List[str] = []
+        self._last_unoccupied_downsample_debug: Dict[str, Any] = {}
+        self._seed_panel_debug_context: Optional[Dict[str, Any]] = None
         
         # macOS Optimization: Threading and Memory Growth
         try:
@@ -163,6 +168,13 @@ class TrainingPipeline:
         if classes is None or len(classes) == 0:
             return {}
         return {int(i): float(DEFAULT_CONFIDENCE_THRESHOLD) for i in range(len(classes))}
+
+    def _should_shuffle_post_split_batches(self, room_name: str) -> bool:
+        try:
+            profile = self._active_policy().training_profile
+        except Exception:
+            return False
+        return bool(profile.should_shuffle_post_split(room_name))
 
     @staticmethod
     def _resolve_scheduled_threshold(schedule: List[Dict[str, Any]], training_days: float) -> Optional[float]:
@@ -792,6 +804,415 @@ class TrainingPipeline:
             out[str(int(class_id))] = int(count)
         return out
 
+    @staticmethod
+    def _resolve_debug_room_list_env(name: str) -> set[str]:
+        raw = os.getenv(name)
+        if raw is None:
+            return set()
+        rooms: set[str] = set()
+        for token in str(raw).split(","):
+            item = str(token).strip()
+            if not item:
+                continue
+            rooms.add(normalize_room_name(item))
+        return rooms
+
+    def _is_prediction_audit_enabled(self, room_name: str) -> bool:
+        rooms = self._resolve_debug_room_list_env("DEBUG_POST_FIT_AUDIT_ROOMS")
+        room_key = normalize_room_name(room_name)
+        return "*" in rooms or room_key in rooms
+
+    @staticmethod
+    def _resolve_reported_accuracy(
+        *,
+        fit_history_accuracy: float,
+        post_fit_train_summary: Optional[Mapping[str, Any]] = None,
+    ) -> tuple[float, str]:
+        if isinstance(post_fit_train_summary, Mapping) and bool(post_fit_train_summary.get("available")):
+            try:
+                return float(post_fit_train_summary.get("accuracy", 0.0)), "post_fit_train_predictions"
+            except (TypeError, ValueError):
+                pass
+        return float(fit_history_accuracy), "fit_history"
+
+    def _predict_activity_probabilities(
+        self,
+        *,
+        model: Any,
+        X: np.ndarray,
+        timeline_multitask_enabled: bool,
+    ) -> np.ndarray:
+        y_pred = model.predict(X, verbose=0)
+        if isinstance(y_pred, dict):
+            y_pred = y_pred.get("activity_logits")
+        if y_pred is None:
+            raise ModelTrainError("Missing activity logits for prediction audit")
+        y_pred_arr = np.asarray(y_pred, dtype=np.float32)
+        if bool(timeline_multitask_enabled):
+            y_pred_arr = tf.nn.softmax(y_pred_arr, axis=1).numpy()
+        return np.asarray(y_pred_arr, dtype=np.float32)
+
+    def _summarize_prediction_audit(
+        self,
+        *,
+        room_name: str,
+        y_true: Any,
+        y_pred_probs: Any,
+    ) -> Dict[str, Any]:
+        y_true_arr = np.asarray(y_true, dtype=np.int32)
+        y_pred_arr = np.asarray(y_pred_probs, dtype=np.float32)
+        result: Dict[str, Any] = {
+            "available": False,
+            "sample_count": int(len(y_true_arr)),
+        }
+        if y_pred_arr.ndim != 2 or y_pred_arr.shape[0] != len(y_true_arr):
+            result["reason"] = f"unexpected_prediction_shape:{getattr(y_pred_arr, 'shape', None)}"
+            return result
+
+        label_encoder = self.platform.label_encoders.get(room_name)
+        classes = getattr(label_encoder, "classes_", None) if label_encoder is not None else None
+        class_ids = sorted(
+            set(np.unique(y_true_arr).astype(int)) | set(np.argmax(y_pred_arr, axis=1).astype(int))
+        )
+        if classes is not None:
+            class_ids = [int(cid) for cid in class_ids if 0 <= int(cid) < len(classes)]
+
+        def _label_name(class_id: int) -> str:
+            if classes is not None and 0 <= int(class_id) < len(classes):
+                return str(classes[int(class_id)]).strip().lower()
+            return f"class_{int(class_id)}"
+
+        y_pred_classes = np.argmax(y_pred_arr, axis=1)
+        report = classification_report(y_true_arr, y_pred_classes, output_dict=True, zero_division=0)
+        pred_dist: Dict[str, int] = {}
+        true_dist: Dict[str, int] = {}
+        probability_by_true_label: Dict[str, Dict[str, Any]] = {}
+        for class_id in class_ids:
+            label_name = _label_name(class_id)
+            true_mask = y_true_arr == int(class_id)
+            true_dist[label_name] = int(np.sum(true_mask))
+            pred_dist[label_name] = int(np.sum(y_pred_classes == int(class_id)))
+            if bool(np.any(true_mask)):
+                probability_by_true_label[label_name] = {
+                    "count": int(np.sum(true_mask)),
+                    "mean_probability_by_label": {
+                        _label_name(other_id): float(np.mean(y_pred_arr[true_mask, int(other_id)]))
+                        for other_id in class_ids
+                    },
+                }
+            else:
+                probability_by_true_label[label_name] = {
+                    "count": 0,
+                    "mean_probability_by_label": {
+                        _label_name(other_id): 0.0 for other_id in class_ids
+                    },
+                }
+
+        result.update(
+            {
+                "available": True,
+                "accuracy": float(np.mean(y_pred_classes == y_true_arr)) if len(y_true_arr) else 0.0,
+                "macro_f1": float(report.get("macro avg", {}).get("f1-score", 0.0)),
+                "macro_precision": float(report.get("macro avg", {}).get("precision", 0.0)),
+                "macro_recall": float(report.get("macro avg", {}).get("recall", 0.0)),
+                "true_class_distribution": true_dist,
+                "predicted_class_distribution": pred_dist,
+                "mean_probability_by_true_label": probability_by_true_label,
+            }
+        )
+        return result
+
+    @classmethod
+    def _compute_class_share_drift_from_labels(
+        cls,
+        reference_labels: Any,
+        comparison_labels: Any,
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "available": False,
+            "reference_total": 0.0,
+            "comparison_total": 0.0,
+            "max_abs_drift": None,
+            "max_abs_drift_pp": None,
+            "max_drift_class": None,
+            "class_drift": {},
+        }
+        reference_counts = cls._normalize_class_count_map(cls._build_class_support_map(reference_labels))
+        comparison_counts = cls._normalize_class_count_map(cls._build_class_support_map(comparison_labels))
+        if not reference_counts or not comparison_counts:
+            return result
+
+        reference_total = float(sum(reference_counts.values()))
+        comparison_total = float(sum(comparison_counts.values()))
+        if reference_total <= 0.0 or comparison_total <= 0.0:
+            return result
+
+        def _sort_key(token: str) -> Tuple[int, str]:
+            try:
+                return int(token), token
+            except (TypeError, ValueError):
+                return 10**9, token
+
+        class_ids = sorted(set(reference_counts.keys()) | set(comparison_counts.keys()), key=_sort_key)
+        max_abs = -1.0
+        max_class: Optional[str] = None
+        class_drift: Dict[str, Dict[str, float]] = {}
+        for class_id in class_ids:
+            reference_share = float(reference_counts.get(class_id, 0.0)) / reference_total
+            comparison_share = float(comparison_counts.get(class_id, 0.0)) / comparison_total
+            drift = float(comparison_share - reference_share)
+            class_drift[class_id] = {
+                "reference_share": float(reference_share),
+                "comparison_share": float(comparison_share),
+                "drift": float(drift),
+                "drift_pp": float(drift * 100.0),
+            }
+            abs_drift = abs(drift)
+            if abs_drift > max_abs:
+                max_abs = float(abs_drift)
+                max_class = class_id
+
+        result.update(
+            {
+                "available": True,
+                "reference_total": float(reference_total),
+                "comparison_total": float(comparison_total),
+                "max_abs_drift": float(max_abs if max_abs >= 0.0 else 0.0),
+                "max_abs_drift_pp": float((max_abs if max_abs >= 0.0 else 0.0) * 100.0),
+                "max_drift_class": max_class,
+                "class_drift": class_drift,
+            }
+        )
+        return result
+
+    @staticmethod
+    def _resolve_prior_drift_reference_labels(
+        reference_labels: Any,
+        fallback_labels: Any,
+    ) -> Tuple[np.ndarray, str]:
+        try:
+            fallback = np.asarray(fallback_labels, dtype=np.int64)
+        except Exception:
+            fallback = np.asarray([], dtype=np.int64)
+        try:
+            if reference_labels is None:
+                raise ValueError("missing_reference")
+            reference = np.asarray(reference_labels, dtype=np.int64)
+            if reference.size == 0:
+                raise ValueError("empty_reference")
+            return reference, "holdout"
+        except Exception:
+            return fallback, "train"
+
+    @staticmethod
+    def _select_multi_seed_candidate(candidates: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+        if not candidates:
+            raise ValueError("multi_seed_candidates_empty")
+
+        def _summary(candidate: Mapping[str, Any]) -> Mapping[str, Any]:
+            summary = candidate.get("summary") or {}
+            return summary if isinstance(summary, Mapping) else {}
+
+        def _score(candidate: Mapping[str, Any]) -> Tuple[int, int, float, float, int]:
+            summary = _summary(candidate)
+            collapsed = bool(summary.get("collapsed", False))
+            no_regress_ok = bool(candidate.get("no_regress_ok", False))
+            try:
+                gate_aligned_score = float(summary.get("gate_aligned_score", float("-inf")))
+            except (TypeError, ValueError):
+                gate_aligned_score = float("-inf")
+            try:
+                macro_f1 = float(summary.get("macro_f1", float("-inf")))
+            except (TypeError, ValueError):
+                macro_f1 = float("-inf")
+            try:
+                seed_value = int(candidate.get("seed", 0))
+            except (TypeError, ValueError):
+                seed_value = 0
+            return (
+                1 if not collapsed else 0,
+                1 if no_regress_ok else 0,
+                gate_aligned_score,
+                macro_f1,
+                -seed_value,
+            )
+
+        best = max(candidates, key=_score)
+        return dict(best)
+
+    @staticmethod
+    @contextmanager
+    def _temporary_env_overrides(overrides: Mapping[str, Optional[str]]):
+        previous: Dict[str, Optional[str]] = {}
+        try:
+            for key, value in overrides.items():
+                previous[str(key)] = os.environ.get(str(key))
+                if value is None:
+                    os.environ.pop(str(key), None)
+                else:
+                    os.environ[str(key)] = str(value)
+            yield
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(str(key), None)
+                else:
+                    os.environ[str(key)] = value
+
+    def _spawn_candidate_pipeline(self) -> "TrainingPipeline":
+        nested_policy = None
+        if not self._use_env_policy:
+            nested_policy = copy.deepcopy(self._active_policy())
+            raw_seed_override = os.getenv("TRAINING_RANDOM_SEED")
+            if raw_seed_override is not None:
+                try:
+                    nested_policy.reproducibility.random_seed = int(raw_seed_override)
+                except (TypeError, ValueError):
+                    pass
+        return TrainingPipeline(self.platform, self.registry, policy=nested_policy)
+
+    def _multi_seed_enabled_for_room(self, room_name: str) -> bool:
+        if str(os.getenv("TRAINING_MULTI_SEED_ACTIVE", "")).strip() == "1":
+            return False
+        room_key = normalize_room_name(room_name)
+        enabled_rooms = {
+            str(item).strip().lower()
+            for item in self._active_policy().reproducibility.multi_seed_rooms
+            if str(item).strip()
+        }
+        return room_key in enabled_rooms
+
+    @staticmethod
+    def _build_seed_panel_candidate_summary(metrics: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
+        reasons = [str(item) for item in (metrics.get("gate_reasons") or []) if str(item).strip()]
+        predicted_distribution = metrics.get("predicted_class_distribution") or {}
+        total_predictions = 0.0
+        dominant_label = None
+        dominant_share = 0.0
+        if isinstance(predicted_distribution, Mapping):
+            numeric_counts: Dict[str, float] = {}
+            for key, value in predicted_distribution.items():
+                try:
+                    numeric_counts[str(key)] = float(value)
+                except (TypeError, ValueError):
+                    continue
+            total_predictions = float(sum(numeric_counts.values()))
+            if total_predictions > 0.0 and numeric_counts:
+                dominant_label, dominant_count = max(
+                    numeric_counts.items(),
+                    key=lambda item: (float(item[1]), str(item[0])),
+                )
+                dominant_share = float(dominant_count) / total_predictions
+
+        collapsed = bool(
+            dominant_share >= 0.95
+            or any("predicted_class_collapse" in reason for reason in reasons)
+            or any("critical_label_collapse" in reason for reason in reasons)
+        )
+        no_regress_ok = not any("no_regress_failed" in reason for reason in reasons)
+        macro_f1 = float(metrics.get("macro_f1") or 0.0)
+        gate_aligned_score = float(macro_f1)
+        if not bool(metrics.get("gate_pass", False)):
+            gate_aligned_score -= max(0.5, 0.25 * float(len(reasons) or 1))
+        if not no_regress_ok:
+            gate_aligned_score -= 1.0
+        if collapsed:
+            gate_aligned_score -= 5.0
+
+        summary = {
+            "collapsed": bool(collapsed),
+            "gate_aligned_score": float(gate_aligned_score),
+            "macro_f1": float(macro_f1),
+            "gate_pass": bool(metrics.get("gate_pass", False)),
+            "dominant_label": dominant_label,
+            "dominant_share": float(dominant_share),
+            "gate_reasons": reasons,
+            "saved_version": metrics.get("saved_version"),
+        }
+        return summary, bool(no_regress_ok)
+
+    def _train_room_with_multi_seed_panel(
+        self,
+        room_name: str,
+        processed_df,
+        seq_length: int,
+        elder_id: str,
+        progress_callback=None,
+        training_mode: str = "full_retrain",
+        defer_promotion: bool = False,
+        gate_evaluation_result: Optional[Dict[str, Any]] = None,
+        event_first_shadow: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        repro = self._active_policy().reproducibility
+        seeds = [int(seed) for seed in repro.multi_seed_candidate_seeds] or [int(repro.random_seed)]
+        candidates: List[Dict[str, Any]] = []
+
+        for seed in seeds:
+            with self._temporary_env_overrides(
+                {
+                    "TRAINING_RANDOM_SEED": str(int(seed)),
+                    "TRAINING_MULTI_SEED_ACTIVE": "1",
+                }
+            ):
+                candidate_pipeline = self._spawn_candidate_pipeline()
+                candidate_metrics = candidate_pipeline.train_room(
+                    room_name=room_name,
+                    processed_df=processed_df,
+                    seq_length=seq_length,
+                    elder_id=elder_id,
+                    progress_callback=None,
+                    training_mode=training_mode,
+                    defer_promotion=True,
+                    gate_evaluation_result=gate_evaluation_result,
+                    event_first_shadow=event_first_shadow,
+                )
+            summary, no_regress_ok = self._build_seed_panel_candidate_summary(candidate_metrics or {})
+            candidates.append(
+                {
+                    "seed": int(seed),
+                    "summary": summary,
+                    "no_regress_ok": bool(no_regress_ok),
+                }
+            )
+
+        selected = self._select_multi_seed_candidate(candidates)
+        seed_panel_debug = {
+            "enabled": True,
+            "selection_mode": "deterministic_multi_seed_panel",
+            "candidate_seeds": [int(seed) for seed in seeds],
+            "selected_seed": int(selected.get("seed", seeds[0])),
+            "candidates": [
+                {
+                    "seed": int(candidate.get("seed", 0)),
+                    "summary": dict(candidate.get("summary") or {}),
+                    "no_regress_ok": bool(candidate.get("no_regress_ok", False)),
+                }
+                for candidate in candidates
+            ],
+        }
+
+        with self._temporary_env_overrides(
+            {
+                "TRAINING_RANDOM_SEED": str(int(seed_panel_debug["selected_seed"])),
+                "TRAINING_MULTI_SEED_ACTIVE": "1",
+            }
+        ):
+            selected_pipeline = self._spawn_candidate_pipeline()
+            selected_pipeline._seed_panel_debug_context = dict(seed_panel_debug)
+            final_metrics = selected_pipeline.train_room(
+                room_name=room_name,
+                processed_df=processed_df,
+                seq_length=seq_length,
+                elder_id=elder_id,
+                progress_callback=progress_callback,
+                training_mode=training_mode,
+                defer_promotion=defer_promotion,
+                gate_evaluation_result=gate_evaluation_result,
+                event_first_shadow=event_first_shadow,
+            )
+        final_metrics["seed_panel_debug"] = dict(seed_panel_debug)
+        return final_metrics
+
     def _compute_class_prior_drift(self, candidate_metrics: Mapping[str, Any]) -> Dict[str, Any]:
         """
         Compare train vs validation class priors for drift diagnostics.
@@ -812,8 +1233,11 @@ class TrainingPipeline:
             "class_drift": {},
             "train_total": 0.0,
             "validation_total": 0.0,
+            "reference_total": 0.0,
             "required_validation_support": 0,
             "validation_min_support": 0,
+            "reference_min_support": 0,
+            "reference_source": "validation",
             "drift_source": "pre_sampling_train_vs_validation",
             "sampled_available": False,
             "sampled_max_abs_drift": None,
@@ -828,25 +1252,34 @@ class TrainingPipeline:
         sampled_counts_raw: Any = candidate_metrics.get("train_class_support_post_minority_sampling") or {}
         if isinstance(minority_stats, Mapping):
             sampled_counts_raw = sampled_counts_raw or minority_stats.get("class_counts_after") or {}
+        holdout_counts_raw: Any = candidate_metrics.get("holdout_class_support") or {}
         val_counts_raw: Any = candidate_metrics.get("validation_class_support") or {}
 
         train_counts = self._normalize_class_count_map(train_counts_raw)
         sampled_counts = self._normalize_class_count_map(sampled_counts_raw)
+        holdout_counts = self._normalize_class_count_map(holdout_counts_raw)
         val_counts = self._normalize_class_count_map(val_counts_raw)
+        reference_counts = dict(holdout_counts or val_counts)
+        if holdout_counts:
+            result["drift_source"] = "pre_sampling_train_vs_holdout"
+            result["reference_source"] = "holdout"
         if not train_counts and sampled_counts:
             # Backward-compatible fallback for historical metrics without pre-sampling support map.
             train_counts = dict(sampled_counts)
-            result["drift_source"] = "post_sampling_train_vs_validation_fallback"
+            if holdout_counts:
+                result["drift_source"] = "post_sampling_train_vs_holdout_fallback"
+            else:
+                result["drift_source"] = "post_sampling_train_vs_validation_fallback"
         if not train_counts:
             result["reason"] = "missing_train_class_counts"
             return result
-        if not val_counts:
-            result["reason"] = "missing_validation_class_counts"
+        if not reference_counts:
+            result["reason"] = "missing_reference_class_counts"
             return result
 
         train_total = float(sum(train_counts.values()))
-        val_total = float(sum(val_counts.values()))
-        if train_total <= 0.0 or val_total <= 0.0:
+        reference_total = float(sum(reference_counts.values()))
+        if train_total <= 0.0 or reference_total <= 0.0:
             result["reason"] = "non_positive_class_count_total"
             return result
 
@@ -856,17 +1289,18 @@ class TrainingPipeline:
             except (TypeError, ValueError):
                 return 10**9, token
 
-        class_ids = sorted(set(train_counts.keys()) | set(val_counts.keys()), key=_sort_key)
+        class_ids = sorted(set(train_counts.keys()) | set(reference_counts.keys()), key=_sort_key)
         class_drift: Dict[str, Dict[str, float]] = {}
         max_abs = -1.0
         max_class: Optional[str] = None
         for class_id in class_ids:
             train_share = float(train_counts.get(class_id, 0.0)) / train_total
-            val_share = float(val_counts.get(class_id, 0.0)) / val_total
-            drift = float(train_share - val_share)
+            reference_share = float(reference_counts.get(class_id, 0.0)) / reference_total
+            drift = float(train_share - reference_share)
             class_drift[class_id] = {
                 "train_share": float(train_share),
-                "validation_share": float(val_share),
+                "validation_share": float(reference_share),
+                "reference_share": float(reference_share),
                 "drift": float(drift),
                 "drift_pp": float(drift * 100.0),
             }
@@ -877,8 +1311,10 @@ class TrainingPipeline:
 
         required_support = int(max(1, candidate_metrics.get("required_minority_support", 1) or 1))
         val_min_support = int(candidate_metrics.get("validation_min_class_support", 0) or 0)
+        holdout_min_support = int(candidate_metrics.get("holdout_min_class_support", 0) or 0)
+        reference_min_support = int(holdout_min_support or val_min_support)
         insufficient_validation_evidence = bool(candidate_metrics.get("insufficient_validation_evidence", False))
-        evaluable = bool(val_min_support >= required_support and not insufficient_validation_evidence)
+        evaluable = bool(reference_min_support >= required_support and not insufficient_validation_evidence)
 
         result.update(
             {
@@ -890,25 +1326,28 @@ class TrainingPipeline:
                 "max_drift_class": max_class,
                 "class_drift": class_drift,
                 "train_total": float(train_total),
-                "validation_total": float(val_total),
+                "validation_total": float(reference_total),
+                "reference_total": float(reference_total),
                 "required_validation_support": int(required_support),
                 "validation_min_support": int(val_min_support),
+                "reference_min_support": int(reference_min_support),
             }
         )
         if sampled_counts:
             sampled_total = float(sum(sampled_counts.values()))
             if sampled_total > 0.0:
-                sampled_class_ids = sorted(set(sampled_counts.keys()) | set(val_counts.keys()), key=_sort_key)
+                sampled_class_ids = sorted(set(sampled_counts.keys()) | set(reference_counts.keys()), key=_sort_key)
                 sampled_class_drift: Dict[str, Dict[str, float]] = {}
                 sampled_max_abs = -1.0
                 sampled_max_class: Optional[str] = None
                 for class_id in sampled_class_ids:
                     sampled_train_share = float(sampled_counts.get(class_id, 0.0)) / sampled_total
-                    val_share = float(val_counts.get(class_id, 0.0)) / val_total
-                    drift = float(sampled_train_share - val_share)
+                    reference_share = float(reference_counts.get(class_id, 0.0)) / reference_total
+                    drift = float(sampled_train_share - reference_share)
                     sampled_class_drift[class_id] = {
                         "train_share": float(sampled_train_share),
-                        "validation_share": float(val_share),
+                        "validation_share": float(reference_share),
+                        "reference_share": float(reference_share),
                         "drift": float(drift),
                         "drift_pp": float(drift * 100.0),
                     }
@@ -1445,6 +1884,74 @@ class TrainingPipeline:
                 decoded.append(f"class_{idx}")
         return decoded
 
+    def _build_beta6_parity_payload(
+        self,
+        *,
+        room_name: str,
+        y_pred_probs: np.ndarray,
+        max_steps: int = 128,
+    ) -> Dict[str, Any]:
+        """
+        Build a compact occupancy-level fixed trace for the Beta 6 parity gate.
+
+        The parity contract currently operates on shared occupied/unoccupied
+        semantics, so room-specific labels are collapsed to occupancy tokens and
+        explicit uncertainty labels are routed through `uncertainty_state`.
+        """
+        probs = np.asarray(y_pred_probs, dtype=np.float32)
+        if probs.ndim != 2 or probs.shape[0] <= 0 or probs.shape[1] <= 0:
+            return {}
+
+        label_encoder = self.platform.label_encoders.get(room_name)
+        classes = getattr(label_encoder, "classes_", None) if label_encoder is not None else None
+        if classes is None or len(classes) <= 0:
+            return {}
+
+        predicted_ids = np.argmax(probs, axis=1).astype(np.int32)
+        if len(predicted_ids) == 0:
+            return {}
+
+        capped_steps = max(1, int(max_steps))
+        if len(predicted_ids) > capped_steps:
+            step_indices = np.linspace(0, len(predicted_ids) - 1, num=capped_steps, dtype=np.int64)
+        else:
+            step_indices = np.arange(len(predicted_ids), dtype=np.int64)
+
+        uncertainty_labels = {"low_confidence", "unknown", "outside_sensed_space"}
+        unoccupied_labels = {"unoccupied", "vacant", "room_unoccupied"}
+        trace_steps: List[Dict[str, Any]] = []
+        for idx in step_indices:
+            class_id = int(predicted_ids[int(idx)])
+            if class_id < 0 or class_id >= len(classes):
+                continue
+            label_name = str(classes[class_id]).strip().lower()
+            if not label_name:
+                continue
+
+            if label_name in uncertainty_labels:
+                trace_steps.append(
+                    {
+                        "label": "unoccupied",
+                        "uncertainty_state": label_name,
+                    }
+                )
+            elif label_name in unoccupied_labels:
+                trace_steps.append({"label": "unoccupied"})
+            else:
+                trace_steps.append({"label": "occupied"})
+
+        if not trace_steps:
+            return {}
+
+        policy_payload = {
+            "spike_suppression": bool(DEFAULT_DECODER_POLICY.spike_suppression),
+        }
+        return {
+            "beta6_parity_trace": trace_steps,
+            "beta6_runtime_policy": dict(policy_payload),
+            "beta6_eval_policy": dict(policy_payload),
+        }
+
     def _evaluate_event_first_shadow(
         self,
         *,
@@ -1655,6 +2162,18 @@ class TrainingPipeline:
     def _resolve_minority_sampling_config(self, room_name: str) -> Dict[str, float | int | bool]:
         """Resolve minority sampling config from typed policy."""
         return self._active_policy().minority_sampling.resolve(room_name)
+
+    def _resolve_training_strategy(self, room_name: str) -> str:
+        profile = self._active_policy().training_profile
+        if profile.is_factorized_primary_room(room_name):
+            return "factorized_primary"
+        return "single_stage"
+
+    def _resolve_transition_focus_sampling_config(
+        self,
+        room_name: str,
+    ) -> Dict[str, str | int | bool]:
+        return self._active_policy().training_profile.resolve_transition_focus(room_name)
 
     @staticmethod
     def _parse_room_override_map(raw: str) -> Dict[str, str]:
@@ -1940,6 +2459,8 @@ class TrainingPipeline:
         return ratio, abs_floor
 
     def _two_stage_core_enabled_for_room(self, room_name: str) -> bool:
+        if self._active_policy().training_profile.is_factorized_primary_room(room_name):
+            return True
         enabled = str(os.getenv("ENABLE_TWO_STAGE_CORE_MODELING", "false")).strip().lower() in {
             "1", "true", "yes", "on", "enabled"
         }
@@ -2082,6 +2603,7 @@ class TrainingPipeline:
             y_val = np.asarray(validation_data[1], dtype=np.int32)
         y_val_stage_a = None
         validation_stage_a = None
+        train_batch_shuffle_enabled = bool(self._should_shuffle_post_split_batches(room_name))
         if X_val is not None and y_val is not None and len(y_val) > 0:
             y_val_stage_a = np.isin(y_val, occupied_class_ids).astype(np.int32)
             validation_stage_a = (X_val, y_val_stage_a)
@@ -2100,7 +2622,7 @@ class TrainingPipeline:
             epochs=max(1, int(max_epochs)),
             batch_size=32,
             validation_data=validation_stage_a,
-            shuffle=False,
+            shuffle=bool(train_batch_shuffle_enabled),
             verbose=0,
             class_weight=self._balanced_class_weight_dict(y_train_stage_a),
             callbacks=stage_a_callbacks,
@@ -2156,7 +2678,7 @@ class TrainingPipeline:
                     epochs=max(1, int(max_epochs)),
                     batch_size=32,
                     validation_data=validation_stage_b,
-                    shuffle=False,
+                    shuffle=bool(train_batch_shuffle_enabled),
                     verbose=0,
                     class_weight=self._balanced_class_weight_dict(y_train_stage_b),
                     callbacks=stage_b_callbacks,
@@ -2794,6 +3316,7 @@ class TrainingPipeline:
         X_train: np.ndarray,
         y_train: np.ndarray,
         room_name: str,
+        reference_labels: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
         """
         Oversample minority classes toward a target share with capped multiplier.
@@ -2803,6 +3326,9 @@ class TrainingPipeline:
             "target_share": None,
             "max_multiplier": None,
             "added_samples": 0,
+            "prior_drift_guard_applied": False,
+            "prior_drift_reference": "train",
+            "post_sampling_prior_drift": {"available": False},
             "class_counts_before": {},
             "class_counts_after": {},
         }
@@ -2813,11 +3339,18 @@ class TrainingPipeline:
         class_counts_before = {int(cls): int(cnt) for cls, cnt in zip(classes, counts)}
         stats["class_counts_before"] = class_counts_before
         stats["class_counts_after"] = dict(class_counts_before)
+        drift_reference_labels, drift_reference = self._resolve_prior_drift_reference_labels(
+            reference_labels,
+            y_train,
+        )
+        stats["prior_drift_reference"] = str(drift_reference)
 
         cfg = self._resolve_minority_sampling_config(room_name)
         stats["enabled"] = bool(cfg["enabled"])
         stats["target_share"] = float(cfg["target_share"])
         stats["max_multiplier"] = int(cfg["max_multiplier"])
+        prior_drift_guard_enabled = bool(cfg.get("prior_drift_guard_enabled", False))
+        max_post_sampling_prior_drift = float(cfg.get("max_post_sampling_prior_drift", 1.0) or 1.0)
         if not bool(cfg["enabled"]):
             return X_train, y_train, stats
 
@@ -2830,7 +3363,7 @@ class TrainingPipeline:
             return X_train, y_train, stats
 
         rng = np.random.default_rng(42)
-        sampled_idx_parts: List[np.ndarray] = []
+        sampled_idx_parts_by_class: Dict[int, np.ndarray] = {}
         added_total = 0
 
         for cls, count in zip(classes, counts):
@@ -2846,10 +3379,85 @@ class TrainingPipeline:
             add_count = min(max_extra, needed)
             if add_count <= 0:
                 continue
-            sampled_idx_parts.append(rng.choice(cls_positions, size=add_count, replace=True))
+            sampled_idx_parts_by_class[cls] = rng.choice(cls_positions, size=add_count, replace=True)
             added_total += int(add_count)
 
         if added_total == 0:
+            stats["post_sampling_prior_drift"] = self._compute_class_share_drift_from_labels(
+                drift_reference_labels,
+                y_train,
+            )
+            stats["class_counts_after"] = class_counts_before
+            return X_train, y_train, stats
+
+        if prior_drift_guard_enabled and max_post_sampling_prior_drift < 1.0:
+            while True:
+                sampled_idx_parts = [
+                    values
+                    for values in sampled_idx_parts_by_class.values()
+                    if len(values) > 0
+                ]
+                if not sampled_idx_parts:
+                    break
+                candidate_idx = np.concatenate(sampled_idx_parts).astype(np.int64, copy=False)
+                candidate_labels = np.concatenate([y_train, y_train[candidate_idx]], axis=0)
+                candidate_drift = self._compute_class_share_drift_from_labels(
+                    drift_reference_labels,
+                    candidate_labels,
+                )
+                max_abs_drift = float(candidate_drift.get("max_abs_drift") or 0.0)
+                if max_abs_drift <= max_post_sampling_prior_drift + 1e-12:
+                    stats["post_sampling_prior_drift"] = candidate_drift
+                    break
+                drift_entries = candidate_drift.get("class_drift") or {}
+                trimmed = False
+                for class_id, payload in sorted(
+                    drift_entries.items(),
+                    key=lambda item: (
+                        -abs(float((item[1] or {}).get("drift", 0.0) or 0.0)),
+                        int(item[0]) if str(item[0]).isdigit() else 10**9,
+                    ),
+                ):
+                    try:
+                        class_key = int(class_id)
+                    except (TypeError, ValueError):
+                        continue
+                    if float((payload or {}).get("drift", 0.0) or 0.0) <= 0.0:
+                        continue
+                    existing = sampled_idx_parts_by_class.get(class_key)
+                    if existing is None or len(existing) == 0:
+                        continue
+                    sampled_idx_parts_by_class[class_key] = existing[:-1]
+                    trimmed = True
+                    stats["prior_drift_guard_applied"] = True
+                    break
+                if not trimmed:
+                    stats["post_sampling_prior_drift"] = candidate_drift
+                    break
+        if not isinstance(stats.get("post_sampling_prior_drift"), Mapping) or not bool(
+            (stats.get("post_sampling_prior_drift") or {}).get("available")
+        ):
+            sampled_idx_parts = [
+                values for values in sampled_idx_parts_by_class.values() if len(values) > 0
+            ]
+            candidate_idx = (
+                np.concatenate(sampled_idx_parts).astype(np.int64, copy=False)
+                if sampled_idx_parts
+                else np.asarray([], dtype=np.int64)
+            )
+            candidate_labels = (
+                np.concatenate([y_train, y_train[candidate_idx]], axis=0)
+                if len(candidate_idx) > 0
+                else y_train
+            )
+            stats["post_sampling_prior_drift"] = self._compute_class_share_drift_from_labels(
+                drift_reference_labels,
+                candidate_labels,
+            )
+
+        sampled_idx_parts = [values for values in sampled_idx_parts_by_class.values() if len(values) > 0]
+        if not sampled_idx_parts:
+            stats["added_samples"] = 0
             stats["class_counts_after"] = class_counts_before
             return X_train, y_train, stats
 
@@ -2860,14 +3468,172 @@ class TrainingPipeline:
         y_balanced = np.concatenate([y_train, y_added], axis=0)
 
         classes_after, counts_after = np.unique(y_balanced, return_counts=True)
-        stats["added_samples"] = int(added_total)
+        stats["added_samples"] = int(len(sampled_idx))
         stats["class_counts_after"] = {int(cls): int(cnt) for cls, cnt in zip(classes_after, counts_after)}
 
         logger.info(
-            f"Minority sampling for {room_name}: added={added_total}, "
+            f"Minority sampling for {room_name}: added={int(len(sampled_idx))}, "
             f"target_share={target_share:.2f}, max_multiplier={max_multiplier}, "
+            f"prior_drift_guard_applied={bool(stats.get('prior_drift_guard_applied', False))}, "
             f"before={class_counts_before}, after={stats['class_counts_after']}"
         )
+        return X_balanced, y_balanced, stats
+
+    def _apply_transition_focus_sampling(
+        self,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        room_name: str,
+        reference_labels: Optional[np.ndarray] = None,
+    ) -> Tuple[np.ndarray, np.ndarray, Dict[str, Any]]:
+        stats: Dict[str, Any] = {
+            "enabled": False,
+            "focus_label": None,
+            "focus_class_id": None,
+            "radius_steps": 0,
+            "max_multiplier": 1,
+            "added_samples": 0,
+            "prior_drift_guard_applied": False,
+            "prior_drift_reference": "train",
+            "post_sampling_prior_drift": {"available": False},
+            "transition_window_count": 0,
+            "class_counts_before": self._build_class_support_map(y_train),
+            "class_counts_after": self._build_class_support_map(y_train),
+            "reason": "disabled",
+        }
+        if len(y_train) == 0:
+            stats["reason"] = "empty_training_labels"
+            return X_train, y_train, stats
+
+        cfg = self._resolve_transition_focus_sampling_config(room_name)
+        focus_label = str(cfg.get("focus_label", "")).strip().lower()
+        radius_steps = int(cfg.get("radius_steps", 0) or 0)
+        max_multiplier = int(cfg.get("max_multiplier", 1) or 1)
+        prior_drift_guard_enabled = bool(cfg.get("prior_drift_guard_enabled", False))
+        max_post_sampling_prior_drift = float(cfg.get("max_post_sampling_prior_drift", 1.0) or 1.0)
+        stats["focus_label"] = focus_label or None
+        stats["radius_steps"] = max(0, radius_steps)
+        stats["max_multiplier"] = max(1, max_multiplier)
+        drift_reference_labels, drift_reference = self._resolve_prior_drift_reference_labels(
+            reference_labels,
+            y_train,
+        )
+        stats["prior_drift_reference"] = str(drift_reference)
+        if not bool(cfg.get("enabled", False)):
+            stats["reason"] = "room_not_configured"
+            return X_train, y_train, stats
+
+        label_encoder = self.platform.label_encoders.get(room_name)
+        classes = getattr(label_encoder, "classes_", None) if label_encoder is not None else None
+        if classes is None or len(classes) == 0:
+            stats["reason"] = "missing_label_encoder"
+            return X_train, y_train, stats
+
+        label_to_class_id = {
+            str(label).strip().lower(): int(class_id)
+            for class_id, label in enumerate(classes)
+        }
+        focus_class_id = label_to_class_id.get(focus_label)
+        if focus_class_id is None:
+            stats["reason"] = "focus_label_missing"
+            return X_train, y_train, stats
+        stats["focus_class_id"] = int(focus_class_id)
+
+        focus_positions = np.where(np.asarray(y_train, dtype=np.int32) == int(focus_class_id))[0]
+        if len(focus_positions) == 0:
+            stats["reason"] = "focus_label_absent"
+            return X_train, y_train, stats
+
+        transition_windows: List[np.ndarray] = []
+        start = int(focus_positions[0])
+        end = int(focus_positions[0])
+        for idx in focus_positions[1:]:
+            idx = int(idx)
+            if idx == end + 1:
+                end = idx
+                continue
+            window_start = max(0, start - radius_steps)
+            window_end = min(len(y_train), end + radius_steps + 1)
+            transition_windows.append(np.arange(window_start, window_end, dtype=np.int64))
+            start = idx
+            end = idx
+        window_start = max(0, start - radius_steps)
+        window_end = min(len(y_train), end + radius_steps + 1)
+        transition_windows.append(np.arange(window_start, window_end, dtype=np.int64))
+
+        unique_indices = np.unique(np.concatenate(transition_windows).astype(np.int64, copy=False))
+        stats["transition_window_count"] = int(len(unique_indices))
+        if len(unique_indices) == 0 or max_multiplier <= 1:
+            stats["reason"] = "no_transition_windows"
+            return X_train, y_train, stats
+
+        added_idx = np.tile(unique_indices, max_multiplier - 1).astype(np.int64, copy=False)
+        if len(added_idx) == 0:
+            stats["reason"] = "no_added_samples"
+            return X_train, y_train, stats
+
+        if prior_drift_guard_enabled and max_post_sampling_prior_drift < 1.0:
+            while True:
+                if len(added_idx) == 0:
+                    break
+                candidate_labels = np.concatenate([y_train, y_train[added_idx]], axis=0)
+                candidate_drift = self._compute_class_share_drift_from_labels(
+                    drift_reference_labels,
+                    candidate_labels,
+                )
+                max_abs_drift = float(candidate_drift.get("max_abs_drift") or 0.0)
+                if max_abs_drift <= max_post_sampling_prior_drift + 1e-12:
+                    stats["post_sampling_prior_drift"] = candidate_drift
+                    break
+                drift_entries = candidate_drift.get("class_drift") or {}
+                trimmed = False
+                for class_id, payload in sorted(
+                    drift_entries.items(),
+                    key=lambda item: (
+                        -abs(float((item[1] or {}).get("drift", 0.0) or 0.0)),
+                        int(item[0]) if str(item[0]).isdigit() else 10**9,
+                    ),
+                ):
+                    try:
+                        class_key = int(class_id)
+                    except (TypeError, ValueError):
+                        continue
+                    if float((payload or {}).get("drift", 0.0) or 0.0) <= 0.0:
+                        continue
+                    candidate_positions = np.where(y_train[added_idx] == class_key)[0]
+                    if len(candidate_positions) == 0:
+                        continue
+                    added_idx = np.delete(added_idx, int(candidate_positions[-1]))
+                    stats["prior_drift_guard_applied"] = True
+                    trimmed = True
+                    break
+                if not trimmed:
+                    stats["post_sampling_prior_drift"] = candidate_drift
+                    break
+
+        if not isinstance(stats.get("post_sampling_prior_drift"), Mapping) or not bool(
+            (stats.get("post_sampling_prior_drift") or {}).get("available")
+        ):
+            candidate_labels = (
+                np.concatenate([y_train, y_train[added_idx]], axis=0)
+                if len(added_idx) > 0
+                else y_train
+            )
+            stats["post_sampling_prior_drift"] = self._compute_class_share_drift_from_labels(
+                drift_reference_labels,
+                candidate_labels,
+            )
+
+        if len(added_idx) == 0:
+            stats["reason"] = "prior_drift_guard_trimmed_all_samples"
+            return X_train, y_train, stats
+
+        X_balanced = np.concatenate([X_train, X_train[added_idx]], axis=0)
+        y_balanced = np.concatenate([y_train, y_train[added_idx]], axis=0)
+        stats["enabled"] = True
+        stats["added_samples"] = int(len(added_idx))
+        stats["class_counts_after"] = self._build_class_support_map(y_balanced)
+        stats["reason"] = "applied"
         return X_balanced, y_balanced, stats
 
     def _downsample_easy_unoccupied(
@@ -2877,12 +3643,24 @@ class TrainingPipeline:
         seq_timestamps: np.ndarray,
         room_name: str,
         resolved_cfg: Optional[Dict[str, float | int]] = None,
+        reference_labels: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
         Downsample long repetitive unoccupied runs while keeping transitions.
 
         Keeps boundary windows around run edges and samples interior points by stride.
         """
+        debug: Dict[str, Any] = {
+            "enabled": False,
+            "removed": 0,
+            "prior_drift_guard_applied": False,
+            "prior_drift_reference": "train",
+            "post_downsample_prior_drift": {"available": False},
+            "class_counts_before": self._build_class_support_map(y_seq),
+            "class_counts_after": self._build_class_support_map(y_seq),
+        }
+        self._last_unoccupied_downsample_debug = dict(debug)
+
         if len(y_seq) == 0:
             return X_seq, y_seq, seq_timestamps
 
@@ -2904,9 +3682,29 @@ class TrainingPipeline:
         stride = int(cfg["stride"])
         boundary_keep = int(cfg["boundary_keep"])
         min_run_length = int(cfg["min_run_length"])
+        prior_drift_guard_enabled = bool(cfg.get("prior_drift_guard_enabled", False))
+        max_post_downsample_prior_drift = float(cfg.get("max_post_downsample_prior_drift", 1.0) or 1.0)
+        debug.update(
+            {
+                "enabled": True,
+                "min_share": float(min_share),
+                "stride": int(stride),
+                "boundary_keep": int(boundary_keep),
+                "min_run_length": int(min_run_length),
+                "prior_drift_guard_enabled": bool(prior_drift_guard_enabled),
+                "max_post_downsample_prior_drift": float(max_post_downsample_prior_drift),
+            }
+        )
 
         unoccupied_share = float(np.mean(y_seq == unoccupied_id))
+        drift_reference_labels, drift_reference = self._resolve_prior_drift_reference_labels(
+            reference_labels,
+            y_seq,
+        )
+        debug["prior_drift_reference"] = str(drift_reference)
         if unoccupied_share < min_share:
+            debug["reason"] = "below_min_share"
+            self._last_unoccupied_downsample_debug = dict(debug)
             return X_seq, y_seq, seq_timestamps
 
         keep_mask = np.ones(len(y_seq), dtype=bool)
@@ -2939,7 +3737,51 @@ class TrainingPipeline:
             i += 1
 
         if removed == 0:
+            debug["reason"] = "no_removals"
+            debug["post_downsample_prior_drift"] = self._compute_class_share_drift_from_labels(
+                drift_reference_labels,
+                y_seq,
+            )
+            self._last_unoccupied_downsample_debug = dict(debug)
             return X_seq, y_seq, seq_timestamps
+
+        removed_indices = np.where(~keep_mask)[0]
+        if prior_drift_guard_enabled and max_post_downsample_prior_drift < 1.0 and len(removed_indices) > 0:
+            low = 0
+            high = int(len(removed_indices))
+            best_restore: Optional[int] = None
+            best_drift: Optional[Dict[str, Any]] = None
+            while low <= high:
+                restore_count = int((low + high) // 2)
+                candidate_mask = keep_mask.copy()
+                if restore_count > 0:
+                    candidate_mask[removed_indices[:restore_count]] = True
+                candidate_drift = self._compute_class_share_drift_from_labels(
+                    drift_reference_labels,
+                    y_seq[candidate_mask],
+                )
+                max_abs_drift = float(candidate_drift.get("max_abs_drift") or 0.0)
+                if max_abs_drift <= max_post_downsample_prior_drift + 1e-12:
+                    best_restore = restore_count
+                    best_drift = candidate_drift
+                    high = restore_count - 1
+                else:
+                    low = restore_count + 1
+            if best_restore is not None and best_restore > 0:
+                keep_mask[removed_indices[:best_restore]] = True
+                removed = int(np.sum(~keep_mask))
+                debug["prior_drift_guard_applied"] = True
+                debug["post_downsample_prior_drift"] = best_drift or {"available": False}
+            else:
+                debug["post_downsample_prior_drift"] = self._compute_class_share_drift_from_labels(
+                    drift_reference_labels,
+                    y_seq[keep_mask],
+                )
+        else:
+            debug["post_downsample_prior_drift"] = self._compute_class_share_drift_from_labels(
+                drift_reference_labels,
+                y_seq[keep_mask],
+            )
 
         logger.info(
             f"Downsampled easy unoccupied windows for {room_name}: "
@@ -2948,6 +3790,10 @@ class TrainingPipeline:
             f"min_share={min_share:.2f}, stride={stride}, boundary_keep={boundary_keep}, "
             f"min_run_length={min_run_length}"
         )
+        debug["removed"] = int(removed)
+        debug["class_counts_after"] = self._build_class_support_map(y_seq[keep_mask])
+        debug["reason"] = "applied"
+        self._last_unoccupied_downsample_debug = dict(debug)
         return X_seq[keep_mask], y_seq[keep_mask], seq_timestamps[keep_mask]
 
     @staticmethod
@@ -3590,12 +4436,25 @@ class TrainingPipeline:
             Dict containing training metrics with gate_pass and gate_reasons
         """
         try:
+            if self._multi_seed_enabled_for_room(room_name):
+                return self._train_room_with_multi_seed_panel(
+                    room_name=room_name,
+                    processed_df=processed_df,
+                    seq_length=seq_length,
+                    elder_id=elder_id,
+                    progress_callback=progress_callback,
+                    training_mode=training_mode,
+                    defer_promotion=defer_promotion,
+                    gate_evaluation_result=gate_evaluation_result,
+                    event_first_shadow=event_first_shadow,
+                )
             training_mode = (training_mode or "full_retrain").strip().lower()
             is_correction_fine_tune = training_mode == "correction_fine_tune"
             active_policy = self._active_policy()
             self._policy_snapshot = active_policy
             policy_hash = self._policy_hash(active_policy)
             calibration_policy = active_policy.calibration
+            training_strategy = self._resolve_training_strategy(room_name)
             self._set_training_random_seed(active_policy.reproducibility.random_seed)
             fine_tune_params = self._get_fine_tuning_params() if is_correction_fine_tune else {}
             event_first_shadow_enabled = bool(
@@ -3833,6 +4692,12 @@ class TrainingPipeline:
             )
 
             timeline_multitask_enabled = bool(getattr(model, "_timeline_multitask_enabled", False))
+            train_batch_shuffle_enabled = bool(self._should_shuffle_post_split_batches(room_name))
+            if train_batch_shuffle_enabled:
+                logger.info(
+                    "Post-split train batch shuffling enabled for %s; temporal train/holdout split is preserved.",
+                    room_name,
+                )
 
             # Disable jit_compile to avoid compilation hangs on macOS
             if timeline_multitask_enabled:
@@ -3995,10 +4860,12 @@ class TrainingPipeline:
                     f"({seq_timestamps[0]}..{seq_timestamps[split_idx-1]}), "
                     f"Holdout={len(X_holdout)} ({ts_holdout[0]}..{ts_holdout[-1]})"
                 )
+                sampling_reference_labels = y_holdout
             else:
                 X_train, y_train = X_seq, y_seq
                 ts_train = seq_timestamps
                 validation_data = None
+                sampling_reference_labels = None
                 logger.info(f"Training on full dataset ({len(X_seq)} samples)")
 
             train_class_support_pre_sampling = self._build_class_support_map(y_train)
@@ -4011,6 +4878,7 @@ class TrainingPipeline:
                 ts_train,
                 room_name,
                 resolved_cfg=unoccupied_cfg,
+                reference_labels=sampling_reference_labels,
             )
             downsample_removed = int(pre_downsample_count - len(X_train))
             train_class_support_post_downsample = self._build_class_support_map(y_train)
@@ -4032,12 +4900,29 @@ class TrainingPipeline:
                     sampling_strategy=str(fine_tune_params.get("replay_sampling", "random_stratified")),
                 )
             train_samples_for_evidence = int(len(X_train))
+            train_class_support_pre_transition_focus = self._build_class_support_map(y_train)
+            transition_focus_stats = {
+                "enabled": False,
+                "added_samples": 0,
+                "class_counts_before": dict(train_class_support_pre_transition_focus),
+                "class_counts_after": dict(train_class_support_pre_transition_focus),
+                "reason": "not_factorized_primary",
+            }
+            if training_strategy == "factorized_primary":
+                X_train, y_train, transition_focus_stats = self._apply_transition_focus_sampling(
+                    X_train=X_train,
+                    y_train=y_train,
+                    room_name=room_name,
+                    reference_labels=sampling_reference_labels,
+                )
+            train_class_support_post_transition_focus = self._build_class_support_map(y_train)
             train_class_support_pre_minority_sampling = self._build_class_support_map(y_train)
 
             X_train, y_train, minority_sampling_stats = self._apply_minority_class_sampling(
                 X_train=X_train,
                 y_train=y_train,
                 room_name=room_name,
+                reference_labels=sampling_reference_labels,
             )
             train_class_support_post_minority_sampling = self._build_class_support_map(y_train)
 
@@ -4199,7 +5084,7 @@ class TrainingPipeline:
                     epochs=max_epochs,
                     batch_size=32,
                     validation_data=validation_fit,
-                    shuffle=False,
+                    shuffle=bool(train_batch_shuffle_enabled),
                     verbose=2,
                     class_weight=None,
                     sample_weight=sample_weight_fit,
@@ -4212,7 +5097,7 @@ class TrainingPipeline:
                     epochs=max_epochs,
                     batch_size=32,
                     validation_data=validation_data,
-                    shuffle=False,  # CRITICAL: Do not shuffle time-series batches
+                    shuffle=bool(train_batch_shuffle_enabled),
                     verbose=2,
                     class_weight=None if use_sample_weight else adjusted_class_weight_dict,
                     sample_weight=sample_weight,
@@ -4224,12 +5109,64 @@ class TrainingPipeline:
                     y_train,
                     epochs=max_epochs,
                     batch_size=32,
-                    shuffle=False,  # CRITICAL: Do not shuffle time-series batches
+                    shuffle=bool(train_batch_shuffle_enabled),
                     verbose=2,
                     class_weight=None if use_sample_weight else adjusted_class_weight_dict,
                     sample_weight=sample_weight,
                     callbacks=callbacks,
                 )
+
+            post_fit_train_summary: Optional[Dict[str, Any]] = None
+            prediction_audit: Optional[Dict[str, Any]] = None
+            prediction_audit_enabled = self._is_prediction_audit_enabled(room_name)
+            if train_batch_shuffle_enabled or prediction_audit_enabled:
+                if prediction_audit_enabled:
+                    prediction_audit = {
+                        "enabled": True,
+                        "history": {
+                            key: [float(value) for value in values]
+                            for key, values in (history.history or {}).items()
+                            if isinstance(values, list)
+                        },
+                        "restored_best_epoch": (
+                            int(getattr(early_stopping, "best_epoch", -1)) + 1
+                            if getattr(early_stopping, "best_epoch", None) is not None
+                            else None
+                        ),
+                    }
+                try:
+                    train_probs_audit = self._predict_activity_probabilities(
+                        model=model,
+                        X=np.asarray(X_train, dtype=np.float32),
+                        timeline_multitask_enabled=bool(timeline_multitask_enabled),
+                    )
+                    post_fit_train_summary = self._summarize_prediction_audit(
+                        room_name=room_name,
+                        y_true=y_train,
+                        y_pred_probs=train_probs_audit,
+                    )
+                    if prediction_audit is not None:
+                        prediction_audit["post_fit_in_memory"] = {
+                            "train": post_fit_train_summary,
+                        }
+                    if validation_data is not None:
+                        val_probs_audit = self._predict_activity_probabilities(
+                            model=model,
+                            X=np.asarray(validation_data[0], dtype=np.float32),
+                            timeline_multitask_enabled=bool(timeline_multitask_enabled),
+                        )
+                        if prediction_audit is not None:
+                            prediction_audit["post_fit_in_memory"]["validation"] = (
+                                self._summarize_prediction_audit(
+                                    room_name=room_name,
+                                    y_true=validation_data[1],
+                                    y_pred_probs=val_probs_audit,
+                                )
+                            )
+                except Exception as e:
+                    if prediction_audit is not None:
+                        prediction_audit["error"] = f"{type(e).__name__}: {e}"
+                    logger.warning(f"Prediction audit failed for {room_name}: {e}")
 
             two_stage_result = self._train_two_stage_core_models(
                 room_name=room_name,
@@ -4247,6 +5184,9 @@ class TrainingPipeline:
                 max_epochs=max_epochs,
             )
             if bool(two_stage_result.get("enabled", False)):
+                if training_strategy == "factorized_primary":
+                    two_stage_result["gate_mode"] = "primary"
+                    two_stage_result["training_strategy"] = "factorized_primary"
                 stage_a_calibration = self._calibrate_two_stage_stage_a_threshold(
                     room_name=room_name,
                     two_stage_result=two_stage_result,
@@ -4269,13 +5209,21 @@ class TrainingPipeline:
             if acc_history is None:
                 acc_history = [0.0]
             final_acc = float(acc_history[-1])
+            reported_accuracy, accuracy_source = self._resolve_reported_accuracy(
+                fit_history_accuracy=final_acc,
+                post_fit_train_summary=post_fit_train_summary,
+            )
             
             # Compute validation metrics if we had a validation split
             metrics = {
                 'room': room_name,
-                'accuracy': float(final_acc),
+                'accuracy': float(reported_accuracy),
+                'fit_history_accuracy': float(final_acc),
+                'accuracy_source': str(accuracy_source),
                 'epochs': len(acc_history),  # Actual epochs (may be less with early stopping)
                 'samples': int(train_samples_for_evidence),
+                'training_strategy': training_strategy,
+                'train_batch_shuffle_enabled': bool(train_batch_shuffle_enabled),
                 'imbalance_ratio': float(imbalance_ratio) if imbalance_ratio != float('inf') else None,
                 'training_mode': training_mode,
                 'warm_start_used': bool(did_warm_start),
@@ -4286,15 +5234,21 @@ class TrainingPipeline:
                 'adapter_training_only': bool(adapter_training_only),
                 'adapter_freeze_summary': freeze_summary,
                 'replay': replay_stats,
+                'unoccupied_downsample': dict(self._last_unoccupied_downsample_debug),
+                'transition_focus_sampling': transition_focus_stats,
                 'minority_sampling': minority_sampling_stats,
                 'train_class_support_pre_sampling': train_class_support_pre_sampling,
                 'train_class_support_post_downsample': train_class_support_post_downsample,
+                'train_class_support_pre_transition_focus': train_class_support_pre_transition_focus,
+                'train_class_support_post_transition_focus': train_class_support_post_transition_focus,
                 'train_class_support_pre_minority_sampling': train_class_support_pre_minority_sampling,
                 'train_class_support_post_minority_sampling': train_class_support_post_minority_sampling,
                 'policy_hash': policy_hash,
                 'metric_source': 'holdout_validation',
                 'validation_min_class_support': 0,
                 'validation_class_support': {},
+                'holdout_min_class_support': 0,
+                'holdout_class_support': {},
                 'required_minority_support': int(holdout_support_floor),
                 'insufficient_validation_evidence': False,
                 'timeline_native_weighting': timeline_native_weighting,
@@ -4343,12 +5297,17 @@ class TrainingPipeline:
                     'stage_a_calibration': dict(two_stage_result.get('stage_a_calibration', {})),
                 },
             }
+            if isinstance(self._seed_panel_debug_context, dict):
+                metrics["seed_panel_debug"] = dict(self._seed_panel_debug_context)
             metrics["split_support"] = split_support_debug
             metrics["calibration_split_support"] = calib_split_support_debug
             metrics["critical_labels"] = list(critical_support_info.get("labels", []))
             metrics["total_sequences_pre_split"] = int(total_sequences_pre_split)
             metrics["train_samples_pre_downsample"] = int(pre_downsample_count)
             metrics["train_samples_post_downsample"] = int(pre_downsample_count - downsample_removed)
+            metrics["train_samples_post_transition_focus"] = int(
+                len(X_train) - int(minority_sampling_stats.get("added_samples", 0) or 0)
+            )
             metrics["train_samples_post_minority_sampling"] = int(len(X_train))
             raw_rows = int(processed_df.attrs.get("raw_rows_before_resample", len(processed_df)))
             rows_after_gap_drop = int(processed_df.attrs.get("rows_after_gap_drop", len(processed_df)))
@@ -4361,9 +5320,17 @@ class TrainingPipeline:
             metrics["retained_sample_ratio"] = float(retained_ratio)
             metrics["observed_day_count"] = int(processed_df.attrs.get("observed_day_count", 0) or 0)
             metrics["data_viability"] = dict(processed_df.attrs.get("data_viability", {}))
+            if prediction_audit is not None:
+                metrics["prediction_audit"] = prediction_audit
             
             # Add per-class metrics if validation was performed
             if val_split > 0:
+                holdout_classes, holdout_counts = np.unique(y_holdout, return_counts=True)
+                holdout_support_map = {str(int(c)): int(n) for c, n in zip(holdout_classes, holdout_counts)}
+                metrics["holdout_class_support"] = holdout_support_map
+                metrics["holdout_min_class_support"] = (
+                    min(holdout_support_map.values()) if holdout_support_map else 0
+                )
                 y_val_eval = validation_data[1]
                 val_classes, val_counts = np.unique(y_val_eval, return_counts=True)
                 val_support_map = {str(int(c)): int(n) for c, n in zip(val_classes, val_counts)}
@@ -4402,8 +5369,12 @@ class TrainingPipeline:
                         metrics["two_stage_core"]["validation_summary"] = two_stage_payload
                         if gate_mode == "primary":
                             y_pred = y_pred_two_stage
-                            metrics["two_stage_core"]["gate_source"] = "two_stage_primary"
-                            metrics["metric_source"] = "holdout_validation_two_stage_primary"
+                            if training_strategy == "factorized_primary":
+                                metrics["two_stage_core"]["gate_source"] = "factorized_primary"
+                                metrics["metric_source"] = "holdout_validation_factorized_primary"
+                            else:
+                                metrics["two_stage_core"]["gate_source"] = "two_stage_primary"
+                                metrics["metric_source"] = "holdout_validation_two_stage_primary"
                         else:
                             metrics["two_stage_core"]["gate_source"] = "single_stage_shadow"
                     except Exception as e:
@@ -4424,6 +5395,12 @@ class TrainingPipeline:
                         )
                     y_pred_classes = np.argmax(y_pred_arr, axis=1)
                     shadow_eval_probs = np.asarray(y_pred_arr, dtype=np.float32)
+                    metrics.update(
+                        self._build_beta6_parity_payload(
+                            room_name=room_name,
+                            y_pred_probs=y_pred_arr,
+                        )
+                    )
 
                     class_ids = sorted(
                         set(np.unique(y_val_eval).astype(int)) | set(np.unique(y_pred_classes).astype(int))
@@ -4759,7 +5736,7 @@ class TrainingPipeline:
                 model,
                 self.platform.scalers[room_name],
                 self.platform.label_encoders[room_name],
-                accuracy=float(final_acc),
+                accuracy=float(reported_accuracy),
                 samples=int(train_samples_for_evidence),
                 class_thresholds=class_thresholds,
                 metrics=metrics,
@@ -4770,6 +5747,41 @@ class TrainingPipeline:
             metrics["saved_version"] = int(saved_version)
             metrics["promotion_deferred"] = bool(defer_promotion and gate_pass)
             metrics["promoted_to_latest"] = bool(promote_to_latest)
+            if prediction_audit is not None:
+                try:
+                    reloaded_model_path = (
+                        self.registry.get_models_dir(elder_id) / f"{room_name}_v{int(saved_version)}_model.keras"
+                    )
+                    reloaded_model = self.registry.load_room_model(
+                        str(reloaded_model_path),
+                        room_name,
+                        compile_model=False,
+                    )
+                    reloaded_payload: Dict[str, Any] = {
+                        "train": self._summarize_prediction_audit(
+                            room_name=room_name,
+                            y_true=y_train,
+                            y_pred_probs=self._predict_activity_probabilities(
+                                model=reloaded_model,
+                                X=np.asarray(X_train, dtype=np.float32),
+                                timeline_multitask_enabled=bool(timeline_multitask_enabled),
+                            ),
+                        )
+                    }
+                    if validation_data is not None:
+                        reloaded_payload["validation"] = self._summarize_prediction_audit(
+                            room_name=room_name,
+                            y_true=validation_data[1],
+                            y_pred_probs=self._predict_activity_probabilities(
+                                model=reloaded_model,
+                                X=np.asarray(validation_data[0], dtype=np.float32),
+                                timeline_multitask_enabled=bool(timeline_multitask_enabled),
+                            ),
+                        )
+                    metrics["prediction_audit"]["reloaded_saved_model"] = reloaded_payload
+                except Exception as e:
+                    metrics["prediction_audit"]["reload_error"] = f"{type(e).__name__}: {e}"
+                    logger.warning(f"Prediction audit reload failed for {room_name}: {e}")
             if bool(two_stage_result.get("enabled", False)):
                 try:
                     two_stage_artifacts = self._write_two_stage_core_artifacts(
@@ -4802,16 +5814,19 @@ class TrainingPipeline:
                 "room": room_name,
                 "saved_version": int(saved_version),
                 "training_mode": training_mode,
+                "training_strategy": training_strategy,
                 "policy_hash": policy_hash,
                 "policy_source": "env" if self._use_env_policy else "injected",
                 "policy": active_policy.to_dict(),
                 "resolved": {
                     "unoccupied_downsample": unoccupied_cfg,
+                    "unoccupied_downsample_debug": dict(self._last_unoccupied_downsample_debug),
                     "minority_sampling": {
                         "enabled": bool(minority_sampling_stats.get("enabled", False)),
                         "target_share": minority_sampling_stats.get("target_share"),
                         "max_multiplier": minority_sampling_stats.get("max_multiplier"),
                     },
+                    "transition_focus_sampling": transition_focus_stats,
                     "calibration": {
                         "fraction_of_holdout": float(calibration_policy.fraction_of_holdout),
                         "min_samples": int(calibration_policy.min_samples),
@@ -4922,6 +5937,7 @@ class TrainingPipeline:
             raise ModelTrainError(f"Failed to train {room_name}: {e}") from e
         finally:
             self._policy_snapshot = None
+            self._seed_panel_debug_context = None
 
     def _log_training_history(self, elder_id, room_name, accuracy, samples, epochs, status, 
                                error_msg=None, data_start_time=None, data_end_time=None):

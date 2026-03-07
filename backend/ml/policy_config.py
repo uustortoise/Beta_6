@@ -16,8 +16,21 @@ from ml.policy_defaults import (
     get_data_viability_min_post_gap_rows_by_room,
     get_data_viability_min_training_windows_by_room,
     get_minority_sampling_max_multiplier_by_room,
+    get_minority_sampling_max_post_sampling_prior_drift_by_room,
+    get_minority_sampling_prior_drift_guard_rooms,
     get_minority_sampling_target_share_by_room,
+    get_reproducibility_multi_seed_candidate_seeds_default,
+    get_reproducibility_multi_seed_rooms_default,
+    get_training_factorized_primary_rooms_default,
+    get_training_post_split_shuffle_rooms_default,
+    get_training_transition_focus_max_post_sampling_prior_drift_by_room,
+    get_training_transition_focus_max_multiplier_by_room,
+    get_training_transition_focus_prior_drift_guard_rooms,
+    get_training_transition_focus_radius_steps_by_room,
+    get_training_transition_focus_room_labels,
+    get_unoccupied_downsample_max_post_downsample_prior_drift_by_room,
     get_unoccupied_downsample_min_share_by_room,
+    get_unoccupied_downsample_prior_drift_guard_rooms,
     get_unoccupied_downsample_stride_by_room,
 )
 from utils.room_utils import normalize_room_name
@@ -157,6 +170,27 @@ def _read_room_float_overrides(
     return out
 
 
+def _read_room_str_overrides(
+    env: Mapping[str, str],
+    var_name: str,
+    fallback: Mapping[str, str],
+) -> dict[str, str]:
+    raw_map = env.get(var_name)
+    if raw_map is None:
+        return {
+            str(k).strip().lower(): str(v).strip().lower()
+            for k, v in fallback.items()
+            if str(k).strip() and str(v).strip()
+        }
+    out: dict[str, str] = {}
+    parsed = _parse_override_map(raw_map)
+    for room, value in parsed.items():
+        token = str(value).strip().lower()
+        if token:
+            out[room] = token
+    return out
+
+
 def _read_room_label_float_overrides(
     env: Mapping[str, str],
     var_name: str,
@@ -239,6 +273,49 @@ def _parse_label_override_map(raw_value: str) -> dict[str, str]:
     return out
 
 
+def _parse_lower_token_set(raw_value: str | None, default_csv: str = "") -> set[str]:
+    txt = str(raw_value).strip() if raw_value is not None else str(default_csv).strip()
+    if not txt:
+        return set()
+    return {
+        str(token).strip().lower()
+        for token in txt.split(",")
+        if str(token).strip()
+    }
+
+
+def _read_lower_token_list_env(
+    env: Mapping[str, str],
+    name: str,
+    fallback: list[str],
+) -> list[str]:
+    raw = env.get(name)
+    if raw is None:
+        return [str(item).strip().lower() for item in fallback if str(item).strip()]
+    return sorted(_parse_lower_token_set(raw))
+
+
+def _read_int_list_env(
+    env: Mapping[str, str],
+    name: str,
+    fallback: list[int],
+    minimum: int = 0,
+) -> list[int]:
+    raw = env.get(name)
+    if raw is None:
+        return [max(int(minimum), int(item)) for item in fallback]
+    out: list[int] = []
+    for token in str(raw).split(","):
+        item = str(token).strip()
+        if not item:
+            continue
+        try:
+            out.append(max(int(minimum), int(item)))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 @dataclass
 class ClinicalPriorityPolicy:
     multipliers: dict[str, float] = field(
@@ -276,20 +353,37 @@ class UnoccupiedDownsamplePolicy:
     stride_by_room: dict[str, int] = field(
         default_factory=get_unoccupied_downsample_stride_by_room
     )
+    max_post_downsample_prior_drift_by_room: dict[str, float] = field(
+        default_factory=get_unoccupied_downsample_max_post_downsample_prior_drift_by_room
+    )
+    prior_drift_guard_rooms: list[str] = field(
+        default_factory=get_unoccupied_downsample_prior_drift_guard_rooms
+    )
     boundary_keep_by_room: dict[str, int] = field(default_factory=dict)
     min_run_length_by_room: dict[str, int] = field(default_factory=dict)
 
-    def resolve(self, room_name: str) -> dict[str, float | int]:
+    def resolve(self, room_name: str) -> dict[str, float | int | bool]:
         room_key = normalize_room_name(room_name)
         min_share = float(self.min_share_by_room.get(room_key, self.min_share))
         stride = int(self.stride_by_room.get(room_key, self.stride))
         boundary_keep = int(self.boundary_keep_by_room.get(room_key, self.boundary_keep))
         min_run_length = int(self.min_run_length_by_room.get(room_key, self.min_run_length))
+        max_post_downsample_prior_drift = float(
+            self.max_post_downsample_prior_drift_by_room.get(room_key, 1.0)
+        )
         return {
             "min_share": float(min(max(min_share, 0.0), 1.0)),
             "stride": max(1, stride),
             "boundary_keep": max(0, boundary_keep),
             "min_run_length": max(1, min_run_length),
+            "prior_drift_guard_enabled": room_key in {
+                str(item).strip().lower()
+                for item in self.prior_drift_guard_rooms
+                if str(item).strip()
+            },
+            "max_post_downsample_prior_drift": float(
+                min(max(max_post_downsample_prior_drift, 0.0), 1.0)
+            ),
         }
 
 
@@ -304,15 +398,32 @@ class MinoritySamplingPolicy:
     max_multiplier_by_room: dict[str, int] = field(
         default_factory=get_minority_sampling_max_multiplier_by_room
     )
+    max_post_sampling_prior_drift_by_room: dict[str, float] = field(
+        default_factory=get_minority_sampling_max_post_sampling_prior_drift_by_room
+    )
+    prior_drift_guard_rooms: list[str] = field(
+        default_factory=get_minority_sampling_prior_drift_guard_rooms
+    )
 
     def resolve(self, room_name: str) -> dict[str, float | int | bool]:
         room_key = normalize_room_name(room_name)
         target_share = float(self.target_share_by_room.get(room_key, self.target_share))
         max_multiplier = int(self.max_multiplier_by_room.get(room_key, self.max_multiplier))
+        max_post_sampling_prior_drift = float(
+            self.max_post_sampling_prior_drift_by_room.get(room_key, 1.0)
+        )
         return {
             "enabled": bool(self.enabled),
             "target_share": float(min(max(target_share, 0.0), 0.49)),
             "max_multiplier": max(1, max_multiplier),
+            "prior_drift_guard_enabled": room_key in {
+                str(item).strip().lower()
+                for item in self.prior_drift_guard_rooms
+                if str(item).strip()
+            },
+            "max_post_sampling_prior_drift": float(
+                min(max(max_post_sampling_prior_drift, 0.0), 1.0)
+            ),
         }
 
 
@@ -366,6 +477,12 @@ class ReleaseGatePolicy:
 class ReproducibilityPolicy:
     random_seed: int = 42
     skip_if_same_data_and_policy: bool = True
+    multi_seed_rooms: list[str] = field(
+        default_factory=get_reproducibility_multi_seed_rooms_default
+    )
+    multi_seed_candidate_seeds: list[int] = field(
+        default_factory=get_reproducibility_multi_seed_candidate_seeds_default
+    )
 
 
 @dataclass
@@ -434,12 +551,72 @@ class DataViabilityPolicy:
 class TrainingProfilePolicy:
     """Training profile selection: pilot vs production."""
     profile: str = "production"  # "pilot" or "production"
+    factorized_primary_rooms: list[str] = field(
+        default_factory=get_training_factorized_primary_rooms_default
+    )
+    post_split_shuffle_rooms: list[str] = field(
+        default_factory=get_training_post_split_shuffle_rooms_default
+    )
+    transition_focus_room_labels: dict[str, str] = field(
+        default_factory=get_training_transition_focus_room_labels
+    )
+    transition_focus_radius_steps_by_room: dict[str, int] = field(
+        default_factory=get_training_transition_focus_radius_steps_by_room
+    )
+    transition_focus_max_multiplier_by_room: dict[str, int] = field(
+        default_factory=get_training_transition_focus_max_multiplier_by_room
+    )
+    transition_focus_max_post_sampling_prior_drift_by_room: dict[str, float] = field(
+        default_factory=get_training_transition_focus_max_post_sampling_prior_drift_by_room
+    )
+    transition_focus_prior_drift_guard_rooms: list[str] = field(
+        default_factory=get_training_transition_focus_prior_drift_guard_rooms
+    )
     
     def is_pilot(self) -> bool:
         return self.profile.lower() == "pilot"
     
     def is_production(self) -> bool:
         return self.profile.lower() == "production"
+
+    def is_factorized_primary_room(self, room_name: str) -> bool:
+        room_key = normalize_room_name(room_name)
+        return room_key in {
+            str(item).strip().lower()
+            for item in self.factorized_primary_rooms
+            if str(item).strip()
+        }
+
+    def should_shuffle_post_split(self, room_name: str) -> bool:
+        room_key = normalize_room_name(room_name)
+        return room_key in {
+            str(item).strip().lower()
+            for item in self.post_split_shuffle_rooms
+            if str(item).strip()
+        }
+
+    def resolve_transition_focus(self, room_name: str) -> dict[str, str | int | bool]:
+        room_key = normalize_room_name(room_name)
+        focus_label = str(self.transition_focus_room_labels.get(room_key, "")).strip().lower()
+        radius_steps = int(self.transition_focus_radius_steps_by_room.get(room_key, 0) or 0)
+        max_multiplier = int(self.transition_focus_max_multiplier_by_room.get(room_key, 1) or 1)
+        max_post_sampling_prior_drift = float(
+            self.transition_focus_max_post_sampling_prior_drift_by_room.get(room_key, 1.0)
+        )
+        return {
+            "enabled": bool(focus_label and radius_steps > 0 and max_multiplier > 1),
+            "focus_label": focus_label,
+            "radius_steps": max(0, radius_steps),
+            "max_multiplier": max(1, max_multiplier),
+            "prior_drift_guard_enabled": room_key in {
+                str(item).strip().lower()
+                for item in self.transition_focus_prior_drift_guard_rooms
+                if str(item).strip()
+            },
+            "max_post_sampling_prior_drift": float(
+                min(max(max_post_sampling_prior_drift, 0.0), 1.0)
+            ),
+        }
 
 
 @dataclass
@@ -575,6 +752,18 @@ def load_policy_from_env(environ: Mapping[str, str] | None = None) -> TrainingPo
                 unocc.min_run_length_by_room[room] = max(1, int(value))
             except (TypeError, ValueError):
                 continue
+    unocc.max_post_downsample_prior_drift_by_room = _read_room_float_overrides(
+        env,
+        "UNOCCUPIED_MAX_POST_DOWNSAMPLE_PRIOR_DRIFT_BY_ROOM",
+        unocc.max_post_downsample_prior_drift_by_room,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    unocc.prior_drift_guard_rooms = _read_lower_token_list_env(
+        env,
+        "UNOCCUPIED_PRIOR_DRIFT_GUARD_ROOMS",
+        unocc.prior_drift_guard_rooms,
+    )
 
     # Minority sampling.
     minority = policy.minority_sampling
@@ -600,6 +789,18 @@ def load_policy_from_env(environ: Mapping[str, str] | None = None) -> TrainingPo
                 minority.max_multiplier_by_room[room] = max(1, int(value))
             except (TypeError, ValueError):
                 continue
+    minority.max_post_sampling_prior_drift_by_room = _read_room_float_overrides(
+        env,
+        "MINORITY_MAX_POST_SAMPLING_PRIOR_DRIFT_BY_ROOM",
+        minority.max_post_sampling_prior_drift_by_room,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    minority.prior_drift_guard_rooms = _read_lower_token_list_env(
+        env,
+        "MINORITY_PRIOR_DRIFT_GUARD_ROOMS",
+        minority.prior_drift_guard_rooms,
+    )
 
     # Calibration / thresholding.
     calib = policy.calibration
@@ -824,6 +1025,17 @@ def load_policy_from_env(environ: Mapping[str, str] | None = None) -> TrainingPo
             str(repro.skip_if_same_data_and_policy),
         )
     )
+    repro.multi_seed_rooms = _read_lower_token_list_env(
+        env,
+        "MULTI_SEED_ROOMS",
+        repro.multi_seed_rooms,
+    )
+    repro.multi_seed_candidate_seeds = _read_int_list_env(
+        env,
+        "MULTI_SEED_CANDIDATE_SEEDS",
+        repro.multi_seed_candidate_seeds,
+        minimum=0,
+    )
 
     # Promotion-eligibility controls.
     promo = policy.promotion_eligibility
@@ -1003,6 +1215,45 @@ def load_policy_from_env(environ: Mapping[str, str] | None = None) -> TrainingPo
     else:
         logger.warning(f"Invalid TRAINING_PROFILE='{profile_value}', defaulting to 'production'")
         profile_policy.profile = "production"
+    profile_policy.factorized_primary_rooms = _read_lower_token_list_env(
+        env,
+        "FACTORIZED_PRIMARY_ROOMS",
+        profile_policy.factorized_primary_rooms,
+    )
+    profile_policy.post_split_shuffle_rooms = _read_lower_token_list_env(
+        env,
+        "POST_SPLIT_SHUFFLE_ROOMS",
+        profile_policy.post_split_shuffle_rooms,
+    )
+    profile_policy.transition_focus_room_labels = _read_room_str_overrides(
+        env,
+        "TRANSITION_FOCUS_ROOM_LABELS",
+        profile_policy.transition_focus_room_labels,
+    )
+    profile_policy.transition_focus_radius_steps_by_room = _read_room_int_overrides(
+        env,
+        "TRANSITION_FOCUS_RADIUS_STEPS_BY_ROOM",
+        profile_policy.transition_focus_radius_steps_by_room,
+        minimum=0,
+    )
+    profile_policy.transition_focus_max_multiplier_by_room = _read_room_int_overrides(
+        env,
+        "TRANSITION_FOCUS_MAX_MULTIPLIER_BY_ROOM",
+        profile_policy.transition_focus_max_multiplier_by_room,
+        minimum=1,
+    )
+    profile_policy.transition_focus_max_post_sampling_prior_drift_by_room = _read_room_float_overrides(
+        env,
+        "TRANSITION_FOCUS_MAX_POST_SAMPLING_PRIOR_DRIFT_BY_ROOM",
+        profile_policy.transition_focus_max_post_sampling_prior_drift_by_room,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    profile_policy.transition_focus_prior_drift_guard_rooms = _read_lower_token_list_env(
+        env,
+        "TRANSITION_FOCUS_PRIOR_DRIFT_GUARD_ROOMS",
+        profile_policy.transition_focus_prior_drift_guard_rooms,
+    )
     
     # Apply profile-specific overrides.
     if profile_policy.is_pilot():

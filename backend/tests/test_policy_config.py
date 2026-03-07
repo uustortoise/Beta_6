@@ -24,6 +24,9 @@ def test_load_policy_defaults_match_legacy_knobs():
     assert policy.reproducibility.random_seed == 42
     assert policy.reproducibility.skip_if_same_data_and_policy is True
     assert policy.promotion_eligibility.min_training_days_with_champion == 7.0
+    assert policy.training_profile.post_split_shuffle_rooms == ["entrance", "bedroom"]
+    assert policy.training_profile.transition_focus_prior_drift_guard_rooms == ["bedroom"]
+    assert policy.training_profile.transition_focus_max_post_sampling_prior_drift_by_room["bedroom"] == 0.10
 
 
 def test_load_policy_env_overrides_unoccupied_and_minority():
@@ -60,6 +63,44 @@ def test_empty_room_override_env_disables_default_room_map():
     bathroom_cfg = policy.minority_sampling.resolve("Bathroom")
     assert bathroom_cfg["target_share"] == policy.minority_sampling.target_share
     assert bathroom_cfg["max_multiplier"] == policy.minority_sampling.max_multiplier
+
+
+def test_load_policy_supports_room_fix_controls():
+    env = {
+        "UNOCCUPIED_MAX_POST_DOWNSAMPLE_PRIOR_DRIFT_BY_ROOM": "entrance:0.03",
+        "UNOCCUPIED_PRIOR_DRIFT_GUARD_ROOMS": "entrance",
+        "MINORITY_MAX_POST_SAMPLING_PRIOR_DRIFT_BY_ROOM": "entrance:0.03",
+        "MINORITY_PRIOR_DRIFT_GUARD_ROOMS": "entrance",
+        "MULTI_SEED_ROOMS": "entrance",
+        "MULTI_SEED_CANDIDATE_SEEDS": "40,41,42,43,44,45",
+        "FACTORIZED_PRIMARY_ROOMS": "bedroom",
+        "POST_SPLIT_SHUFFLE_ROOMS": "entrance,kitchen",
+        "TRANSITION_FOCUS_ROOM_LABELS": "bedroom:bedroom_normal_use",
+        "TRANSITION_FOCUS_RADIUS_STEPS_BY_ROOM": "bedroom:12",
+        "TRANSITION_FOCUS_MAX_MULTIPLIER_BY_ROOM": "bedroom:3",
+        "TRANSITION_FOCUS_MAX_POST_SAMPLING_PRIOR_DRIFT_BY_ROOM": "bedroom:0.08",
+        "TRANSITION_FOCUS_PRIOR_DRIFT_GUARD_ROOMS": "bedroom",
+    }
+    policy = load_policy_from_env(env)
+
+    entrance_downsample_cfg = policy.unoccupied_downsample.resolve("Entrance")
+    assert entrance_downsample_cfg["prior_drift_guard_enabled"] is True
+    assert entrance_downsample_cfg["max_post_downsample_prior_drift"] == 0.03
+
+    entrance_cfg = policy.minority_sampling.resolve("Entrance")
+    assert entrance_cfg["prior_drift_guard_enabled"] is True
+    assert entrance_cfg["max_post_sampling_prior_drift"] == 0.03
+
+    assert policy.reproducibility.multi_seed_rooms == ["entrance"]
+    assert policy.reproducibility.multi_seed_candidate_seeds == [40, 41, 42, 43, 44, 45]
+
+    assert policy.training_profile.factorized_primary_rooms == ["bedroom"]
+    assert policy.training_profile.post_split_shuffle_rooms == ["entrance", "kitchen"]
+    assert policy.training_profile.transition_focus_room_labels["bedroom"] == "bedroom_normal_use"
+    assert policy.training_profile.transition_focus_radius_steps_by_room["bedroom"] == 12
+    assert policy.training_profile.transition_focus_max_multiplier_by_room["bedroom"] == 3
+    assert policy.training_profile.transition_focus_max_post_sampling_prior_drift_by_room["bedroom"] == 0.08
+    assert policy.training_profile.transition_focus_prior_drift_guard_rooms == ["bedroom"]
 
 
 def test_label_map_env_parsing_for_calibration_and_clinical_priority():

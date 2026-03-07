@@ -339,6 +339,10 @@ class PredictionPipeline:
         )
 
     def _two_stage_runtime_enabled_for_room(self, room_name: str) -> bool:
+        bundle = getattr(self.platform, "two_stage_core_models", {}).get(room_name)
+        meta = bundle.get("meta") if isinstance(bundle, dict) else {}
+        if str((meta or {}).get("gate_mode", "")).strip().lower() == "primary":
+            return True
         if not _env_enabled("ENABLE_TWO_STAGE_CORE_RUNTIME", default=False):
             return False
         scoped = _parse_room_set_override(os.getenv("TWO_STAGE_CORE_RUNTIME_ROOMS", ""))

@@ -237,3 +237,45 @@ def test_beta6_rollout_ladder_yaml_schema():
     assert policy.progression.min_nightly_pipeline_success_rate >= 0.0
     assert policy.auto_rollback.consecutive_nights >= 1
     assert policy.fallback.baseline_profile in {"pilot", "production"}
+
+
+def test_beta6_policy_defaults_yaml_supports_bedroom_entrance_fix_controls():
+    path = CONFIG_DIR / "beta6_policy_defaults.yaml"
+    payload = _load_yaml(path)
+    _assert_version_v1(payload, path)
+
+    unoccupied = payload.get("unoccupied_downsample")
+    assert isinstance(unoccupied, dict), "unoccupied_downsample section must be a mapping"
+    assert isinstance(
+        unoccupied.get("max_post_downsample_prior_drift_by_room"),
+        dict,
+    ), "unoccupied_downsample.max_post_downsample_prior_drift_by_room must be a mapping"
+    assert isinstance(
+        unoccupied.get("prior_drift_guard_rooms"),
+        list,
+    ), "unoccupied_downsample.prior_drift_guard_rooms must be a sequence"
+
+    minority = payload.get("minority_sampling")
+    assert isinstance(minority, dict), "minority_sampling section must be a mapping"
+    assert isinstance(
+        minority.get("max_post_sampling_prior_drift_by_room"),
+        dict,
+    ), "minority_sampling.max_post_sampling_prior_drift_by_room must be a mapping"
+    assert isinstance(
+        minority.get("prior_drift_guard_rooms"),
+        list,
+    ), "minority_sampling.prior_drift_guard_rooms must be a sequence"
+
+    training = payload.get("training")
+    assert isinstance(training, dict), "training section must be a mapping"
+    assert isinstance(training.get("factorized_primary_rooms"), list)
+    assert isinstance(training.get("transition_focus_room_labels"), dict)
+    assert isinstance(training.get("transition_focus_radius_steps_by_room"), dict)
+    assert isinstance(training.get("transition_focus_max_multiplier_by_room"), dict)
+    assert isinstance(training.get("transition_focus_max_post_sampling_prior_drift_by_room"), dict)
+    assert isinstance(training.get("transition_focus_prior_drift_guard_rooms"), list)
+
+    reproducibility = payload.get("reproducibility")
+    assert isinstance(reproducibility, dict), "reproducibility section must be a mapping"
+    assert isinstance(reproducibility.get("multi_seed_rooms"), list)
+    assert isinstance(reproducibility.get("multi_seed_candidate_seeds"), list)

@@ -751,6 +751,57 @@ class TestTrainingPipeline(unittest.TestCase):
             rooms = TrainingPipeline._resolve_two_stage_core_rooms()
         self.assertIn("entrance", rooms)
 
+    def test_build_beta6_parity_payload_maps_predictions_to_occupancy_trace(self):
+        self.mock_platform.label_encoders["Bedroom"] = MagicMock()
+        self.mock_platform.label_encoders["Bedroom"].classes_ = np.array(
+            ["bedroom_normal_use", "sleep", "unoccupied", "unknown"],
+            dtype=object,
+        )
+        y_pred_probs = np.asarray(
+            [
+                [0.05, 0.05, 0.80, 0.10],
+                [0.80, 0.10, 0.05, 0.05],
+                [0.05, 0.05, 0.10, 0.80],
+                [0.10, 0.75, 0.10, 0.05],
+            ],
+            dtype=np.float32,
+        )
+
+        payload = self.pipeline._build_beta6_parity_payload(
+            room_name="Bedroom",
+            y_pred_probs=y_pred_probs,
+        )
+
+        self.assertEqual(
+            payload["beta6_parity_trace"],
+            [
+                {"label": "unoccupied"},
+                {"label": "occupied"},
+                {"label": "unoccupied", "uncertainty_state": "unknown"},
+                {"label": "occupied"},
+            ],
+        )
+        self.assertEqual(payload["beta6_runtime_policy"], {"spike_suppression": True})
+        self.assertEqual(payload["beta6_eval_policy"], {"spike_suppression": True})
+
+    def test_build_beta6_parity_payload_caps_trace_length(self):
+        self.mock_platform.label_encoders["Kitchen"] = MagicMock()
+        self.mock_platform.label_encoders["Kitchen"].classes_ = np.array(
+            ["kitchen_normal_use", "unoccupied"],
+            dtype=object,
+        )
+        y_pred_probs = np.zeros((20, 2), dtype=np.float32)
+        predicted_ids = np.asarray(([1] * 10) + ([0] * 10), dtype=np.int32)
+        y_pred_probs[np.arange(len(predicted_ids)), predicted_ids] = 1.0
+
+        payload = self.pipeline._build_beta6_parity_payload(
+            room_name="Kitchen",
+            y_pred_probs=y_pred_probs,
+            max_steps=5,
+        )
+
+        self.assertEqual(len(payload["beta6_parity_trace"]), 5)
+
     def test_select_final_two_stage_gate_source_falls_back_to_single_stage_on_no_regress(self):
         self.mock_platform.label_encoders["Kitchen"] = MagicMock()
         self.mock_platform.label_encoders["Kitchen"].classes_ = np.array(

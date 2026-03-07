@@ -582,6 +582,14 @@ class TrainingPipeline:
             max_value=100.0,
         )
 
+    def _resolve_collapse_retry_binary_max_ratio_growth(self) -> float:
+        return self._env_float(
+            "COLLAPSE_RETRY_BINARY_MAX_RATIO_GROWTH",
+            1.25,
+            min_value=1.0,
+            max_value=10.0,
+        )
+
     def _resolve_sampled_prior_drift_block_enabled(self) -> bool:
         return self._env_bool("RELEASE_GATE_BLOCK_ON_SAMPLED_CLASS_PRIOR_DRIFT", True)
 
@@ -589,6 +597,23 @@ class TrainingPipeline:
         return self._env_room_set(
             "RELEASE_GATE_SAMPLED_DRIFT_BLOCK_ROOMS",
             ("bedroom", "entrance"),
+        )
+
+    def _resolve_unoccupied_downsample_drift_guard_enabled(self) -> bool:
+        return self._env_bool("ENABLE_UNOCCUPIED_DOWNSAMPLE_DRIFT_GUARD", True)
+
+    def _resolve_unoccupied_downsample_drift_guard_rooms(self) -> set[str]:
+        return self._env_room_set(
+            "UNOCCUPIED_DOWNSAMPLE_DRIFT_GUARD_ROOMS",
+            ("entrance", "kitchen", "livingroom"),
+        )
+
+    def _resolve_unoccupied_downsample_max_class_share_drift(self) -> float:
+        return self._env_float(
+            "UNOCCUPIED_DOWNSAMPLE_MAX_CLASS_SHARE_DRIFT",
+            self._read_float_env("RELEASE_GATE_MAX_CLASS_PRIOR_DRIFT", 0.10),
+            min_value=0.0,
+            max_value=1.0,
         )
 
     def _resolve_release_gate_collapse_block_enabled(self) -> bool:
@@ -1809,7 +1834,7 @@ class TrainingPipeline:
                         _add_blocking(precision_reason)
                     else:
                         _add_watch(precision_reason.replace("_failed:", "_watch:", 1))
-        if metric_source == "holdout_validation":
+        if str(metric_source).strip().lower().startswith("holdout_validation"):
             critical_labels = self._resolve_critical_labels(room_name)
             collapse_min_support = max(5, int(effective_min_recall_support // 2))
             collapse_recall_floor = 0.02
@@ -2678,6 +2703,155 @@ class TrainingPipeline:
             "gate_aligned_score": float(score),
         }
 
+    @staticmethod
+    def _compute_class_share_drift_from_labels(
+        before_labels: np.ndarray,
+        after_labels: np.ndarray,
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "available": False,
+            "max_abs_drift": 0.0,
+            "max_drift_class": None,
+            "class_drift": {},
+        }
+        before_arr = np.asarray(before_labels, dtype=np.int32)
+        after_arr = np.asarray(after_labels, dtype=np.int32)
+        if before_arr.size == 0 or after_arr.size == 0:
+            return result
+
+        before_ids, before_counts = np.unique(before_arr, return_counts=True)
+        after_ids, after_counts = np.unique(after_arr, return_counts=True)
+        before_map = {str(int(class_id)): int(count) for class_id, count in zip(before_ids, before_counts)}
+        after_map = {str(int(class_id)): int(count) for class_id, count in zip(after_ids, after_counts)}
+        before_total = float(before_arr.size)
+        after_total = float(after_arr.size)
+
+        max_abs_drift = -1.0
+        max_drift_class: Optional[str] = None
+        class_drift: Dict[str, Dict[str, float]] = {}
+        class_ids = sorted(set(before_map.keys()) | set(after_map.keys()), key=lambda token: int(token))
+        for class_id in class_ids:
+            before_share = float(before_map.get(class_id, 0)) / before_total
+            after_share = float(after_map.get(class_id, 0)) / after_total
+            drift = float(after_share - before_share)
+            class_drift[str(class_id)] = {
+                "before_share": float(before_share),
+                "after_share": float(after_share),
+                "drift": float(drift),
+                "drift_pp": float(drift * 100.0),
+            }
+            abs_drift = abs(drift)
+            if abs_drift > max_abs_drift:
+                max_abs_drift = float(abs_drift)
+                max_drift_class = str(class_id)
+
+        result.update(
+            {
+                "available": True,
+                "max_abs_drift": float(max_abs_drift if max_abs_drift >= 0.0 else 0.0),
+                "max_drift_class": max_drift_class,
+                "class_drift": class_drift,
+            }
+        )
+        return result
+
+    def _select_final_two_stage_gate_source(
+        self,
+        *,
+        room_name: str,
+        y_true: np.ndarray,
+        single_stage_probs: np.ndarray,
+        two_stage_probs: Optional[np.ndarray],
+        gate_mode: str,
+        champion_meta: Optional[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        gate_mode_norm = str(gate_mode or "shadow").strip().lower()
+        y_true_arr = np.asarray(y_true, dtype=np.int32)
+        single_probs = np.asarray(single_stage_probs, dtype=np.float32)
+
+        no_regress = self._resolve_no_regress_macro_f1_floor(
+            room_name=room_name,
+            champion_meta=champion_meta,
+        )
+
+        def _build_payload(source_name: str, probs: np.ndarray) -> Dict[str, Any]:
+            summary = self._summarize_gate_aligned_validation(
+                room_name=room_name,
+                y_true=y_true_arr,
+                y_pred_probs=np.asarray(probs, dtype=np.float32),
+            )
+            macro_f1 = summary.get("macro_f1")
+            macro_f1_value = float(macro_f1) if macro_f1 is not None else None
+            no_regress_ok = True
+            floor = no_regress.get("target_macro_f1_floor")
+            if bool(no_regress.get("enabled")) and floor is not None:
+                no_regress_ok = bool(
+                    macro_f1_value is not None and macro_f1_value + 1e-9 >= float(floor)
+                )
+            return {
+                "source": str(source_name),
+                "summary": dict(summary),
+                "collapsed": bool(summary.get("collapsed", False)),
+                "macro_f1": macro_f1_value,
+                "gate_aligned_score": float(summary.get("gate_aligned_score", float("-inf"))),
+                "no_regress_ok": bool(no_regress_ok),
+            }
+
+        single_payload = _build_payload("single_stage", single_probs)
+        two_payload: Optional[Dict[str, Any]] = None
+        if two_stage_probs is not None:
+            two_payload = _build_payload("two_stage", np.asarray(two_stage_probs, dtype=np.float32))
+
+        selection: Dict[str, Any] = {
+            "gate_mode": gate_mode_norm,
+            "no_regress": dict(no_regress),
+            "single_stage": single_payload,
+            "two_stage": two_payload,
+            "selected_source": "single_stage_only",
+            "runtime_use_two_stage": False,
+            "selected_summary": dict(single_payload.get("summary") or {}),
+        }
+        if two_payload is None:
+            return selection
+        if gate_mode_norm != "primary":
+            selection["selected_source"] = "single_stage_shadow"
+            return selection
+
+        def _rank(payload: Mapping[str, Any]) -> Tuple[int, int, float, float, int]:
+            return (
+                0 if bool(payload.get("collapsed", False)) else 1,
+                1 if bool(payload.get("no_regress_ok", True)) else 0,
+                float(payload.get("gate_aligned_score", float("-inf"))),
+                float(payload.get("macro_f1", float("-inf"))),
+                1 if str(payload.get("source")) == "two_stage" else 0,
+            )
+
+        selected = max((single_payload, two_payload), key=_rank)
+        if str(selected.get("source")) == "two_stage":
+            selection["selected_source"] = "two_stage_primary"
+            selection["runtime_use_two_stage"] = True
+            selection["selected_summary"] = dict(two_payload.get("summary") or {})
+            return selection
+
+        if bool(two_payload.get("collapsed", False)) and not bool(single_payload.get("collapsed", False)):
+            source = "single_stage_fallback_collapse"
+        elif (
+            bool(no_regress.get("enabled"))
+            and bool(single_payload.get("no_regress_ok"))
+            and not bool(two_payload.get("no_regress_ok"))
+        ):
+            source = "single_stage_fallback_no_regress"
+        elif float(single_payload.get("gate_aligned_score", float("-inf"))) > (
+            float(two_payload.get("gate_aligned_score", float("-inf"))) + 1e-8
+        ):
+            source = "single_stage_fallback_score"
+        else:
+            source = "single_stage_fallback_macro_f1"
+
+        selection["selected_source"] = source
+        selection["selected_summary"] = dict(single_payload.get("summary") or {})
+        return selection
+
     def _build_collapse_retry_class_weights(
         self,
         *,
@@ -2719,6 +2893,25 @@ class TrainingPipeline:
         # Preserve any precomputed class IDs not present in this train fold.
         for class_id, weight in base_class_weights.items():
             boosted.setdefault(int(class_id), float(weight))
+
+        if len(boosted) == 2:
+            class_ids = sorted(int(class_id) for class_id in boosted.keys())
+            first_id, second_id = class_ids[0], class_ids[1]
+            boosted_first = max(0.01, float(boosted.get(first_id, 0.01)))
+            boosted_second = max(0.01, float(boosted.get(second_id, 0.01)))
+            boosted_hi, boosted_lo = (
+                (first_id, second_id) if boosted_first >= boosted_second else (second_id, first_id)
+            )
+            boosted_ratio = float(boosted[boosted_hi]) / max(0.01, float(boosted[boosted_lo]))
+
+            base_first = max(0.01, float(base_class_weights.get(first_id, boosted_first)))
+            base_second = max(0.01, float(base_class_weights.get(second_id, boosted_second)))
+            base_ratio = max(base_first, base_second) / max(0.01, min(base_first, base_second))
+            max_growth = self._resolve_collapse_retry_binary_max_ratio_growth()
+            max_ratio = max(1.0, float(base_ratio) * float(max_growth))
+
+            if boosted_ratio > (max_ratio + 1e-8):
+                boosted[boosted_hi] = max(0.01, float(boosted[boosted_lo])) * float(max_ratio)
         return boosted
 
     @staticmethod
@@ -4243,6 +4436,8 @@ class TrainingPipeline:
             "room": str(room_name),
             "saved_version": int(saved_version),
             "gate_mode": str(two_stage_result.get("gate_mode") or self._resolve_two_stage_gate_mode()),
+            "runtime_enabled": bool(two_stage_result.get("runtime_enabled", True)),
+            "runtime_gate_source": str(two_stage_result.get("runtime_gate_source") or ""),
             "stage_b_enabled": bool(stage_b_enabled),
             "stage_b_reason": str(two_stage_result.get("stage_b_reason") or ""),
             "stage_a_occupied_threshold": float(
@@ -4292,6 +4487,31 @@ class TrainingPipeline:
             if stage_b_enabled:
                 artifact_paths["stage_b_model_latest"] = str(stage_b_latest)
         return artifact_paths
+
+    def _clear_latest_two_stage_core_artifacts(
+        self,
+        *,
+        elder_id: str,
+        room_name: str,
+    ) -> Dict[str, bool]:
+        models_dir = self.registry.get_models_dir(elder_id)
+        targets = {
+            "stage_a_model_latest": models_dir / f"{room_name}_two_stage_stage_a_model.keras",
+            "stage_b_model_latest": models_dir / f"{room_name}_two_stage_stage_b_model.keras",
+            "meta_latest": models_dir / f"{room_name}_two_stage_meta.json",
+        }
+        cleared: Dict[str, bool] = {}
+        for key, path in targets.items():
+            existed = bool(path.exists())
+            if existed:
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    logger.warning("Failed clearing stale two-stage latest artifact: %s", path)
+                    cleared[key] = False
+                    continue
+            cleared[key] = bool(existed)
+        return cleared
 
     @staticmethod
     def _build_class_prefix_counts(y_seq: np.ndarray, class_ids: List[int]) -> Dict[int, np.ndarray]:
@@ -4532,27 +4752,63 @@ class TrainingPipeline:
             if radius > 0 and upper <= max_size:
                 candidates.append(int(upper))
 
+        valid_candidates = 0
+        best_candidate: Optional[Tuple[Tuple[float, float, int, int], int, Dict[str, Any]]] = None
         for calib_size in candidates:
             split_idx = n - int(calib_size)
             ok = True
+            val_support: Dict[str, int] = {}
+            calib_support: Dict[str, int] = {}
+            class_rate_gap: Dict[str, float] = {}
             for class_id in required:
                 val_count = int(prefixes[class_id][split_idx])
                 calib_count = int(totals[class_id] - val_count)
                 if val_count < min_support or calib_count < min_support:
                     ok = False
                     break
+                val_support[str(class_id)] = int(val_count)
+                calib_support[str(class_id)] = int(calib_count)
+                val_rate = float(val_count) / float(split_idx) if split_idx > 0 else 0.0
+                calib_rate = float(calib_count) / float(calib_size) if calib_size > 0 else 0.0
+                class_rate_gap[str(class_id)] = abs(val_rate - calib_rate)
             if not ok:
                 continue
-            debug["selected_calib_size"] = int(calib_size)
+            valid_candidates += 1
+            max_gap = max(class_rate_gap.values()) if class_rate_gap else 0.0
+            mean_gap = (
+                float(sum(class_rate_gap.values())) / float(len(class_rate_gap))
+                if class_rate_gap
+                else 0.0
+            )
+            score = (float(max_gap), float(mean_gap), abs(int(calib_size) - desired), int(calib_size))
+            if best_candidate is None or score < best_candidate[0]:
+                best_candidate = (
+                    score,
+                    int(calib_size),
+                    {
+                        "val_support_by_class": val_support,
+                        "calib_support_by_class": calib_support,
+                        "class_rate_gap_by_class": class_rate_gap,
+                    },
+                )
+
+        if best_candidate is not None:
+            _, selected_calib_size, selected_debug = best_candidate
+            debug["selected_calib_size"] = int(selected_calib_size)
             debug["found"] = True
-            debug["val_support_by_class"] = {
-                str(class_id): int(prefixes[class_id][split_idx]) for class_id in required
-            }
-            debug["calib_support_by_class"] = {
-                str(class_id): int(totals[class_id] - int(prefixes[class_id][split_idx]))
-                for class_id in required
-            }
-            return int(calib_size), debug
+            debug["selection_mode"] = "min_class_rate_gap"
+            debug["valid_candidate_count"] = int(valid_candidates)
+            debug["val_support_by_class"] = dict(selected_debug["val_support_by_class"])
+            debug["calib_support_by_class"] = dict(selected_debug["calib_support_by_class"])
+            debug["class_rate_gap_by_class"] = dict(selected_debug["class_rate_gap_by_class"])
+            if selected_debug["class_rate_gap_by_class"]:
+                debug["selected_max_class_rate_gap"] = float(
+                    max(selected_debug["class_rate_gap_by_class"].values())
+                )
+                debug["selected_mean_class_rate_gap"] = float(
+                    sum(selected_debug["class_rate_gap_by_class"].values())
+                ) / float(len(selected_debug["class_rate_gap_by_class"]))
+            return int(selected_calib_size), debug
 
         debug["reason"] = "no_supported_calibration_size"
         return None, debug
@@ -4677,34 +4933,59 @@ class TrainingPipeline:
         if unoccupied_share < min_share:
             return X_seq, y_seq, seq_timestamps
 
-        keep_mask = np.ones(len(y_seq), dtype=bool)
-        i = 0
-        removed = 0
+        def _build_keep_mask(active_stride: int) -> Tuple[np.ndarray, int]:
+            keep = np.ones(len(y_seq), dtype=bool)
+            removed_local = 0
+            i = 0
+            while i < len(y_seq):
+                if y_seq[i] != unoccupied_id:
+                    i += 1
+                    continue
 
-        while i < len(y_seq):
-            if y_seq[i] != unoccupied_id:
+                run_start = i
+                while i + 1 < len(y_seq) and y_seq[i + 1] == unoccupied_id:
+                    i += 1
+                run_end = i
+                run_len = run_end - run_start + 1
+
+                if run_len < min_run_length:
+                    i += 1
+                    continue
+
+                inner_start = run_start + boundary_keep
+                inner_end = run_end - boundary_keep
+                if inner_start <= inner_end:
+                    for idx in range(inner_start, inner_end + 1):
+                        if ((idx - inner_start) % max(1, int(active_stride))) != 0:
+                            keep[idx] = False
+                            removed_local += 1
                 i += 1
-                continue
+            return keep, int(removed_local)
 
-            run_start = i
-            while i + 1 < len(y_seq) and y_seq[i + 1] == unoccupied_id:
-                i += 1
-            run_end = i
-            run_len = run_end - run_start + 1
-
-            if run_len < min_run_length:
-                i += 1
-                continue
-
-            inner_start = run_start + boundary_keep
-            inner_end = run_end - boundary_keep
-            if inner_start <= inner_end:
-                for idx in range(inner_start, inner_end + 1):
-                    if ((idx - inner_start) % stride) != 0:
-                        keep_mask[idx] = False
-                        removed += 1
-
-            i += 1
+        active_stride = int(max(1, stride))
+        keep_mask, removed = _build_keep_mask(active_stride)
+        room_key = normalize_room_name(room_name)
+        drift_guard_applied = False
+        drift_summary: Optional[Dict[str, Any]] = None
+        max_allowed_drift = self._resolve_unoccupied_downsample_max_class_share_drift()
+        if (
+            removed > 0
+            and self._resolve_unoccupied_downsample_drift_guard_enabled()
+            and room_key in self._resolve_unoccupied_downsample_drift_guard_rooms()
+        ):
+            while removed > 0:
+                candidate_y = y_seq[keep_mask]
+                drift_summary = self._compute_class_share_drift_from_labels(y_seq, candidate_y)
+                if float(drift_summary.get("max_abs_drift", 0.0)) <= (max_allowed_drift + 1e-9):
+                    break
+                if active_stride <= 1:
+                    keep_mask = np.ones(len(y_seq), dtype=bool)
+                    removed = 0
+                    drift_summary = self._compute_class_share_drift_from_labels(y_seq, y_seq)
+                    break
+                active_stride = max(1, active_stride // 2)
+                keep_mask, removed = _build_keep_mask(active_stride)
+                drift_guard_applied = True
 
         if removed == 0:
             return X_seq, y_seq, seq_timestamps
@@ -4713,7 +4994,10 @@ class TrainingPipeline:
             f"Downsampled easy unoccupied windows for {room_name}: "
             f"removed={removed}, kept={int(keep_mask.sum())}, "
             f"unoccupied_share={unoccupied_share:.1%}, "
-            f"min_share={min_share:.2f}, stride={stride}, boundary_keep={boundary_keep}, "
+            f"min_share={min_share:.2f}, stride={stride}, effective_stride={active_stride}, "
+            f"drift_guard={drift_guard_applied}, "
+            f"max_class_share_drift={float((drift_summary or {}).get('max_abs_drift', 0.0)):.4f}, "
+            f"boundary_keep={boundary_keep}, "
             f"min_run_length={min_run_length}"
         )
         return X_seq[keep_mask], y_seq[keep_mask], seq_timestamps[keep_mask]
@@ -6189,10 +6473,38 @@ class TrainingPipeline:
                             "macro_recall": float(report_two_stage.get("macro avg", {}).get("recall", 0.0)),
                             "macro_precision": float(report_two_stage.get("macro avg", {}).get("precision", 0.0)),
                         }
-                        metrics["two_stage_core"]["validation_summary"] = two_stage_payload
-                        if gate_mode == "primary":
+                        selection = self._select_final_two_stage_gate_source(
+                            room_name=room_name,
+                            y_true=np.asarray(y_val_eval, dtype=np.int32),
+                            single_stage_probs=np.asarray(y_pred, dtype=np.float32),
+                            two_stage_probs=np.asarray(y_pred_two_stage, dtype=np.float32),
+                            gate_mode=gate_mode,
+                            champion_meta=champion_meta,
+                        )
+                        metrics["two_stage_core"]["single_stage_validation"] = dict(
+                            selection.get("single_stage") or {}
+                        )
+                        metrics["two_stage_core"]["two_stage_validation"] = dict(
+                            selection.get("two_stage") or {}
+                        )
+                        metrics["two_stage_core"]["validation_summary"] = dict(
+                            selection.get("selected_summary") or two_stage_payload
+                        )
+                        metrics["two_stage_core"]["validation_summary_raw_two_stage"] = dict(two_stage_payload)
+                        metrics["two_stage_core"]["gate_source"] = str(
+                            selection.get("selected_source") or "single_stage_shadow"
+                        )
+                        metrics["two_stage_core"]["runtime_use_two_stage"] = bool(
+                            selection.get("runtime_use_two_stage", False)
+                        )
+                        two_stage_result["runtime_enabled"] = bool(
+                            selection.get("runtime_use_two_stage", False)
+                        )
+                        two_stage_result["runtime_gate_source"] = str(
+                            selection.get("selected_source") or ""
+                        )
+                        if bool(selection.get("runtime_use_two_stage", False)):
                             y_pred = y_pred_two_stage
-                            metrics["two_stage_core"]["gate_source"] = "two_stage_primary"
                             metrics["metric_source"] = "holdout_validation_two_stage_primary"
                             checkpoint_payload = metrics.get("checkpoint_selection")
                             if isinstance(checkpoint_payload, dict):
@@ -6207,10 +6519,17 @@ class TrainingPipeline:
                                     "holdout_validation_two_stage_primary"
                                 )
                         else:
-                            metrics["two_stage_core"]["gate_source"] = "single_stage_shadow"
+                            metrics["metric_source"] = (
+                                "holdout_validation_single_stage_fallback"
+                                if gate_mode == "primary"
+                                else "holdout_validation_single_stage_shadow"
+                            )
                     except Exception as e:
                         metrics["two_stage_core"]["error"] = f"{type(e).__name__}: {e}"
                         metrics["two_stage_core"]["gate_source"] = "single_stage_fallback_error"
+                        metrics["two_stage_core"]["runtime_use_two_stage"] = False
+                        two_stage_result["runtime_enabled"] = False
+                        two_stage_result["runtime_gate_source"] = "single_stage_fallback_error"
                         logger.warning(f"Two-stage validation fallback for {room_name}: {e}")
 
                 shadow_eval_y_true = np.asarray(y_val_eval, dtype=np.int32)
@@ -6583,11 +6902,20 @@ class TrainingPipeline:
                         room_name=room_name,
                         saved_version=int(saved_version),
                         two_stage_result=two_stage_result,
-                        promote_to_latest=bool(promote_to_latest),
+                        promote_to_latest=bool(
+                            promote_to_latest and two_stage_result.get("runtime_enabled", False)
+                        ),
                     )
                     if two_stage_artifacts:
                         metrics["two_stage_core"]["artifact_paths"] = two_stage_artifacts
                         metrics["two_stage_core"]["saved_version"] = int(saved_version)
+                    if bool(promote_to_latest) and not bool(two_stage_result.get("runtime_enabled", False)):
+                        metrics["two_stage_core"]["cleared_latest_artifacts"] = (
+                            self._clear_latest_two_stage_core_artifacts(
+                                elder_id=elder_id,
+                                room_name=room_name,
+                            )
+                        )
                 except Exception as e:
                     metrics["two_stage_core"]["artifact_error"] = f"{type(e).__name__}: {e}"
                     logger.warning(

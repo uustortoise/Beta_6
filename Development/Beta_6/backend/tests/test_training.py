@@ -751,6 +751,97 @@ class TestTrainingPipeline(unittest.TestCase):
             rooms = TrainingPipeline._resolve_two_stage_core_rooms()
         self.assertIn("entrance", rooms)
 
+    def test_select_final_two_stage_gate_source_falls_back_to_single_stage_on_no_regress(self):
+        self.mock_platform.label_encoders["Kitchen"] = MagicMock()
+        self.mock_platform.label_encoders["Kitchen"].classes_ = np.array(
+            ["kitchen_normal_use", "unoccupied"],
+            dtype=object,
+        )
+        y_true = np.asarray(([0] * 50) + ([1] * 50), dtype=np.int32)
+        single_probs = np.zeros((len(y_true), 2), dtype=np.float32)
+        single_probs[np.arange(len(y_true)), y_true] = 1.0
+
+        two_stage_pred = np.asarray(([0] * 70) + ([1] * 30), dtype=np.int32)
+        two_stage_probs = np.zeros((len(y_true), 2), dtype=np.float32)
+        two_stage_probs[np.arange(len(y_true)), two_stage_pred] = 1.0
+
+        release_cfg = {
+            "release_gates": {
+                "no_regress": {
+                    "max_drop_from_champion": 0.05,
+                    "exempt_rooms": [],
+                }
+            }
+        }
+        champion_meta = {"metrics": {"macro_f1": 0.95}}
+        with patch("ml.training.get_release_gates_config", return_value=release_cfg):
+            selection = self.pipeline._select_final_two_stage_gate_source(
+                room_name="Kitchen",
+                y_true=y_true,
+                single_stage_probs=single_probs,
+                two_stage_probs=two_stage_probs,
+                gate_mode="primary",
+                champion_meta=champion_meta,
+            )
+
+        self.assertEqual(selection["selected_source"], "single_stage_fallback_no_regress")
+        self.assertFalse(bool(selection["runtime_use_two_stage"]))
+        self.assertTrue(bool(selection["single_stage"]["no_regress_ok"]))
+        self.assertFalse(bool(selection["two_stage"]["no_regress_ok"]))
+
+    def test_select_final_two_stage_gate_source_keeps_two_stage_when_single_collapses(self):
+        self.mock_platform.label_encoders["LivingRoom"] = MagicMock()
+        self.mock_platform.label_encoders["LivingRoom"].classes_ = np.array(
+            ["livingroom_normal_use", "unoccupied"],
+            dtype=object,
+        )
+        y_true = np.asarray(([0] * 50) + ([1] * 50), dtype=np.int32)
+        single_probs = np.tile(np.asarray([[1.0, 0.0]], dtype=np.float32), (len(y_true), 1))
+        two_stage_probs = np.zeros((len(y_true), 2), dtype=np.float32)
+        two_stage_probs[np.arange(len(y_true)), y_true] = 1.0
+
+        selection = self.pipeline._select_final_two_stage_gate_source(
+            room_name="LivingRoom",
+            y_true=y_true,
+            single_stage_probs=single_probs,
+            two_stage_probs=two_stage_probs,
+            gate_mode="primary",
+            champion_meta=None,
+        )
+
+        self.assertEqual(selection["selected_source"], "two_stage_primary")
+        self.assertTrue(bool(selection["runtime_use_two_stage"]))
+        self.assertTrue(bool(selection["single_stage"]["collapsed"]))
+        self.assertFalse(bool(selection["two_stage"]["collapsed"]))
+
+    def test_clear_latest_two_stage_core_artifacts_removes_latest_aliases(self):
+        with TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            self.mock_registry.get_models_dir.return_value = models_dir
+            paths = [
+                models_dir / "Kitchen_two_stage_stage_a_model.keras",
+                models_dir / "Kitchen_two_stage_stage_b_model.keras",
+                models_dir / "Kitchen_two_stage_meta.json",
+            ]
+            for path in paths:
+                path.write_text("x")
+
+            cleared = self.pipeline._clear_latest_two_stage_core_artifacts(
+                elder_id="elder1",
+                room_name="Kitchen",
+            )
+
+            self.assertEqual(
+                cleared,
+                {
+                    "stage_a_model_latest": True,
+                    "stage_b_model_latest": True,
+                    "meta_latest": True,
+                },
+            )
+            for path in paths:
+                self.assertFalse(path.exists())
+
     def test_build_collapse_retry_class_weights_boosts_critical_minority(self):
         self.mock_platform.label_encoders["room1"].classes_ = np.array(["unoccupied", "sleep"], dtype=object)
         y_train = np.asarray(([0] * 90) + ([1] * 10), dtype=np.int32)
@@ -764,6 +855,27 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertIn(0, weights)
         self.assertIn(1, weights)
         self.assertGreater(float(weights[1]), float(weights[0]))
+
+    def test_build_collapse_retry_class_weights_caps_binary_ratio_growth(self):
+        self.mock_platform.label_encoders["room1"].classes_ = np.array(["unoccupied", "sleep"], dtype=object)
+        y_train = np.asarray(([0] * 90) + ([1] * 10), dtype=np.int32)
+        base = {0: 0.8, 1: 2.8}
+        base_ratio = float(base[1]) / float(base[0])
+        with patch.dict(
+            os.environ,
+            {"COLLAPSE_RETRY_BINARY_MAX_RATIO_GROWTH": "1.10"},
+            clear=False,
+        ):
+            with patch.object(self.pipeline, "_resolve_critical_labels", return_value=["sleep"]):
+                weights = self.pipeline._build_collapse_retry_class_weights(
+                    room_name="room1",
+                    y_train=y_train,
+                    base_class_weights=base,
+                )
+        self.assertIn(0, weights)
+        self.assertIn(1, weights)
+        capped_ratio = float(weights[1]) / float(weights[0])
+        self.assertLessEqual(capped_ratio, base_ratio * 1.10 + 1e-6)
 
     def test_write_decision_trace_persists_latest_and_versioned(self):
         with TemporaryDirectory() as tmp:
@@ -781,6 +893,20 @@ class TestTrainingPipeline(unittest.TestCase):
             latest = models_dir / "room1_decision_trace.json"
             self.assertTrue(versioned.exists())
             self.assertTrue(latest.exists())
+
+    def test_select_calibration_size_prefers_representative_class_mix(self):
+        y_holdout = np.asarray([int(ch) for ch in "000001110011"], dtype=np.int32)
+        calib_size, debug = self.pipeline._select_calibration_size_with_support(
+            y_holdout=y_holdout,
+            default_calib_size=8,
+            min_calib_samples=4,
+            min_val_samples=4,
+            required_class_ids=[1],
+            min_support=2,
+        )
+        self.assertEqual(calib_size, 4)
+        self.assertTrue(bool(debug.get("found")))
+        self.assertEqual(int(debug.get("selected_calib_size", 0)), 4)
 
     @patch('ml.training.TrainingPipeline.augment_training_data')
     @patch('ml.training.build_transformer_model')
@@ -1361,6 +1487,41 @@ class TestTrainingPipeline(unittest.TestCase):
     @patch.dict(
         "os.environ",
         {
+            "UNOCCUPIED_DOWNSAMPLE_MIN_SHARE": "0.20",
+            "UNOCCUPIED_BOUNDARY_KEEP": "1",
+            "UNOCCUPIED_MIN_RUN_LENGTH": "4",
+            "UNOCCUPIED_DOWNSAMPLE_STRIDE": "8",
+            "ENABLE_UNOCCUPIED_DOWNSAMPLE_DRIFT_GUARD": "true",
+            "UNOCCUPIED_DOWNSAMPLE_DRIFT_GUARD_ROOMS": "kitchen",
+            "UNOCCUPIED_DOWNSAMPLE_MAX_CLASS_SHARE_DRIFT": "0.10",
+        },
+        clear=False,
+    )
+    def test_downsample_easy_unoccupied_limits_post_sampling_class_drift(self):
+        encoder = MagicMock()
+        encoder.classes_ = np.array(["kitchen_normal_use", "unoccupied"], dtype=object)
+        self.mock_platform.label_encoders["kitchen"] = encoder
+
+        y_seq = np.array(([1] * 80) + ([0] * 20), dtype=np.int32)
+        X_seq = np.random.randn(len(y_seq), 5, 3).astype(np.float32)
+        ts = np.array(pd.date_range("2026-01-01", periods=len(y_seq), freq="10s"), dtype="datetime64[ns]")
+
+        X_out, y_out, ts_out = self.pipeline._downsample_easy_unoccupied(
+            X_seq=X_seq,
+            y_seq=y_seq,
+            seq_timestamps=ts,
+            room_name="Kitchen",
+        )
+
+        before_share = float(np.mean(y_seq == 1))
+        after_share = float(np.mean(y_out == 1))
+        self.assertLessEqual(abs(after_share - before_share), 0.10 + 1e-6)
+        self.assertEqual(len(X_out), len(y_out))
+        self.assertEqual(len(ts_out), len(y_out))
+
+    @patch.dict(
+        "os.environ",
+        {
             "ENABLE_MINORITY_CLASS_SAMPLING": "true",
             "MINORITY_TARGET_SHARE": "0.20",
             "MINORITY_MAX_MULTIPLIER": "3",
@@ -1747,6 +1908,58 @@ class TestTrainingPipeline(unittest.TestCase):
         )
         self.assertFalse(gate_pass)
         self.assertTrue(any(r.startswith("critical_label_collapse:bedroom:unoccupied") for r in reasons))
+
+    @patch("ml.training.get_release_gates_config")
+    def test_evaluate_release_gate_blocks_bedroom_collapse_for_holdout_fallback_metric_source(self, mock_get_policy):
+        mock_get_policy.return_value = {
+            "release_gates": {
+                "rooms": {
+                    "bedroom": {
+                        "schedule": [{"min_days": 1, "max_days": None, "min_value": 0.2}]
+                    }
+                },
+                "no_regress": {"max_drop_from_champion": 0.05, "exempt_rooms": []},
+            }
+        }
+        self.pipeline.policy.release_gate.min_recall_by_room_label = {}
+        self.pipeline._policy_snapshot = self.pipeline.policy
+
+        gate_pass, reasons = self.pipeline._evaluate_release_gate(
+            room_name="Bedroom",
+            candidate_metrics={
+                "macro_f1": 0.4245429983609775,
+                "training_days": 7.0,
+                "samples": 10242,
+                "metric_source": "holdout_validation_single_stage_fallback",
+                "validation_min_class_support": 1352,
+                "per_label_recall": {
+                    "bedroom_normal_use": 0.0,
+                    "sleep": 0.8994498777506112,
+                    "unoccupied": 0.5564257742969028,
+                },
+                "per_label_precision": {
+                    "bedroom_normal_use": 0.0,
+                    "sleep": 0.49354351836323995,
+                    "unoccupied": 0.7428707224334601,
+                },
+                "per_label_support": {
+                    "bedroom_normal_use": 1352,
+                    "sleep": 3272,
+                    "unoccupied": 5618,
+                },
+                "predicted_class_distribution": {
+                    "bedroom_normal_use": 71,
+                    "sleep": 5963,
+                    "unoccupied": 4208,
+                },
+            },
+            champion_meta={"metrics": {"macro_f1": 0.4709072253183623}},
+        )
+
+        self.assertFalse(gate_pass)
+        self.assertTrue(
+            any(r.startswith("critical_label_collapse:bedroom:bedroom_normal_use") for r in reasons)
+        )
 
     @patch("ml.training.get_release_gates_config")
     def test_evaluate_release_gate_blocks_single_class_prediction_collapse(self, mock_get_policy):

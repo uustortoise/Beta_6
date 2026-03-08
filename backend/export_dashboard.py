@@ -780,16 +780,16 @@ def render_ml_health_snapshot_panel(snapshot: dict, panel_scope: str = "weekly",
     fold_label = "N/A" if fold_count is None else str(fold_count)
 
     top1, top2, top3, top4 = st.columns(4)
-    top1.metric("Model Quality (Balanced Score)", _ml_snapshot_metric(metrics.get("candidate_macro_f1_mean")))
+    top1.metric("WF Model Quality (F1)", _ml_snapshot_metric(metrics.get("candidate_macro_f1_mean")))
     top2.metric("Transition Quality", _ml_snapshot_metric(metrics.get("candidate_transition_macro_f1_mean")))
     top3.metric("Safety Drift Threshold", _ml_snapshot_metric(drift, digits=2))
     top4.metric("Safety Status", _ml_snapshot_label(primary.get("status")))
 
     if compact:
         sec1, sec2, sec3, sec4 = st.columns(4)
-        sec1.metric("Current Champion Score", _ml_snapshot_metric(metrics.get("champion_macro_f1_mean")))
+        sec1.metric("Champion WF F1", _ml_snapshot_metric(metrics.get("champion_macro_f1_mean")))
         sec2.metric("Candidate vs Champion Delta", _ml_snapshot_metric(metrics.get("delta_vs_champion_macro_f1")))
-        sec3.metric("Stability Accuracy", _ml_snapshot_metric(metrics.get("candidate_stability_accuracy_mean")))
+        sec3.metric("Stability Score", _ml_snapshot_metric(metrics.get("candidate_stability_accuracy_mean")))
         sec4.metric("Last Check Time", str(primary.get("last_check_time") or "N/A"))
         st.caption(
             f"Room: {str(primary.get('room') or 'N/A').title()} | "
@@ -800,9 +800,9 @@ def render_ml_health_snapshot_panel(snapshot: dict, panel_scope: str = "weekly",
         return
 
     sec1, sec2, sec3, sec4 = st.columns(4)
-    sec1.metric("Current Champion Score", _ml_snapshot_metric(metrics.get("champion_macro_f1_mean")))
+    sec1.metric("Champion WF F1", _ml_snapshot_metric(metrics.get("champion_macro_f1_mean")))
     sec2.metric("Candidate vs Champion Delta", _ml_snapshot_metric(metrics.get("delta_vs_champion_macro_f1")))
-    sec3.metric("Stability Accuracy", _ml_snapshot_metric(metrics.get("candidate_stability_accuracy_mean")))
+    sec3.metric("Stability Score", _ml_snapshot_metric(metrics.get("candidate_stability_accuracy_mean")))
     sec4.metric("Last Check Time", str(primary.get("last_check_time") or "N/A"))
     st.markdown(
         _severity_badge(f"Threshold Source: {threshold_source}", "neutral")
@@ -824,9 +824,9 @@ def render_ml_health_snapshot_panel(snapshot: dict, panel_scope: str = "weekly",
                 {
                     "Room": str(room_item.get("room") or "").title(),
                     "Status": _ml_snapshot_label(room_item.get("status")),
-                    "Balanced Score": room_metrics.get("candidate_macro_f1_mean"),
+                    "WF Candidate F1": room_metrics.get("candidate_macro_f1_mean"),
                     "Transition Quality": room_metrics.get("candidate_transition_macro_f1_mean"),
-                    "Champion Score": room_metrics.get("champion_macro_f1_mean"),
+                    "Champion WF F1": room_metrics.get("champion_macro_f1_mean"),
                     "Delta vs Champion": room_metrics.get("delta_vs_champion_macro_f1"),
                     "Drift Threshold": (room_thresholds.get("drift_threshold") or {}).get("value")
                     if isinstance(room_thresholds.get("drift_threshold"), dict)
@@ -4526,9 +4526,9 @@ with tab3:
                     column_config={
                         "timestamp": st.column_config.DatetimeColumn("Run Time", format="D MMM, HH:mm:ss"),
                         "accuracy": st.column_config.ProgressColumn(
-                            "Accuracy", 
-                            format="%.2f", 
-                            min_value=0, 
+                            "Raw Run Accuracy",
+                            format="%.2f",
+                            min_value=0,
                             max_value=1
                         ),
                         "samples_count": st.column_config.NumberColumn("Samples"),
@@ -4695,7 +4695,7 @@ with tab3:
                     f"Latest Run ID: {latest_run_id_txt if latest_run_id_txt is not None else 'N/A'} | "
                     f"Latest run: {latest_run.get('training_date', 'N/A')} | "
                     f"Result: {_friendly_run_status(latest_run.get('status', 'N/A'))} | "
-                    f"Run score: {latest_accuracy_txt}"
+                    f"Raw Training Run Accuracy: {latest_accuracy_txt}"
                 )
 
             release_profile = monitor.get("release_gate_profile", {})
@@ -5338,8 +5338,8 @@ with tab3:
                                             else:
                                                 m1, m2, m3, m4, m5, m6 = st.columns(6)
                                                 m1.metric("Checks", num_folds)
-                                                m2.metric("Balanced Score", f"{float(summary.get('macro_f1_mean', 0.0)):.3f}")
-                                                m3.metric("Accuracy", f"{float(summary.get('accuracy_mean', 0.0)):.3f}")
+                                                m2.metric("WF Candidate F1", f"{float(summary.get('macro_f1_mean', 0.0)):.3f}")
+                                                m3.metric("WF Candidate Accuracy", f"{float(summary.get('accuracy_mean', 0.0)):.3f}")
                                                 m4.metric("Recall", f"{float(summary.get('macro_recall_mean', 0.0)):.3f}")
                                                 st_mean = summary.get("stability_accuracy_mean")
                                                 tr_mean = summary.get("transition_macro_f1_mean")
@@ -5365,7 +5365,7 @@ with tab3:
                                                         .mark_line(point=True)
                                                         .encode(
                                                             x=alt.X("valid_end:T", title="Validation Window End"),
-                                                            y=alt.Y("macro_f1:Q", title="Balanced Score", scale=alt.Scale(domain=[0, 1])),
+                                                            y=alt.Y("macro_f1:Q", title="WF Candidate F1", scale=alt.Scale(domain=[0, 1])),
                                                             tooltip=["fold_id", "valid_end", "macro_f1", "accuracy"],
                                                         )
                                                         .properties(height=280)

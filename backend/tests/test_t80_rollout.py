@@ -16,6 +16,7 @@ from ml.t80_rollout_manager import (
     PromotionDecision,
     CanaryConfig,
 )
+from ml.beta6.registry.registry_v2 import RegistryV2
 
 
 class TestT80RolloutManager(unittest.TestCase):
@@ -928,5 +929,37 @@ class TestT80LadderAndAutoRollback(unittest.TestCase):
             ["bedroom", "livingroom"],
         )
         self.assertEqual(len(response["registry_action"]), 2)
+        self.assertEqual(len(stub_override.calls), 1)
+        self.assertEqual(self.manager.get_state().stage, RolloutStage.ROLLED_BACK)
+
+    def test_apply_auto_rollback_protection_records_missing_fallback_target(self):
+        class _StubOverrideManager:
+            def __init__(self):
+                self.calls = []
+
+            def activate_baseline_fallback(self, *, reason: str):
+                self.calls.append(reason)
+                return True, {"reason": reason, "profile": "production"}
+
+        registry = RegistryV2(root=self.manager.state_dir / "registry_v2")
+        stub_override = _StubOverrideManager()
+
+        response = self.manager.apply_auto_rollback_protection(
+            nightly_metrics=[
+                {"pipeline_success_rate": 0.95},
+                {"pipeline_success_rate": 0.96},
+            ],
+            elder_id="HK001",
+            room="livingroom",
+            run_id="run-missing-target",
+            registry_v2=registry,
+            override_manager=stub_override,
+        )
+
+        self.assertEqual(response["status"], "rollback_applied")
+        self.assertEqual(len(response["registry_action"]), 1)
+        self.assertEqual(response["registry_action"][0]["room"], "livingroom")
+        self.assertIn("No fallback target available", response["registry_action"][0]["error"])
+        self.assertIsNone(response["registry_action"][0]["fallback_state"])
         self.assertEqual(len(stub_override.calls), 1)
         self.assertEqual(self.manager.get_state().stage, RolloutStage.ROLLED_BACK)

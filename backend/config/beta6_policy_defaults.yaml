@@ -19,6 +19,9 @@ clinical_priority:
     inactive: 0.85
     unoccupied: 0.75
     low_confidence: 0.60
+  multipliers_by_room_label:
+    livingroom.livingroom_normal_use: 1.0
+    livingroom.unoccupied: 1.0
 
 calibration:
   precision_targets_by_label:
@@ -56,14 +59,18 @@ unoccupied_downsample:
     bathroom: 0.08
     bedroom: 0.60
     entrance: 0.08
-    livingroom: 0.12
+    livingroom: 0.30
     kitchen: 0.14
   stride_by_room:
     bathroom: 12
     bedroom: 2
     entrance: 14
     kitchen: 10
-    livingroom: 12
+    livingroom: 4
+  max_post_downsample_prior_drift_by_room:
+    entrance: 0.03
+  prior_drift_guard_rooms:
+    - entrance
 
 minority_sampling:
   target_share_by_room:
@@ -78,6 +85,10 @@ minority_sampling:
     entrance: 5
     kitchen: 3
     livingroom: 3
+  max_post_sampling_prior_drift_by_room:
+    entrance: 0.03
+  prior_drift_guard_rooms:
+    - entrance
 
 data_viability:
   min_observed_days_by_room:
@@ -109,6 +120,36 @@ training:
   timeline_native_rooms:
     - bedroom
     - livingroom
+  two_stage_core:
+    enabled: true
+    rooms:
+      - bedroom
+      - livingroom
+      - kitchen
+      - bathroom
+    gate_mode: primary
+    stage_a_occupied_threshold: 0.50
+    stage_a_target_precision: 0.70
+    stage_a_recall_floor: 0.20
+    stage_a_threshold_min: 0.00
+    stage_a_threshold_max: 0.95
+    stage_a_min_predicted_occupied_ratio: 0.50
+    stage_a_min_predicted_occupied_abs: 0.05
+  factorized_primary_rooms:
+    - bedroom
+  post_split_shuffle_rooms:
+    - entrance
+    - bedroom
+  transition_focus_room_labels:
+    bedroom: bedroom_normal_use
+  transition_focus_radius_steps_by_room:
+    bedroom: 12
+  transition_focus_max_multiplier_by_room:
+    bedroom: 3
+  transition_focus_max_post_sampling_prior_drift_by_room:
+    bedroom: 0.10
+  transition_focus_prior_drift_guard_rooms:
+    - bedroom
   min_holdout_support_default: 3
   min_holdout_support_by_room:
     bedroom: 5
@@ -116,6 +157,18 @@ training:
     kitchen: 5
     livingroom: 5
     entrance: 3
+
+reproducibility:
+  multi_seed_rooms:
+    - entrance
+    - livingroom
+  multi_seed_candidate_seeds:
+    - 40
+    - 41
+    - 42
+    - 43
+    - 44
+    - 45
 
 runtime:
   hard_negative_risky_rooms:

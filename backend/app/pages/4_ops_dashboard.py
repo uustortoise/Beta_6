@@ -85,31 +85,36 @@ def render():
     else:
         import altair as alt
 
-        target = samples.get("target", 21)
+        target = samples.get("target", 14)
         counts = samples.get("counts", {})
+        count_label = str(samples.get("count_label") or "Days Recorded")
+        target_label = str(samples.get("target_label") or "Labeled Day Target")
         
         # Build simple dataframe for bar chart
-        df_samples = pd.DataFrame(list(counts.items()), columns=["Room", "Days Recorded"])
+        df_samples = pd.DataFrame(list(counts.items()), columns=["Room", count_label])
         
         colB1, colB2 = st.columns([1, 2])
         with colB1:
             ready = len(samples.get("ready_rooms", []))
             total = len(counts)
             st.metric("Rooms Ready for ML", f"{ready} / {total}")
-            st.caption(f"Target: {target} days")
+            st.caption(f"{target_label}: {target} days")
+            st.caption("Readiness is based on labeled day coverage, not raw file count.")
             
         with colB2:
             # Altair bar chart with threshold line
             bars = alt.Chart(df_samples).mark_bar().encode(
-                x='Days Recorded:Q',
+                x=alt.X(f'{count_label}:Q', title=count_label),
                 y=alt.Y('Room:N', sort='-x'),
                 color=alt.condition(
-                    alt.datum['Days Recorded'] >= target,
+                    alt.datum[count_label] >= target,
                     alt.value('#1b5e20'), # Green if met
                     alt.value('#f57c00')  # Orange if under
                 )
             )
-            rule = alt.Chart(pd.DataFrame({'Target': [target]})).mark_rule(color='red').encode(x='Target:Q')
+            rule = alt.Chart(pd.DataFrame({target_label: [target]})).mark_rule(color='red').encode(
+                x=alt.X(f'{target_label}:Q', title=count_label)
+            )
             st.altair_chart((bars + rule).properties(height=250), use_container_width=True)
 
 
@@ -123,18 +128,19 @@ def render():
     
     if is_ml_mode:
         st.write(f"**Overall Status:** `{overall}`")
+        st.caption("WF metrics below are walk-forward quality metrics, not raw training-run accuracy.")
         if "rooms" in ml_status:
             for r in ml_status["rooms"]:
                 metrics = r.get("metrics") or {}
                 st.markdown(f"**{str(r.get('room')).title()}**")
                 mc1, mc2, mc3 = st.columns(3)
-                mc1.metric("Candidate F1", _format_metric(metrics.get("candidate_macro_f1_mean")))
+                mc1.metric("WF Candidate F1", _format_metric(metrics.get("candidate_macro_f1_mean")))
                 champion = metrics.get("champion_macro_f1_mean")
                 prev_run = metrics.get("previous_run_macro_f1_mean")
                 if champion is None and prev_run is not None:
-                    mc2.metric("Prev Run F1", _format_metric(prev_run))
+                    mc2.metric("Previous WF F1", _format_metric(prev_run))
                 else:
-                    mc2.metric("Champion F1", _format_metric(champion))
+                    mc2.metric("Champion WF F1", _format_metric(champion))
                 mc3.metric("Status", r.get("status"))
     else:
         # Ops view - simpler traffic lights
@@ -216,6 +222,7 @@ def render():
             p4.metric("Blocked Runs", blocked_runs)
 
             latest_run = monitor.get("latest_run") or {}
+            metric_labels = monitor.get("metric_labels", {}) if isinstance(monitor.get("metric_labels"), dict) else {}
             if latest_run:
                 latest_accuracy = latest_run.get("accuracy")
                 latest_accuracy_txt = f"{float(latest_accuracy):.3f}" if latest_accuracy is not None else "N/A"
@@ -224,7 +231,7 @@ def render():
                     f"Latest Run ID: {latest_run_id_txt if latest_run_id_txt is not None else 'N/A'} | "
                     f"Latest run: {latest_run.get('training_date', 'N/A')} | "
                     f"Result: {str(latest_run.get('status', 'N/A')).replace('_', ' ').title()} | "
-                    f"Run score: {latest_accuracy_txt}"
+                    f"{metric_labels.get('latest_run_accuracy', 'Raw Training Run Accuracy')}: {latest_accuracy_txt}"
                 )
 
             release_profile = monitor.get("release_gate_profile", {})

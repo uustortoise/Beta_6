@@ -48,6 +48,14 @@ def get_clinical_priority_multipliers_by_label() -> dict[str, float]:
     }
 
 
+def get_clinical_priority_multipliers_by_room_label() -> dict[str, float]:
+    return {
+        str(k).strip().lower(): float(v)
+        for k, v in _get_map("clinical_priority", "multipliers_by_room_label").items()
+        if str(k).strip()
+    }
+
+
 def get_calibration_precision_targets_by_label() -> dict[str, float]:
     return {
         str(k).strip().lower(): float(v)
@@ -78,6 +86,18 @@ def get_unoccupied_downsample_stride_by_room() -> dict[str, int]:
         for k, v in _get_map("unoccupied_downsample", "stride_by_room").items()
         if str(k).strip()
     }
+
+
+def get_unoccupied_downsample_max_post_downsample_prior_drift_by_room() -> dict[str, float]:
+    return {
+        str(k).strip().lower(): float(v)
+        for k, v in _get_map("unoccupied_downsample", "max_post_downsample_prior_drift_by_room").items()
+        if str(k).strip()
+    }
+
+
+def get_unoccupied_downsample_prior_drift_guard_rooms() -> list[str]:
+    return _get_str_list("unoccupied_downsample", "prior_drift_guard_rooms")
 
 
 def get_data_viability_min_observed_days_by_room() -> dict[str, int]:
@@ -176,3 +196,145 @@ def get_minority_sampling_max_multiplier_by_room() -> dict[str, int]:
         for k, v in _get_map("minority_sampling", "max_multiplier_by_room").items()
         if str(k).strip()
     }
+
+
+def get_minority_sampling_max_post_sampling_prior_drift_by_room() -> dict[str, float]:
+    return {
+        str(k).strip().lower(): float(v)
+        for k, v in _get_map("minority_sampling", "max_post_sampling_prior_drift_by_room").items()
+        if str(k).strip()
+    }
+
+
+def get_minority_sampling_prior_drift_guard_rooms() -> list[str]:
+    return _get_str_list("minority_sampling", "prior_drift_guard_rooms")
+
+
+def get_training_factorized_primary_rooms_default() -> list[str]:
+    return _get_str_list("training", "factorized_primary_rooms")
+
+
+def get_training_post_split_shuffle_rooms_default() -> list[str]:
+    return _get_str_list("training", "post_split_shuffle_rooms")
+
+
+def get_training_two_stage_core_enabled_default() -> bool:
+    value = _as_mapping(_load_config()).get("training", {})
+    if not isinstance(value, Mapping):
+        return False
+    raw = value.get("two_stage_core", {})
+    if not isinstance(raw, Mapping):
+        return False
+    return bool(raw.get("enabled", False))
+
+
+def get_training_two_stage_core_rooms_default() -> list[str]:
+    return _get_str_list("training", "two_stage_core", "rooms")
+
+
+def get_training_two_stage_core_gate_mode_default() -> str:
+    value = _as_mapping(_load_config()).get("training", {})
+    if not isinstance(value, Mapping):
+        return "shadow"
+    raw = value.get("two_stage_core", {})
+    if not isinstance(raw, Mapping):
+        return "shadow"
+    mode = str(raw.get("gate_mode", "shadow")).strip().lower()
+    return mode if mode in {"primary", "shadow"} else "shadow"
+
+
+def _get_training_two_stage_core_float_default(key: str, fallback: float) -> float:
+    value = _as_mapping(_load_config()).get("training", {})
+    if not isinstance(value, Mapping):
+        return fallback
+    raw = value.get("two_stage_core", {})
+    if not isinstance(raw, Mapping):
+        return fallback
+    try:
+        return float(raw.get(key, fallback))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def get_training_two_stage_core_stage_a_occupied_threshold_default() -> float:
+    return _get_training_two_stage_core_float_default("stage_a_occupied_threshold", 0.5)
+
+
+def get_training_two_stage_core_stage_a_target_precision_default() -> float:
+    return _get_training_two_stage_core_float_default("stage_a_target_precision", 0.70)
+
+
+def get_training_two_stage_core_stage_a_recall_floor_default() -> float:
+    return _get_training_two_stage_core_float_default("stage_a_recall_floor", 0.20)
+
+
+def get_training_two_stage_core_stage_a_threshold_min_default() -> float:
+    return _get_training_two_stage_core_float_default("stage_a_threshold_min", 0.00)
+
+
+def get_training_two_stage_core_stage_a_threshold_max_default() -> float:
+    return _get_training_two_stage_core_float_default("stage_a_threshold_max", 0.95)
+
+
+def get_training_two_stage_core_stage_a_min_predicted_occupied_ratio_default() -> float:
+    return _get_training_two_stage_core_float_default("stage_a_min_predicted_occupied_ratio", 0.50)
+
+
+def get_training_two_stage_core_stage_a_min_predicted_occupied_abs_default() -> float:
+    return _get_training_two_stage_core_float_default("stage_a_min_predicted_occupied_abs", 0.05)
+
+
+def get_training_transition_focus_room_labels() -> dict[str, str]:
+    return {
+        str(k).strip().lower(): str(v).strip().lower()
+        for k, v in _get_map("training", "transition_focus_room_labels").items()
+        if str(k).strip() and str(v).strip()
+    }
+
+
+def get_training_transition_focus_radius_steps_by_room() -> dict[str, int]:
+    return {
+        str(k).strip().lower(): int(v)
+        for k, v in _get_map("training", "transition_focus_radius_steps_by_room").items()
+        if str(k).strip()
+    }
+
+
+def get_training_transition_focus_max_multiplier_by_room() -> dict[str, int]:
+    return {
+        str(k).strip().lower(): int(v)
+        for k, v in _get_map("training", "transition_focus_max_multiplier_by_room").items()
+        if str(k).strip()
+    }
+
+
+def get_training_transition_focus_max_post_sampling_prior_drift_by_room() -> dict[str, float]:
+    return {
+        str(k).strip().lower(): float(v)
+        for k, v in _get_map("training", "transition_focus_max_post_sampling_prior_drift_by_room").items()
+        if str(k).strip()
+    }
+
+
+def get_training_transition_focus_prior_drift_guard_rooms() -> list[str]:
+    return _get_str_list("training", "transition_focus_prior_drift_guard_rooms")
+
+
+def get_reproducibility_multi_seed_rooms_default() -> list[str]:
+    return _get_str_list("reproducibility", "multi_seed_rooms")
+
+
+def get_reproducibility_multi_seed_candidate_seeds_default() -> list[int]:
+    value = _as_mapping(_load_config()).get("reproducibility", {})
+    if not isinstance(value, Mapping):
+        return []
+    raw = value.get("multi_seed_candidate_seeds")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list[int] = []
+    for item in raw:
+        try:
+            out.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return out

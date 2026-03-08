@@ -1001,8 +1001,8 @@ class T80RolloutManager:
 
         if registry_v2 is not None and elder_id and run_id:
             for target_room in dedup_rooms:
-                registry_action.append(
-                    registry_v2.rollback_and_activate_fallback(
+                try:
+                    action = registry_v2.rollback_and_activate_fallback(
                         elder_id=str(elder_id),
                         room=str(target_room),
                         run_id=str(run_id),
@@ -1013,7 +1013,24 @@ class T80RolloutManager:
                         },
                         metadata={"source": "t80_rollout_manager"},
                     )
-                )
+                except ValueError as exc:
+                    logger.warning(
+                        "T-80: failed to activate room fallback during auto rollback for %s/%s: %s",
+                        elder_id,
+                        target_room,
+                        exc,
+                    )
+                    action = {
+                        "elder_id": str(elder_id),
+                        "room": str(target_room),
+                        "run_id": str(run_id),
+                        "rollback_applied": False,
+                        "rollback_error": None,
+                        "rollback_pointer": None,
+                        "fallback_state": None,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                registry_action.append(action)
 
         if (
             override_manager is not None

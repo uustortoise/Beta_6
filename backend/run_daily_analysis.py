@@ -1309,20 +1309,17 @@ def _build_beta6_room_gate_report(metric: dict) -> dict:
     return report
 
 
-def _beta6_gate_signing_key(*, require_explicit: bool = False) -> str:
+def _beta6_gate_signing_key() -> str:
     """
     Resolve signing key for Beta 6 gate artifacts.
 
-    Defaults to a local-development key when env is absent so tests and local runs
-    remain deterministic. Production should set BETA6_GATE_SIGNING_KEY explicitly.
+    Defaults to a deterministic Beta 6 fallback key when env is absent so local,
+    test, and Beta 6 authority runs keep emitting signed artifacts consistently.
+    Strict explicit-secret enforcement is deferred to Beta 6.2.
     """
     raw = os.getenv("BETA6_GATE_SIGNING_KEY")
     if raw and str(raw).strip():
         return str(raw).strip()
-    if require_explicit:
-        raise RuntimeError(
-            "BETA6_GATE_SIGNING_KEY is required for live Beta 6 authority signing (registry_v2 present)"
-        )
     return "beta6-local-dev-signing-key"
 
 
@@ -1833,7 +1830,7 @@ def _apply_beta6_gate_authority(
             room_reports=room_reports,
             run_id=run_id,
             elder_id=elder_id,
-            signing_key=_beta6_gate_signing_key(require_explicit=registry_v2 is not None),
+            signing_key=_beta6_gate_signing_key(),
             output_dir=artifact_output_dir,
         )
     except Exception as exc:
@@ -1910,7 +1907,7 @@ def _apply_beta6_gate_authority(
             room_rows=shadow_compare_rows,
             run_id=run_id,
             elder_id=elder_id,
-            signing_key=_beta6_gate_signing_key(require_explicit=registry_v2 is not None),
+            signing_key=_beta6_gate_signing_key(),
             output_path=shadow_compare_output_path,
             unexplained_divergence_rate_max=unexplained_divergence_rate_max,
             metadata={

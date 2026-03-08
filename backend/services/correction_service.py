@@ -96,6 +96,44 @@ def _majority_label(values: list[str], fallback: str = "unknown") -> str:
     return max(counter.items(), key=lambda item: item[1])[0]
 
 
+def _normalize_timeline_frame(df: pd.DataFrame, *, default_room: str | None = None) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    out = df.copy()
+    out["timestamp"] = pd.to_datetime(out.get("timestamp"), errors="coerce")
+    out = out.dropna(subset=["timestamp"])
+    if out.empty:
+        return out
+
+    if "end_time" in out.columns:
+        out["end_time"] = pd.to_datetime(out["end_time"], errors="coerce")
+    else:
+        out["end_time"] = pd.NaT
+
+    if "duration_minutes" in out.columns:
+        durations = pd.to_numeric(out["duration_minutes"], errors="coerce").fillna(0.0)
+        derived_end = out["timestamp"] + pd.to_timedelta(durations, unit="m")
+        out["end_time"] = out["end_time"].fillna(derived_end)
+    out["end_time"] = out["end_time"].where(
+        out["end_time"].notna() & (out["end_time"] > out["timestamp"]),
+        out["timestamp"] + pd.Timedelta(seconds=10),
+    )
+
+    if "room" not in out.columns:
+        out["room"] = str(default_room or "").strip()
+    else:
+        out["room"] = out["room"].fillna(str(default_room or "")).astype(str)
+
+    if "confidence" not in out.columns:
+        out["confidence"] = pd.NA
+    if "is_corrected" not in out.columns:
+        out["is_corrected"] = 0
+
+    out["time"] = out["timestamp"].dt.strftime("%H:%M:%S")
+    return out
+
+
 def _resolve_correction_id(
     cursor,
     elder_id: str,
@@ -163,17 +201,7 @@ def get_activity_timeline(elder_id: str, room: str, date: datetime.date) -> pd.D
         """
         df = query_df(segment_query, (elder_id, room, record_date))
 
-    if not df.empty:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        df = df.dropna(subset=["timestamp"])
-        if "end_time" in df.columns:
-            df["end_time"] = pd.to_datetime(df["end_time"], errors="coerce")
-            df["end_time"] = df["end_time"].fillna(df["timestamp"] + pd.Timedelta(seconds=10))
-        else:
-            df["end_time"] = df["timestamp"] + pd.Timedelta(seconds=10)
-        df["time"] = df["timestamp"].dt.strftime("%H:%M:%S")
-
-    return df
+    return _normalize_timeline_frame(df, default_room=room)
 
 
 def get_activity_timeline_any_room(elder_id: str, date: datetime.date) -> pd.DataFrame:
@@ -205,16 +233,127 @@ def get_activity_timeline_any_room(elder_id: str, date: datetime.date) -> pd.Dat
             ORDER BY start_time ASC
         """
         df = query_df(segment_query, (elder_id, record_date))
-    if not df.empty:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        df = df.dropna(subset=["timestamp"])
-        if "end_time" in df.columns:
-            df["end_time"] = pd.to_datetime(df["end_time"], errors="coerce")
-            df["end_time"] = df["end_time"].fillna(df["timestamp"] + pd.Timedelta(seconds=10))
-        else:
-            df["end_time"] = df["timestamp"] + pd.Timedelta(seconds=10)
-        df["time"] = df["timestamp"].dt.strftime("%H:%M:%S")
+    return _normalize_timeline_frame(df)
+
+
+def get_training_timeline(elder_id: str, room: str, date: datetime.date) -> pd.DataFrame:
+    """
+    Load the room/day timeline that represents current labeled truth for review.
+    Uses adl_history because corrected/manual labels are persisted there.
+    """
+    if not elder_id or not room:
+        return pd.DataFrame()
+
+    record_date = date.isoformat()
+    query = """
+        SELECT timestamp, room, activity_type, confidence, duration_minutes, is_corrected
+        FROM adl_history
+        WHERE elder_id = ? AND """ + ROOM_MATCH_SQL + """
+          AND (record_date = ? OR DATE(timestamp) = ?)
+        ORDER BY timestamp ASC
+    """
+    df = query_df(query, (elder_id, room, record_date, record_date))
+    df = _normalize_timeline_frame(df, default_room=room)
+    if df.empty:
+        return df
+    df["source_label"] = df["is_corrected"].map(lambda v: "corrected" if bool(v) else "recorded")
     return df
+
+
+def get_prediction_timeline(elder_id: str, room: str, date: datetime.date) -> pd.DataFrame:
+    """
+    Load raw model predictions for the selected room/day from the predictions table.
+    """
+    if not elder_id or not room:
+        return pd.DataFrame()
+
+    record_date = date.isoformat()
+    query = """
+        SELECT
+            timestamp,
+            room,
+            activity AS activity_type,
+            confidence,
+            0 AS is_corrected
+        FROM predictions
+        WHERE resident_id = ? AND """ + ROOM_MATCH_SQL + """
+          AND DATE(timestamp) = ?
+        ORDER BY timestamp ASC
+    """
+    df = query_df(query, (elder_id, room, record_date))
+    df = _normalize_timeline_frame(df, default_room=room)
+    if df.empty:
+        return df
+    df["source_label"] = "prediction"
+    return df
+
+
+def build_compare_timeline_payload(
+    elder_id: str,
+    room: str,
+    date: datetime.date,
+    confidence_threshold: float = 0.60,
+) -> dict:
+    """
+    Build normalized training-vs-prediction timeline payloads for compare mode.
+    """
+    training_df = get_training_timeline(elder_id, room, date)
+    prediction_df = get_prediction_timeline(elder_id, room, date)
+    if prediction_df.empty:
+        return {
+            "training_timeline": training_df,
+            "prediction_timeline": prediction_df,
+        }
+
+    compare_df = prediction_df.copy()
+    compare_df["training_activity_type"] = None
+    compare_df["training_source_label"] = None
+    compare_df["is_unknown"] = compare_df["activity_type"].fillna("").astype(str).str.lower().isin(
+        {"unknown", "low_confidence"}
+    )
+    compare_df["is_low_confidence"] = (
+        pd.to_numeric(compare_df["confidence"], errors="coerce").fillna(0.0) < float(confidence_threshold)
+    )
+    compare_df["is_mismatch"] = False
+    compare_df["is_corrected"] = False
+    compare_df["review_reason"] = "clear"
+    compare_df["prediction_state_label"] = compare_df["activity_type"].fillna("").astype(str)
+
+    for idx, row in compare_df.iterrows():
+        overlaps = pd.DataFrame()
+        if not training_df.empty:
+            overlaps = training_df[
+                (training_df["timestamp"] < row["end_time"]) & (training_df["end_time"] > row["timestamp"])
+            ].copy()
+        if not overlaps.empty:
+            truth_row = overlaps.iloc[0]
+            truth_label = str(truth_row.get("activity_type") or "")
+            compare_df.at[idx, "training_activity_type"] = truth_label
+            compare_df.at[idx, "training_source_label"] = str(truth_row.get("source_label") or "recorded")
+            compare_df.at[idx, "is_corrected"] = bool(overlaps["is_corrected"].fillna(0).astype(bool).any())
+            compare_df.at[idx, "is_mismatch"] = bool(
+                truth_label and truth_label != str(row.get("activity_type") or "")
+            )
+        else:
+            compare_df.at[idx, "is_corrected"] = False
+
+        review_flags = []
+        if bool(compare_df.at[idx, "is_unknown"]):
+            review_flags.append("unknown")
+            compare_df.at[idx, "prediction_state_label"] = "unknown / review needed"
+        elif bool(compare_df.at[idx, "is_low_confidence"]):
+            review_flags.append("low_confidence")
+            compare_df.at[idx, "prediction_state_label"] = "low confidence / review needed"
+        if bool(compare_df.at[idx, "is_mismatch"]):
+            review_flags.append("mismatch")
+        if bool(compare_df.at[idx, "is_corrected"]):
+            review_flags.append("corrected_truth")
+        compare_df.at[idx, "review_reason"] = " / ".join(review_flags) if review_flags else "clear"
+
+    return {
+        "training_timeline": training_df,
+        "prediction_timeline": compare_df,
+    }
 
 
 def find_nearest_activity_date(elder_id: str, target_date: dt_date, room: str | None = None) -> dict | None:

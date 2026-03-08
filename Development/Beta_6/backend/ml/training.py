@@ -66,6 +66,7 @@ from ml.transformer_timeline_heads import (
     TimelineHeadConfig,
     create_timeline_heads,
 )
+from ml.beta6.sequence.hmm_decoder import DEFAULT_DECODER_POLICY
 
 logger = logging.getLogger(__name__)
 
@@ -2077,6 +2078,74 @@ class TrainingPipeline:
             else:
                 decoded.append(f"class_{idx}")
         return decoded
+
+    def _build_beta6_parity_payload(
+        self,
+        *,
+        room_name: str,
+        y_pred_probs: np.ndarray,
+        max_steps: int = 128,
+    ) -> Dict[str, Any]:
+        """
+        Build a compact occupancy-level fixed trace for the Beta 6 parity gate.
+
+        The parity contract currently operates on shared occupied/unoccupied
+        semantics, so room-specific labels are collapsed to occupancy tokens and
+        explicit uncertainty labels are routed through `uncertainty_state`.
+        """
+        probs = np.asarray(y_pred_probs, dtype=np.float32)
+        if probs.ndim != 2 or probs.shape[0] <= 0 or probs.shape[1] <= 0:
+            return {}
+
+        label_encoder = self.platform.label_encoders.get(room_name)
+        classes = getattr(label_encoder, "classes_", None) if label_encoder is not None else None
+        if classes is None or len(classes) <= 0:
+            return {}
+
+        predicted_ids = np.argmax(probs, axis=1).astype(np.int32)
+        if len(predicted_ids) == 0:
+            return {}
+
+        capped_steps = max(1, int(max_steps))
+        if len(predicted_ids) > capped_steps:
+            step_indices = np.linspace(0, len(predicted_ids) - 1, num=capped_steps, dtype=np.int64)
+        else:
+            step_indices = np.arange(len(predicted_ids), dtype=np.int64)
+
+        uncertainty_labels = {"low_confidence", "unknown", "outside_sensed_space"}
+        unoccupied_labels = {"unoccupied", "vacant", "room_unoccupied"}
+        trace_steps: List[Dict[str, Any]] = []
+        for idx in step_indices:
+            class_id = int(predicted_ids[int(idx)])
+            if class_id < 0 or class_id >= len(classes):
+                continue
+            label_name = str(classes[class_id]).strip().lower()
+            if not label_name:
+                continue
+
+            if label_name in uncertainty_labels:
+                trace_steps.append(
+                    {
+                        "label": "unoccupied",
+                        "uncertainty_state": label_name,
+                    }
+                )
+            elif label_name in unoccupied_labels:
+                trace_steps.append({"label": "unoccupied"})
+            else:
+                trace_steps.append({"label": "occupied"})
+
+        if not trace_steps:
+            return {}
+
+        policy_payload = {
+            "spike_suppression": bool(DEFAULT_DECODER_POLICY.spike_suppression),
+        }
+        return {
+            "beta6_parity_trace": trace_steps,
+            "beta6_runtime_policy": dict(policy_payload),
+            "beta6_eval_policy": dict(policy_payload),
+        }
 
     def _evaluate_event_first_shadow(
         self,
@@ -6545,6 +6614,12 @@ class TrainingPipeline:
                         )
                     y_pred_classes = np.argmax(y_pred_arr, axis=1)
                     shadow_eval_probs = np.asarray(y_pred_arr, dtype=np.float32)
+                    metrics.update(
+                        self._build_beta6_parity_payload(
+                            room_name=room_name,
+                            y_pred_probs=y_pred_arr,
+                        )
+                    )
 
                     class_ids = sorted(
                         set(np.unique(y_val_eval).astype(int)) | set(np.unique(y_pred_classes).astype(int))

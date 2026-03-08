@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch, ANY
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import tensorflow as tf
 
 # Add parent directory to path
@@ -49,6 +50,210 @@ class TestTrainingPipeline(unittest.TestCase):
         h2 = self.pipeline._policy_hash(policy)
         self.assertEqual(h1, h2)
         self.assertEqual(len(h1), 64)
+
+    def test_policy_hash_changes_when_two_stage_core_policy_changes(self):
+        p1 = load_policy_from_env({"ENABLE_TWO_STAGE_CORE_MODELING": "true"})
+        p2 = load_policy_from_env({"ENABLE_TWO_STAGE_CORE_MODELING": "false"})
+        self.assertNotEqual(self.pipeline._policy_hash(p1), self.pipeline._policy_hash(p2))
+
+    def test_select_final_two_stage_gate_source_falls_back_to_single_stage_on_no_regress(self):
+        self.mock_platform.label_encoders["Kitchen"] = MagicMock()
+        self.mock_platform.label_encoders["Kitchen"].classes_ = np.array(
+            ["kitchen_normal_use", "unoccupied"],
+            dtype=object,
+        )
+        y_true = np.asarray(([0] * 50) + ([1] * 50), dtype=np.int32)
+        single_probs = np.zeros((len(y_true), 2), dtype=np.float32)
+        single_probs[np.arange(len(y_true)), y_true] = 1.0
+
+        two_stage_pred = np.asarray(([0] * 70) + ([1] * 30), dtype=np.int32)
+        two_stage_probs = np.zeros((len(y_true), 2), dtype=np.float32)
+        two_stage_probs[np.arange(len(y_true)), two_stage_pred] = 1.0
+
+        release_cfg = {
+            "release_gates": {
+                "no_regress": {
+                    "max_drop_from_champion": 0.05,
+                    "exempt_rooms": [],
+                }
+            }
+        }
+        champion_meta = {"metrics": {"macro_f1": 0.95}}
+        with patch("ml.training.get_release_gates_config", return_value=release_cfg):
+            selection = self.pipeline._select_final_two_stage_gate_source(
+                room_name="Kitchen",
+                y_true=y_true,
+                single_stage_probs=single_probs,
+                two_stage_probs=two_stage_probs,
+                gate_mode="primary",
+                champion_meta=champion_meta,
+            )
+
+        self.assertEqual(selection["selected_source"], "single_stage_fallback_no_regress")
+        self.assertFalse(bool(selection["runtime_use_two_stage"]))
+        self.assertTrue(bool(selection["single_stage"]["no_regress_ok"]))
+        self.assertFalse(bool(selection["two_stage"]["no_regress_ok"]))
+
+    def test_select_final_two_stage_gate_source_keeps_two_stage_when_single_collapses(self):
+        self.mock_platform.label_encoders["LivingRoom"] = MagicMock()
+        self.mock_platform.label_encoders["LivingRoom"].classes_ = np.array(
+            ["livingroom_normal_use", "unoccupied"],
+            dtype=object,
+        )
+        y_true = np.asarray(([0] * 50) + ([1] * 50), dtype=np.int32)
+        single_probs = np.tile(np.asarray([[1.0, 0.0]], dtype=np.float32), (len(y_true), 1))
+        two_stage_probs = np.zeros((len(y_true), 2), dtype=np.float32)
+        two_stage_probs[np.arange(len(y_true)), y_true] = 1.0
+
+        selection = self.pipeline._select_final_two_stage_gate_source(
+            room_name="LivingRoom",
+            y_true=y_true,
+            single_stage_probs=single_probs,
+            two_stage_probs=two_stage_probs,
+            gate_mode="primary",
+            champion_meta=None,
+        )
+
+        self.assertEqual(selection["selected_source"], "two_stage_primary")
+        self.assertTrue(bool(selection["runtime_use_two_stage"]))
+        self.assertTrue(bool(selection["single_stage"]["collapsed"]))
+        self.assertFalse(bool(selection["two_stage"]["collapsed"]))
+
+    def test_select_final_two_stage_gate_source_marks_both_collapsed_as_fail_closed(self):
+        self.mock_platform.label_encoders["LivingRoom"] = MagicMock()
+        self.mock_platform.label_encoders["LivingRoom"].classes_ = np.array(
+            ["livingroom_normal_use", "unoccupied"],
+            dtype=object,
+        )
+        y_true = np.asarray(([0] * 50) + ([1] * 50), dtype=np.int32)
+        single_stage_probs = np.tile(np.asarray([[1.0, 0.0]], dtype=np.float32), (len(y_true), 1))
+        two_stage_probs = np.tile(np.asarray([[0.0, 1.0]], dtype=np.float32), (len(y_true), 1))
+
+        selection = self.pipeline._select_final_two_stage_gate_source(
+            room_name="LivingRoom",
+            y_true=y_true,
+            single_stage_probs=single_stage_probs,
+            two_stage_probs=two_stage_probs,
+            gate_mode="primary",
+            champion_meta=None,
+        )
+
+        self.assertFalse(bool(selection["runtime_use_two_stage"]))
+        self.assertTrue(bool(selection.get("fail_closed")))
+        self.assertFalse(bool(selection.get("selected_reliable", True)))
+        self.assertEqual(selection.get("fail_closed_reason"), "no_reliable_primary_candidate")
+        self.assertEqual(selection["selected_source"], "single_stage_fail_closed_unreliable")
+
+    def test_should_shuffle_post_split_batches_matches_room_policy(self):
+        self.assertTrue(self.pipeline._should_shuffle_post_split_batches("Entrance"))
+        self.assertTrue(self.pipeline._should_shuffle_post_split_batches("Bedroom"))
+
+    def test_build_beta6_parity_payload_maps_predictions_to_occupancy_trace(self):
+        self.mock_platform.label_encoders["Bedroom"] = MagicMock()
+        self.mock_platform.label_encoders["Bedroom"].classes_ = np.array(
+            ["bedroom_normal_use", "sleep", "unoccupied", "unknown"],
+            dtype=object,
+        )
+        y_pred_probs = np.asarray(
+            [
+                [0.05, 0.05, 0.80, 0.10],
+                [0.80, 0.10, 0.05, 0.05],
+                [0.05, 0.05, 0.10, 0.80],
+                [0.10, 0.75, 0.10, 0.05],
+            ],
+            dtype=np.float32,
+        )
+
+        payload = self.pipeline._build_beta6_parity_payload(
+            room_name="Bedroom",
+            y_pred_probs=y_pred_probs,
+        )
+
+        self.assertEqual(
+            payload["beta6_parity_trace"],
+            [
+                {"label": "unoccupied"},
+                {"label": "occupied"},
+                {"label": "unoccupied", "uncertainty_state": "unknown"},
+                {"label": "occupied"},
+            ],
+        )
+        self.assertEqual(payload["beta6_runtime_policy"], {"spike_suppression": True})
+        self.assertEqual(payload["beta6_eval_policy"], {"spike_suppression": True})
+
+    def test_build_beta6_parity_payload_caps_trace_length(self):
+        self.mock_platform.label_encoders["Kitchen"] = MagicMock()
+        self.mock_platform.label_encoders["Kitchen"].classes_ = np.array(
+            ["kitchen_normal_use", "unoccupied"],
+            dtype=object,
+        )
+        y_pred_probs = np.zeros((20, 2), dtype=np.float32)
+        predicted_ids = np.asarray(([1] * 10) + ([0] * 10), dtype=np.int32)
+        y_pred_probs[np.arange(len(predicted_ids)), predicted_ids] = 1.0
+
+        payload = self.pipeline._build_beta6_parity_payload(
+            room_name="Kitchen",
+            y_pred_probs=y_pred_probs,
+            max_steps=5,
+        )
+
+        self.assertEqual(len(payload["beta6_parity_trace"]), 5)
+
+    def test_resolve_reported_accuracy_prefers_post_fit_summary_when_available(self):
+        accuracy, source = self.pipeline._resolve_reported_accuracy(
+            fit_history_accuracy=0.94,
+            post_fit_train_summary={"available": True, "accuracy": 0.31},
+        )
+        self.assertEqual(source, "post_fit_train_predictions")
+        self.assertAlmostEqual(accuracy, 0.31, places=6)
+
+        accuracy, source = self.pipeline._resolve_reported_accuracy(
+            fit_history_accuracy=0.94,
+            post_fit_train_summary={"available": False, "accuracy": 0.31},
+        )
+        self.assertEqual(source, "fit_history")
+        self.assertAlmostEqual(accuracy, 0.94, places=6)
+
+    @patch.dict(os.environ, {"DEBUG_POST_FIT_AUDIT_ROOMS": "entrance,bedroom"}, clear=False)
+    def test_is_prediction_audit_enabled_matches_normalized_room_name(self):
+        self.assertTrue(self.pipeline._is_prediction_audit_enabled("Entrance"))
+        self.assertTrue(self.pipeline._is_prediction_audit_enabled("bedroom"))
+        self.assertFalse(self.pipeline._is_prediction_audit_enabled("Kitchen"))
+
+    def test_summarize_prediction_audit_reports_argmax_and_probability_means(self):
+        self.mock_platform.label_encoders["Entrance"] = MagicMock()
+        self.mock_platform.label_encoders["Entrance"].classes_ = ["out", "unoccupied"]
+        y_true = np.asarray([0, 0, 1, 1], dtype=np.int32)
+        y_pred_probs = np.asarray(
+            [
+                [0.80, 0.20],
+                [0.70, 0.30],
+                [0.60, 0.40],
+                [0.10, 0.90],
+            ],
+            dtype=np.float32,
+        )
+
+        summary = self.pipeline._summarize_prediction_audit(
+            room_name="Entrance",
+            y_true=y_true,
+            y_pred_probs=y_pred_probs,
+        )
+
+        self.assertTrue(bool(summary.get("available")))
+        self.assertAlmostEqual(float(summary.get("accuracy", 0.0)), 0.75, places=6)
+        self.assertEqual(summary.get("predicted_class_distribution"), {"out": 3, "unoccupied": 1})
+        means = summary.get("mean_probability_by_true_label") or {}
+        self.assertAlmostEqual(
+            float(means["out"]["mean_probability_by_label"]["out"]),
+            0.75,
+            places=6,
+        )
+        self.assertAlmostEqual(
+            float(means["unoccupied"]["mean_probability_by_label"]["out"]),
+            0.35,
+            places=6,
+        )
 
     def test_active_policy_uses_snapshot_when_present(self):
         p1 = load_policy_from_env({"MINORITY_TARGET_SHARE": "0.11"})
@@ -279,6 +484,41 @@ class TestTrainingPipeline(unittest.TestCase):
             float(result.get("min_predicted_occupied_rate", 0.0)) - 1e-6,
         )
 
+    def test_summarize_gate_aligned_validation_detects_collapse(self):
+        self.mock_platform.label_encoders["room1"].classes_ = np.array(["unoccupied", "sleep"], dtype=object)
+        y_true = np.asarray(([0] * 40) + ([1] * 40), dtype=np.int32)
+        y_pred_probs = np.tile(np.asarray([[0.99, 0.01]], dtype=np.float32), (len(y_true), 1))
+        with patch.object(self.pipeline, "_resolve_critical_labels", return_value=["sleep"]):
+            summary = self.pipeline._summarize_gate_aligned_validation(
+                room_name="room1",
+                y_true=y_true,
+                y_pred_probs=y_pred_probs,
+            )
+        self.assertTrue(bool(summary.get("collapsed")))
+        self.assertAlmostEqual(float(summary.get("dominant_class_share", 0.0)), 1.0, places=6)
+        self.assertEqual(str(summary.get("dominant_class_label")), "unoccupied")
+        self.assertLess(
+            float(summary.get("gate_aligned_score", 1.0)),
+            float(summary.get("macro_f1", 0.0)) + 1e-8,
+        )
+
+    @patch("ml.training.get_release_gates_config")
+    def test_resolve_checkpoint_no_regress_floor_uses_release_policy(self, mock_get_policy):
+        mock_get_policy.return_value = {
+            "release_gates": {
+                "no_regress": {
+                    "max_drop_from_champion": 0.05,
+                    "exempt_rooms": [],
+                }
+            }
+        }
+        ctx = self.pipeline._resolve_no_regress_macro_f1_floor(
+            room_name="Bedroom",
+            champion_meta={"metrics": {"macro_f1": 0.82}},
+        )
+        self.assertTrue(bool(ctx.get("enabled")))
+        self.assertAlmostEqual(float(ctx.get("target_macro_f1_floor", 0.0)), 0.77, places=6)
+        self.assertFalse(bool(ctx.get("exempt")))
     def test_write_decision_trace_persists_latest_and_versioned(self):
         with TemporaryDirectory() as tmp:
             models_dir = Path(tmp)
@@ -369,6 +609,133 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertFalse(metrics["promotion_deferred"])
         self.assertEqual(metrics["model_identity"]["family"], "per_resident_full_model")
         self.assertIsNone(metrics["model_identity"]["backbone_id"])
+
+    @patch('ml.training.TrainingPipeline.augment_training_data')
+    @patch('ml.training.build_transformer_model')
+    @patch('ml.training.get_room_config')
+    def test_train_room_enables_post_split_shuffle_for_entrance(self, mock_get_config, mock_build_model, mock_augment):
+        mock_config = MagicMock()
+        mock_config.get_sequence_window.return_value = 60
+        mock_config.get_data_interval.return_value = 10
+        mock_get_config.return_value = mock_config
+        mock_augment.return_value = (np.zeros((10, 5, 3)), np.zeros(10, dtype=np.int32))
+
+        self.mock_platform.label_encoders["Entrance"] = MagicMock()
+        self.mock_platform.label_encoders["Entrance"].classes_ = ["out", "unoccupied"]
+        self.mock_platform.scalers["Entrance"] = MagicMock()
+
+        mock_model = MagicMock()
+        mock_model.fit.return_value.history = {'accuracy': [0.95]}
+        mock_model.predict.return_value = np.tile(np.asarray([[0.9, 0.1]], dtype=np.float32), (10, 1))
+        mock_build_model.return_value = mock_model
+
+        processed_df = pd.DataFrame({
+            's1': np.random.randn(100),
+            's2': np.random.randn(100),
+            's3': np.random.randn(100),
+            'activity_encoded': np.zeros(100, dtype=np.int32),
+            'timestamp': pd.date_range(start='2023-01-01', periods=100, freq='10s')
+        })
+
+        metrics = self.pipeline.train_room(
+            room_name='Entrance',
+            processed_df=processed_df,
+            seq_length=5,
+            elder_id='elder1'
+        )
+
+        self.assertTrue(metrics["train_batch_shuffle_enabled"])
+        self.assertEqual(metrics["accuracy_source"], "post_fit_train_predictions")
+        self.assertAlmostEqual(metrics["accuracy"], 1.0, places=6)
+        self.assertIn("holdout_class_support", metrics)
+        self.assertIn("holdout_min_class_support", metrics)
+        self.assertEqual(mock_model.fit.call_args.kwargs["shuffle"], True)
+
+    @patch("ml.training.build_transformer_model")
+    def test_train_two_stage_core_models_enables_post_split_shuffle_for_bedroom(self, mock_build_model):
+        self.mock_platform.label_encoders["Bedroom"] = MagicMock()
+        self.mock_platform.label_encoders["Bedroom"].classes_ = [
+            "sleep",
+            "bedroom_normal_use",
+            "unoccupied",
+        ]
+
+        stage_a_model = MagicMock()
+        stage_b_model = MagicMock()
+        mock_build_model.side_effect = [stage_a_model, stage_b_model]
+
+        X_train = np.zeros((12, 5, 3), dtype=np.float32)
+        y_train = np.asarray([0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2], dtype=np.int32)
+        validation_data = (
+            np.zeros((6, 5, 3), dtype=np.float32),
+            np.asarray([0, 1, 2, 0, 1, 2], dtype=np.int32),
+        )
+
+        result = self.pipeline._train_two_stage_core_models(
+            room_name="Bedroom",
+            seq_length=5,
+            X_train=X_train,
+            y_train=y_train,
+            validation_data=validation_data,
+            max_epochs=2,
+        )
+
+        self.assertTrue(bool(result.get("enabled")))
+        self.assertEqual(stage_a_model.fit.call_args.kwargs["shuffle"], True)
+        self.assertEqual(stage_b_model.fit.call_args.kwargs["shuffle"], True)
+
+    @patch("ml.training.build_transformer_model")
+    def test_train_two_stage_core_models_uses_typed_policy_over_conflicting_env(self, mock_build_model):
+        self.mock_platform.label_encoders["Bathroom"] = MagicMock()
+        self.mock_platform.label_encoders["Bathroom"].classes_ = [
+            "bathroom_normal_use",
+            "shower",
+            "unoccupied",
+        ]
+        policy = load_policy_from_env(
+            {
+                "ENABLE_TWO_STAGE_CORE_MODELING": "true",
+                "TWO_STAGE_CORE_ROOMS": "bathroom",
+                "TWO_STAGE_CORE_GATE_MODE": "primary",
+                "TWO_STAGE_CORE_STAGE_A_OCCUPIED_THRESHOLD": "0.42",
+            }
+        )
+        pipeline = TrainingPipeline(self.mock_platform, self.mock_registry, policy=policy)
+
+        stage_a_model = MagicMock()
+        stage_b_model = MagicMock()
+        mock_build_model.side_effect = [stage_a_model, stage_b_model]
+
+        X_train = np.zeros((12, 5, 3), dtype=np.float32)
+        y_train = np.asarray([0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2], dtype=np.int32)
+        validation_data = (
+            np.zeros((6, 5, 3), dtype=np.float32),
+            np.asarray([0, 1, 2, 0, 1, 2], dtype=np.int32),
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "ENABLE_TWO_STAGE_CORE_MODELING": "false",
+                "TWO_STAGE_CORE_ROOMS": "",
+                "TWO_STAGE_CORE_GATE_MODE": "shadow",
+                "TWO_STAGE_CORE_STAGE_A_OCCUPIED_THRESHOLD": "0.91",
+            },
+            clear=False,
+        ):
+            result = pipeline._train_two_stage_core_models(
+                room_name="Bathroom",
+                seq_length=5,
+                X_train=X_train,
+                y_train=y_train,
+                validation_data=validation_data,
+                max_epochs=2,
+            )
+
+        self.assertTrue(bool(result.get("enabled")))
+        self.assertEqual(result.get("gate_mode"), "primary")
+        self.assertAlmostEqual(float(result.get("stage_a_occupied_threshold", 0.0)), 0.42, places=6)
+        self.assertEqual(result.get("stage_a_threshold_source"), "policy_default")
 
     @patch.object(TrainingPipeline, "_evaluate_lane_b_event_gates")
     @patch.object(TrainingPipeline, "_write_event_first_shadow_artifact")
@@ -1385,6 +1752,54 @@ class TestTrainingPipeline(unittest.TestCase):
         )
 
     @patch('ml.training.get_release_gates_config')
+    def test_evaluate_release_gate_blocks_fail_closed_two_stage_primary(self, mock_get_policy):
+        mock_get_policy.return_value = {
+            "release_gates": {
+                "rooms": {
+                    "livingroom": {
+                        "schedule": [
+                            {"min_days": 1, "max_days": None, "min_value": 0.5}
+                        ]
+                    }
+                },
+                "no_regress": {"max_drop_from_champion": 0.05, "exempt_rooms": []},
+            }
+        }
+        self.pipeline.policy.release_gate.evidence_profile = "production"
+        self.pipeline._policy_snapshot = self.pipeline.policy
+        gate_pass, reasons = self.pipeline._evaluate_release_gate(
+            room_name="LivingRoom",
+            candidate_metrics={
+                "macro_f1": 0.0,
+                "training_days": 3.0,
+                "samples": 300,
+                "metric_source": "holdout_validation_single_stage_fallback",
+                "validation_min_class_support": 5,
+                "per_label_recall": {"livingroom_normal_use": 0.0},
+                "per_label_support": {"livingroom_normal_use": 5},
+                "two_stage_core": {
+                    "enabled": True,
+                    "gate_mode": "primary",
+                    "gate_source": "single_stage_fail_closed_unreliable",
+                    "fail_closed": True,
+                    "selected_reliable": False,
+                    "validation_summary": {"collapsed": True},
+                },
+            },
+            champion_meta=None,
+        )
+
+        self.assertFalse(gate_pass)
+        self.assertTrue(
+            any(
+                r.startswith(
+                    "two_stage_primary_unreliable:livingroom:single_stage_fail_closed_unreliable"
+                )
+                for r in reasons
+            )
+        )
+
+    @patch('ml.training.get_release_gates_config')
     def test_evaluate_release_gate_pilot_profile_treats_missing_critical_label_as_non_evaluable(self, mock_get_policy):
         mock_get_policy.return_value = {
             "release_gates": {
@@ -1531,6 +1946,24 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertAlmostEqual(float(drift.get("max_abs_drift", 0.0)), 0.3, places=6)
         self.assertAlmostEqual(float(drift.get("sampled_max_abs_drift", 1.0)), 0.0, places=6)
 
+    def test_compute_class_prior_drift_prefers_full_holdout_support_over_validation_slice(self):
+        drift = self.pipeline._compute_class_prior_drift(
+            {
+                "train_class_support_pre_sampling": {"0": 169, "1": 296, "2": 534},
+                "validation_class_support": {"0": 114, "1": 436, "2": 448},
+                "holdout_class_support": {"0": 129, "1": 321, "2": 548},
+                "validation_min_class_support": 114,
+                "holdout_min_class_support": 129,
+                "required_minority_support": 5,
+                "insufficient_validation_evidence": False,
+            }
+        )
+        self.assertTrue(drift["available"])
+        self.assertTrue(drift["evaluable"])
+        self.assertEqual(drift.get("drift_source"), "pre_sampling_train_vs_holdout")
+        self.assertEqual(drift["max_drift_class"], "0")
+        self.assertAlmostEqual(float(drift.get("max_abs_drift", 0.0)), 0.04, places=3)
+
     @patch.dict(
         os.environ,
         {
@@ -1584,6 +2017,392 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertFalse(bool(stats.get("enabled", True)))
         self.assertEqual(stats.get("class_counts_before"), {0: 3, 1: 3})
         self.assertEqual(stats.get("class_counts_after"), {0: 3, 1: 3})
+
+    def test_apply_minority_sampling_caps_post_sampling_prior_drift(self):
+        x = np.zeros((100, 5, 3), dtype=np.float32)
+        y = np.asarray(([0] * 90) + ([1] * 10), dtype=np.int32)
+
+        with patch.object(
+            self.pipeline,
+            "_resolve_minority_sampling_config",
+            return_value={
+                "enabled": True,
+                "target_share": 0.30,
+                "max_multiplier": 4,
+                "prior_drift_guard_enabled": True,
+                "max_post_sampling_prior_drift": 0.03,
+            },
+        ):
+            _, y_out, stats = self.pipeline._apply_minority_class_sampling(
+                X_train=x,
+                y_train=y,
+                room_name="Entrance",
+            )
+
+        before_share = float(np.mean(y == 1))
+        after_share = float(np.mean(y_out == 1))
+        self.assertLessEqual(after_share - before_share, 0.03 + 1e-6)
+        self.assertTrue(bool(stats.get("prior_drift_guard_applied")))
+
+    def test_apply_minority_sampling_records_post_sampling_drift_summary(self):
+        x = np.zeros((100, 5, 3), dtype=np.float32)
+        y = np.asarray(([0] * 90) + ([1] * 10), dtype=np.int32)
+
+        with patch.object(
+            self.pipeline,
+            "_resolve_minority_sampling_config",
+            return_value={
+                "enabled": True,
+                "target_share": 0.30,
+                "max_multiplier": 4,
+                "prior_drift_guard_enabled": True,
+                "max_post_sampling_prior_drift": 0.03,
+            },
+        ):
+            _, _, stats = self.pipeline._apply_minority_class_sampling(
+                X_train=x,
+                y_train=y,
+                room_name="Entrance",
+            )
+
+        drift = stats.get("post_sampling_prior_drift") or {}
+        self.assertTrue(bool(drift.get("available")))
+        self.assertLessEqual(float(drift.get("max_abs_drift", 1.0)), 0.03 + 1e-6)
+
+    def test_apply_minority_sampling_uses_holdout_reference_for_prior_drift_cap(self):
+        x = np.zeros((100, 5, 3), dtype=np.float32)
+        y = np.asarray(([0] * 90) + ([1] * 10), dtype=np.int32)
+        holdout_reference = np.asarray(([0] * 80) + ([1] * 20), dtype=np.int32)
+
+        with patch.object(
+            self.pipeline,
+            "_resolve_minority_sampling_config",
+            return_value={
+                "enabled": True,
+                "target_share": 0.30,
+                "max_multiplier": 4,
+                "prior_drift_guard_enabled": True,
+                "max_post_sampling_prior_drift": 0.03,
+            },
+        ):
+            _, y_out, stats = self.pipeline._apply_minority_class_sampling(
+                X_train=x,
+                y_train=y,
+                room_name="Entrance",
+                reference_labels=holdout_reference,
+            )
+
+        after_share = float(np.mean(y_out == 1))
+        self.assertGreater(after_share, 0.13)
+        self.assertLessEqual(after_share, 0.23 + 1e-6)
+        self.assertEqual(stats.get("prior_drift_reference"), "holdout")
+
+    def test_downsample_easy_unoccupied_caps_post_downsample_prior_drift(self):
+        self.mock_platform.label_encoders["Entrance"] = MagicMock()
+        self.mock_platform.label_encoders["Entrance"].classes_ = ["out", "unoccupied"]
+        x = np.zeros((100, 5, 3), dtype=np.float32)
+        y = np.asarray(([0] * 10) + ([1] * 90), dtype=np.int32)
+        ts = np.arange("2025-12-01T00:00:00", "2025-12-01T00:16:40", dtype="datetime64[10s]")
+
+        _, y_out, _ = self.pipeline._downsample_easy_unoccupied(
+            X_seq=x,
+            y_seq=y,
+            seq_timestamps=ts,
+            room_name="Entrance",
+            resolved_cfg={
+                "min_share": 0.08,
+                "stride": 14,
+                "boundary_keep": 0,
+                "min_run_length": 24,
+                "prior_drift_guard_enabled": True,
+                "max_post_downsample_prior_drift": 0.03,
+            },
+        )
+
+        before_share = float(np.mean(y == 1))
+        after_share = float(np.mean(y_out == 1))
+        self.assertLessEqual(before_share - after_share, 0.03 + 1e-6)
+        debug = self.pipeline._last_unoccupied_downsample_debug
+        self.assertTrue(bool(debug.get("prior_drift_guard_applied")))
+        drift = debug.get("post_downsample_prior_drift") or {}
+        self.assertLessEqual(float(drift.get("max_abs_drift", 1.0)), 0.03 + 1e-6)
+
+    def test_downsample_easy_unoccupied_uses_holdout_reference_for_prior_drift_cap(self):
+        self.mock_platform.label_encoders["Entrance"] = MagicMock()
+        self.mock_platform.label_encoders["Entrance"].classes_ = ["out", "unoccupied"]
+        x = np.zeros((100, 5, 3), dtype=np.float32)
+        y = np.asarray(([0] * 10) + ([1] * 90), dtype=np.int32)
+        holdout_reference = np.asarray(([0] * 20) + ([1] * 80), dtype=np.int32)
+        ts = np.arange("2025-12-01T00:00:00", "2025-12-01T00:16:40", dtype="datetime64[10s]")
+
+        _, y_out, _ = self.pipeline._downsample_easy_unoccupied(
+            X_seq=x,
+            y_seq=y,
+            seq_timestamps=ts,
+            room_name="Entrance",
+            resolved_cfg={
+                "min_share": 0.08,
+                "stride": 14,
+                "boundary_keep": 0,
+                "min_run_length": 24,
+                "prior_drift_guard_enabled": True,
+                "max_post_downsample_prior_drift": 0.03,
+            },
+            reference_labels=holdout_reference,
+        )
+
+        after_share = float(np.mean(y_out == 0))
+        self.assertGreater(after_share, 0.13)
+        self.assertLessEqual(after_share, 0.23 + 1e-6)
+        debug = self.pipeline._last_unoccupied_downsample_debug
+        self.assertEqual(debug.get("prior_drift_reference"), "holdout")
+
+    def test_select_multi_seed_candidate_prefers_noncollapsed_no_regress_result(self):
+        candidates = [
+            {
+                "seed": 40,
+                "summary": {
+                    "collapsed": True,
+                    "gate_aligned_score": -0.8,
+                    "macro_f1": 0.08,
+                },
+                "no_regress_ok": False,
+            },
+            {
+                "seed": 45,
+                "summary": {
+                    "collapsed": False,
+                    "gate_aligned_score": 0.9,
+                    "macro_f1": 0.62,
+                },
+                "no_regress_ok": True,
+            },
+        ]
+
+        selected = self.pipeline._select_multi_seed_candidate(candidates)
+        self.assertEqual(selected["seed"], 45)
+
+    def test_select_multi_seed_candidate_prefers_gate_passing_candidate(self):
+        candidates = [
+            {
+                "seed": 11,
+                "summary": {
+                    "collapsed": False,
+                    "gate_pass": False,
+                    "gate_aligned_score": 0.45,
+                    "macro_f1": 0.95,
+                },
+                "no_regress_ok": True,
+            },
+            {
+                "seed": 13,
+                "summary": {
+                    "collapsed": False,
+                    "gate_pass": True,
+                    "gate_aligned_score": 0.40,
+                    "macro_f1": 0.40,
+                },
+                "no_regress_ok": True,
+            },
+        ]
+
+        selected = self.pipeline._select_multi_seed_candidate(candidates)
+        self.assertEqual(selected["seed"], 13)
+
+    def test_train_room_with_multi_seed_panel_reuses_selected_candidate_metrics(self):
+        self.pipeline._active_policy = MagicMock(
+            return_value=SimpleNamespace(
+                reproducibility=SimpleNamespace(
+                    multi_seed_candidate_seeds=[11, 13],
+                    random_seed=11,
+                )
+            )
+        )
+        first_candidate = MagicMock()
+        first_candidate.train_room.return_value = {
+            "macro_f1": 0.95,
+            "gate_pass": False,
+            "gate_reasons": ["room_threshold_failed:livingroom"],
+            "predicted_class_distribution": {
+                "livingroom_normal_use": 90,
+                "unoccupied": 10,
+            },
+            "saved_version": 101,
+        }
+        selected_candidate = MagicMock()
+        selected_candidate.train_room.return_value = {
+            "macro_f1": 0.40,
+            "gate_pass": True,
+            "gate_reasons": [],
+            "predicted_class_distribution": {
+                "livingroom_normal_use": 55,
+                "unoccupied": 45,
+            },
+            "saved_version": 102,
+        }
+        unexpected_retrain = MagicMock()
+        unexpected_retrain.train_room.return_value = {
+            "macro_f1": 0.99,
+            "gate_pass": True,
+            "gate_reasons": [],
+            "predicted_class_distribution": {
+                "livingroom_normal_use": 50,
+                "unoccupied": 50,
+            },
+            "saved_version": 999,
+        }
+
+        with patch.object(
+            self.pipeline,
+            "_spawn_candidate_pipeline",
+            side_effect=[first_candidate, selected_candidate, unexpected_retrain],
+        ) as spawn:
+            result = self.pipeline._train_room_with_multi_seed_panel(
+                room_name="LivingRoom",
+                processed_df=pd.DataFrame(),
+                seq_length=5,
+                elder_id="elder-1",
+            )
+
+        self.assertEqual(spawn.call_count, 2)
+        unexpected_retrain.train_room.assert_not_called()
+        self.assertEqual(result["saved_version"], 102)
+        self.assertEqual(result["seed_panel_debug"]["selected_seed"], 13)
+
+    def test_spawn_candidate_pipeline_respects_runtime_seed_override_with_explicit_policy(self):
+        policy = load_policy_from_env(
+            {
+                "TRAINING_RANDOM_SEED": "42",
+                "MULTI_SEED_ROOMS": "entrance",
+            }
+        )
+        pipeline = TrainingPipeline(self.mock_platform, self.mock_registry, policy=policy)
+
+        with patch.dict(
+            os.environ,
+            {
+                "TRAINING_RANDOM_SEED": "77",
+                "TRAINING_MULTI_SEED_ACTIVE": "1",
+            },
+            clear=False,
+        ):
+            spawned = pipeline._spawn_candidate_pipeline()
+
+        self.assertFalse(spawned._use_env_policy)
+        self.assertEqual(spawned._active_policy().reproducibility.random_seed, 77)
+
+    def test_multi_seed_enabled_for_livingroom_by_default(self):
+        policy = load_policy_from_env({})
+        pipeline = TrainingPipeline(self.mock_platform, self.mock_registry, policy=policy)
+
+        self.assertTrue(pipeline._multi_seed_enabled_for_room("LivingRoom"))
+
+    def test_resolve_training_strategy_marks_bedroom_factorized_primary(self):
+        self.pipeline.policy = load_policy_from_env(
+            {
+                "FACTORIZED_PRIMARY_ROOMS": "bedroom",
+            }
+        )
+
+        self.assertEqual(self.pipeline._resolve_training_strategy("Bedroom"), "factorized_primary")
+        self.assertTrue(self.pipeline._two_stage_core_enabled_for_room("Bedroom"))
+
+    def test_apply_transition_focus_sampling_boosts_bedroom_transition_windows(self):
+        self.mock_platform.label_encoders["Bedroom"] = MagicMock()
+        self.mock_platform.label_encoders["Bedroom"].classes_ = [
+            "sleep",
+            "bedroom_normal_use",
+            "unoccupied",
+        ]
+        self.pipeline.policy = load_policy_from_env(
+            {
+                "FACTORIZED_PRIMARY_ROOMS": "bedroom",
+                "TRANSITION_FOCUS_ROOM_LABELS": "bedroom:bedroom_normal_use",
+                "TRANSITION_FOCUS_RADIUS_STEPS_BY_ROOM": "bedroom:1",
+                "TRANSITION_FOCUS_MAX_MULTIPLIER_BY_ROOM": "bedroom:3",
+            }
+        )
+        y = np.asarray([2, 2, 2, 0, 1, 1, 0, 0, 2, 2], dtype=np.int32)
+        x = np.zeros((len(y), 5, 3), dtype=np.float32)
+
+        x_out, y_out, stats = self.pipeline._apply_transition_focus_sampling(
+            X_train=x,
+            y_train=y,
+            room_name="Bedroom",
+        )
+
+        self.assertTrue(bool(stats.get("enabled")))
+        self.assertEqual(stats.get("focus_label"), "bedroom_normal_use")
+        self.assertGreater(int(stats.get("transition_window_count", 0)), 0)
+        self.assertGreater(int(stats.get("added_samples", 0)), 0)
+        self.assertGreater(len(y_out), len(y))
+        self.assertEqual(x_out.shape[0], len(y_out))
+
+    def test_apply_transition_focus_sampling_caps_bedroom_post_sampling_prior_drift(self):
+        self.mock_platform.label_encoders["Bedroom"] = MagicMock()
+        self.mock_platform.label_encoders["Bedroom"].classes_ = [
+            "sleep",
+            "bedroom_normal_use",
+            "unoccupied",
+        ]
+        self.pipeline.policy = load_policy_from_env(
+            {
+                "FACTORIZED_PRIMARY_ROOMS": "bedroom",
+                "TRANSITION_FOCUS_ROOM_LABELS": "bedroom:bedroom_normal_use",
+                "TRANSITION_FOCUS_RADIUS_STEPS_BY_ROOM": "bedroom:1",
+                "TRANSITION_FOCUS_MAX_MULTIPLIER_BY_ROOM": "bedroom:4",
+                "TRANSITION_FOCUS_MAX_POST_SAMPLING_PRIOR_DRIFT_BY_ROOM": "bedroom:0.08",
+                "TRANSITION_FOCUS_PRIOR_DRIFT_GUARD_ROOMS": "bedroom",
+            }
+        )
+        self.pipeline._use_env_policy = False
+        y = np.asarray([2, 0, 1, 1, 1, 0, 2, 2], dtype=np.int32)
+        x = np.zeros((len(y), 5, 3), dtype=np.float32)
+        holdout_reference = np.asarray([0, 0, 1, 1, 1, 2, 2, 2], dtype=np.int32)
+
+        x_out, y_out, stats = self.pipeline._apply_transition_focus_sampling(
+            X_train=x,
+            y_train=y,
+            room_name="Bedroom",
+            reference_labels=holdout_reference,
+        )
+
+        self.assertTrue(bool(stats.get("enabled")))
+        self.assertTrue(bool(stats.get("prior_drift_guard_applied")))
+        self.assertEqual(stats.get("prior_drift_reference"), "holdout")
+        drift = stats.get("post_sampling_prior_drift") or {}
+        self.assertTrue(bool(drift.get("available")))
+        self.assertLessEqual(float(drift.get("max_abs_drift", 1.0)), 0.08 + 1e-6)
+        self.assertGreater(len(y_out), len(y))
+        self.assertEqual(x_out.shape[0], len(y_out))
+
+    def test_apply_transition_focus_sampling_skips_non_target_rooms(self):
+        self.mock_platform.label_encoders["Kitchen"] = MagicMock()
+        self.mock_platform.label_encoders["Kitchen"].classes_ = [
+            "kitchen_normal_use",
+            "unoccupied",
+        ]
+        self.pipeline.policy = load_policy_from_env(
+            {
+                "FACTORIZED_PRIMARY_ROOMS": "bedroom",
+                "TRANSITION_FOCUS_ROOM_LABELS": "bedroom:bedroom_normal_use",
+                "TRANSITION_FOCUS_RADIUS_STEPS_BY_ROOM": "bedroom:1",
+                "TRANSITION_FOCUS_MAX_MULTIPLIER_BY_ROOM": "bedroom:3",
+            }
+        )
+        y = np.asarray([0, 0, 1, 1], dtype=np.int32)
+        x = np.zeros((len(y), 5, 3), dtype=np.float32)
+
+        x_out, y_out, stats = self.pipeline._apply_transition_focus_sampling(
+            X_train=x,
+            y_train=y,
+            room_name="Kitchen",
+        )
+
+        self.assertFalse(bool(stats.get("enabled")))
+        self.assertEqual(stats.get("reason"), "room_not_configured")
+        np.testing.assert_array_equal(y_out, y)
+        self.assertEqual(x_out.shape, x.shape)
 
     @patch('ml.training.get_release_gates_config')
     @patch.dict(os.environ, {"RELEASE_GATE_MAX_CLASS_PRIOR_DRIFT": "0.10"}, clear=False)
@@ -1717,8 +2536,12 @@ class TestTrainingPipeline(unittest.TestCase):
         clear=False,
     )
     def test_evaluate_lane_b_event_gates_bootstrap_soft_fails_non_collapse(self):
-        self.pipeline.policy.release_gate.evidence_profile = "pilot_stage_a"
-        gate_pass, reasons, report = self.pipeline._evaluate_lane_b_event_gates(
+        pipeline = TrainingPipeline(
+            self.mock_platform,
+            self.mock_registry,
+            policy=load_policy_from_env({"RELEASE_GATE_EVIDENCE_PROFILE": "pilot_stage_a"}),
+        )
+        gate_pass, reasons, report = pipeline._evaluate_lane_b_event_gates(
             room_name="Bedroom",
             candidate_metrics={
                 "training_days": 6.0,
@@ -1740,8 +2563,12 @@ class TestTrainingPipeline(unittest.TestCase):
         clear=False,
     )
     def test_evaluate_lane_b_event_gates_bootstrap_still_blocks_collapse(self):
-        self.pipeline.policy.release_gate.evidence_profile = "pilot_stage_a"
-        gate_pass, reasons, report = self.pipeline._evaluate_lane_b_event_gates(
+        pipeline = TrainingPipeline(
+            self.mock_platform,
+            self.mock_registry,
+            policy=load_policy_from_env({"RELEASE_GATE_EVIDENCE_PROFILE": "pilot_stage_a"}),
+        )
+        gate_pass, reasons, report = pipeline._evaluate_lane_b_event_gates(
             room_name="Bedroom",
             candidate_metrics={
                 "training_days": 6.0,
@@ -1754,8 +2581,12 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertEqual(report.get("enforcement"), "hard_bootstrap_collapse_guard")
 
     def test_evaluate_lane_b_event_gates_short_window_pilot_uses_min_support_10(self):
-        self.pipeline.policy.release_gate.evidence_profile = "pilot_stage_b"
-        gate_pass, reasons, report = self.pipeline._evaluate_lane_b_event_gates(
+        pipeline = TrainingPipeline(
+            self.mock_platform,
+            self.mock_registry,
+            policy=load_policy_from_env({"RELEASE_GATE_EVIDENCE_PROFILE": "pilot_stage_b"}),
+        )
+        gate_pass, reasons, report = pipeline._evaluate_lane_b_event_gates(
             room_name="Bedroom",
             candidate_metrics={
                 "training_days": 6.0,

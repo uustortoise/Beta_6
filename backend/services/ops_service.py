@@ -205,6 +205,14 @@ def _empty_model_update_monitor(error: str | None = None) -> dict:
         "room_trends": [],
         "room_history_points": [],
         "release_gate_profile": {},
+        "metric_labels": {
+            "latest_candidate_macro_f1_mean": "WF Candidate F1",
+            "latest_candidate_accuracy_mean": "WF Candidate Accuracy",
+            "latest_candidate_stability_accuracy_mean": "Stability Score",
+            "latest_candidate_transition_macro_f1_mean": "Transition Score",
+            "latest_champion_macro_f1_mean": "Champion WF F1",
+            "latest_run_accuracy": "Raw Training Run Accuracy",
+        },
         "production_counters": {
             "preprocessing_fail": 0,
             "viability_fail": 0,
@@ -559,6 +567,14 @@ def get_model_update_monitor(elder_id: str, days: int = 30, limit: int = 60) -> 
         "latest_run": latest_run,
         "room_trends": room_trends,
         "room_history_points": room_history_points,
+        "metric_labels": {
+            "latest_candidate_macro_f1_mean": "WF Candidate F1",
+            "latest_candidate_accuracy_mean": "WF Candidate Accuracy",
+            "latest_candidate_stability_accuracy_mean": "Stability Score",
+            "latest_candidate_transition_macro_f1_mean": "Transition Score",
+            "latest_champion_macro_f1_mean": "Champion WF F1",
+            "latest_run_accuracy": "Raw Training Run Accuracy",
+        },
         "release_gate_profile": {
             "evidence_profile": str(os.getenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")).strip() or "production",
             "bootstrap_enabled": coerce_bool(os.getenv("RELEASE_GATE_BOOTSTRAP_ENABLED", False)),
@@ -639,7 +655,7 @@ def get_sample_collection_status(elder_id: str) -> dict:
         return {}
         
     try:
-        target_days = 21
+        target_days = _env_int("UI_SAMPLE_COLLECTION_TARGET_DAYS", 14)
         config_rooms = [room for room in get_room_config().get_all_rooms().keys() if str(room).lower() != "default"]
         normalized_to_display = {
             normalize_room_name(room): room
@@ -696,6 +712,8 @@ def get_sample_collection_status(elder_id: str) -> dict:
         return {
             "counts": room_counts,
             "target": target_days,
+            "count_label": "Days Recorded",
+            "target_label": "Labeled Day Target",
             "ready_rooms": [room for room, count in room_counts.items() if count >= target_days],
         }
     except Exception as e:

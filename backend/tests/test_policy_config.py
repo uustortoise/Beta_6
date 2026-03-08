@@ -5,6 +5,9 @@ def test_load_policy_defaults_match_legacy_knobs():
     policy = load_policy_from_env({})
     assert policy.unoccupied_downsample.min_share == 0.45
     assert policy.unoccupied_downsample.stride == 10
+    livingroom_downsample = policy.unoccupied_downsample.resolve("LivingRoom")
+    assert livingroom_downsample["min_share"] == 0.30
+    assert livingroom_downsample["stride"] == 4
     assert policy.minority_sampling.enabled is True
     assert policy.minority_sampling.target_share == 0.14
     assert policy.calibration.threshold_floor == 0.35
@@ -23,7 +26,22 @@ def test_load_policy_defaults_match_legacy_knobs():
     assert bathroom_viability["min_training_windows"] == 2000
     assert policy.reproducibility.random_seed == 42
     assert policy.reproducibility.skip_if_same_data_and_policy is True
+    assert policy.reproducibility.multi_seed_rooms == ["entrance", "livingroom"]
+    assert policy.reproducibility.multi_seed_candidate_seeds == [40, 41, 42, 43, 44, 45]
     assert policy.promotion_eligibility.min_training_days_with_champion == 7.0
+    assert policy.training_profile.post_split_shuffle_rooms == ["entrance", "bedroom"]
+    assert policy.training_profile.transition_focus_prior_drift_guard_rooms == ["bedroom"]
+    assert policy.training_profile.transition_focus_max_post_sampling_prior_drift_by_room["bedroom"] == 0.10
+    assert policy.two_stage_core.enabled is True
+    assert policy.two_stage_core.rooms == ["bedroom", "livingroom", "kitchen", "bathroom"]
+    assert policy.two_stage_core.gate_mode == "primary"
+    assert policy.two_stage_core.stage_a_occupied_threshold == 0.50
+    assert policy.two_stage_core.stage_a_target_precision == 0.70
+    assert policy.two_stage_core.stage_a_recall_floor == 0.20
+    assert policy.two_stage_core.stage_a_threshold_min == 0.00
+    assert policy.two_stage_core.stage_a_threshold_max == 0.95
+    assert policy.two_stage_core.stage_a_min_predicted_occupied_ratio == 0.50
+    assert policy.two_stage_core.stage_a_min_predicted_occupied_abs == 0.05
 
 
 def test_load_policy_env_overrides_unoccupied_and_minority():
@@ -50,6 +68,13 @@ def test_load_policy_env_overrides_unoccupied_and_minority():
     assert minority_room["max_multiplier"] == 4
 
 
+def test_load_policy_defaults_include_livingroom_downsample_override():
+    policy = load_policy_from_env({})
+    livingroom_cfg = policy.unoccupied_downsample.resolve("LivingRoom")
+    assert livingroom_cfg["min_share"] == 0.30
+    assert livingroom_cfg["stride"] == 4
+
+
 def test_empty_room_override_env_disables_default_room_map():
     env = {
         "MINORITY_TARGET_SHARE_BY_ROOM": "",
@@ -60,6 +85,64 @@ def test_empty_room_override_env_disables_default_room_map():
     bathroom_cfg = policy.minority_sampling.resolve("Bathroom")
     assert bathroom_cfg["target_share"] == policy.minority_sampling.target_share
     assert bathroom_cfg["max_multiplier"] == policy.minority_sampling.max_multiplier
+
+
+def test_load_policy_supports_room_fix_controls():
+    env = {
+        "UNOCCUPIED_MAX_POST_DOWNSAMPLE_PRIOR_DRIFT_BY_ROOM": "entrance:0.03",
+        "UNOCCUPIED_PRIOR_DRIFT_GUARD_ROOMS": "entrance",
+        "MINORITY_MAX_POST_SAMPLING_PRIOR_DRIFT_BY_ROOM": "entrance:0.03",
+        "MINORITY_PRIOR_DRIFT_GUARD_ROOMS": "entrance",
+        "MULTI_SEED_ROOMS": "entrance",
+        "MULTI_SEED_CANDIDATE_SEEDS": "40,41,42,43,44,45",
+        "FACTORIZED_PRIMARY_ROOMS": "bedroom",
+        "POST_SPLIT_SHUFFLE_ROOMS": "entrance,kitchen",
+        "TRANSITION_FOCUS_ROOM_LABELS": "bedroom:bedroom_normal_use",
+        "TRANSITION_FOCUS_RADIUS_STEPS_BY_ROOM": "bedroom:12",
+        "TRANSITION_FOCUS_MAX_MULTIPLIER_BY_ROOM": "bedroom:3",
+        "TRANSITION_FOCUS_MAX_POST_SAMPLING_PRIOR_DRIFT_BY_ROOM": "bedroom:0.08",
+        "TRANSITION_FOCUS_PRIOR_DRIFT_GUARD_ROOMS": "bedroom",
+        "ENABLE_TWO_STAGE_CORE_MODELING": "false",
+        "TWO_STAGE_CORE_ROOMS": "bathroom",
+        "TWO_STAGE_CORE_GATE_MODE": "shadow",
+        "TWO_STAGE_CORE_STAGE_A_OCCUPIED_THRESHOLD": "0.42",
+        "TWO_STAGE_CORE_STAGE_A_TARGET_PRECISION": "0.76",
+        "TWO_STAGE_CORE_STAGE_A_RECALL_FLOOR": "0.33",
+        "TWO_STAGE_CORE_STAGE_A_THRESHOLD_MIN": "0.10",
+        "TWO_STAGE_CORE_STAGE_A_THRESHOLD_MAX": "0.88",
+        "TWO_STAGE_CORE_STAGE_A_MIN_PRED_OCCUPIED_RATIO": "0.61",
+        "TWO_STAGE_CORE_STAGE_A_MIN_PRED_OCCUPIED_ABS": "0.14",
+    }
+    policy = load_policy_from_env(env)
+
+    entrance_downsample_cfg = policy.unoccupied_downsample.resolve("Entrance")
+    assert entrance_downsample_cfg["prior_drift_guard_enabled"] is True
+    assert entrance_downsample_cfg["max_post_downsample_prior_drift"] == 0.03
+
+    entrance_cfg = policy.minority_sampling.resolve("Entrance")
+    assert entrance_cfg["prior_drift_guard_enabled"] is True
+    assert entrance_cfg["max_post_sampling_prior_drift"] == 0.03
+
+    assert policy.reproducibility.multi_seed_rooms == ["entrance"]
+    assert policy.reproducibility.multi_seed_candidate_seeds == [40, 41, 42, 43, 44, 45]
+
+    assert policy.training_profile.factorized_primary_rooms == ["bedroom"]
+    assert policy.training_profile.post_split_shuffle_rooms == ["entrance", "kitchen"]
+    assert policy.training_profile.transition_focus_room_labels["bedroom"] == "bedroom_normal_use"
+    assert policy.training_profile.transition_focus_radius_steps_by_room["bedroom"] == 12
+    assert policy.training_profile.transition_focus_max_multiplier_by_room["bedroom"] == 3
+    assert policy.training_profile.transition_focus_max_post_sampling_prior_drift_by_room["bedroom"] == 0.08
+    assert policy.training_profile.transition_focus_prior_drift_guard_rooms == ["bedroom"]
+    assert policy.two_stage_core.enabled is False
+    assert policy.two_stage_core.rooms == ["bathroom"]
+    assert policy.two_stage_core.gate_mode == "shadow"
+    assert policy.two_stage_core.stage_a_occupied_threshold == 0.42
+    assert policy.two_stage_core.stage_a_target_precision == 0.76
+    assert policy.two_stage_core.stage_a_recall_floor == 0.33
+    assert policy.two_stage_core.stage_a_threshold_min == 0.10
+    assert policy.two_stage_core.stage_a_threshold_max == 0.88
+    assert policy.two_stage_core.stage_a_min_predicted_occupied_ratio == 0.61
+    assert policy.two_stage_core.stage_a_min_predicted_occupied_abs == 0.14
 
 
 def test_label_map_env_parsing_for_calibration_and_clinical_priority():
@@ -95,6 +178,18 @@ def test_room_label_clinical_priority_overrides_global_multiplier():
     # Fall back to global label multiplier when room-specific entry does not exist.
     assert policy.clinical_priority.get_room_label_multiplier("Kitchen", "sleep") == 1.2
     assert policy.clinical_priority.get_room_label_multiplier("Kitchen", "unoccupied") == 0.9
+
+
+def test_production_defaults_neutralize_livingroom_room_label_clinical_priority():
+    policy = load_policy_from_env({})
+
+    assert policy.release_gate.evidence_profile == "production"
+    assert (
+        policy.clinical_priority.get_room_label_multiplier("LivingRoom", "livingroom_normal_use") == 1.0
+    )
+    assert policy.clinical_priority.get_room_label_multiplier("LivingRoom", "unoccupied") == 1.0
+    assert policy.clinical_priority.get_room_label_multiplier("Kitchen", "kitchen_normal_use") == 1.2
+    assert policy.clinical_priority.get_room_label_multiplier("Kitchen", "unoccupied") == 0.75
 
 
 def test_resampling_policy_parses_env_tokens():

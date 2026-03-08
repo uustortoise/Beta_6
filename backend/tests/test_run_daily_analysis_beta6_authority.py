@@ -319,7 +319,7 @@ def test_shadow_compare_error_blocks_ladder_progression(monkeypatch):
     assert report["phase6_rollout_ladder"]["gate_summary"]["drift_alerts_within_budget"] is False
 
 
-def test_beta6_authority_live_run_fails_closed_when_signing_key_missing(monkeypatch, tmp_path: Path):
+def test_beta6_authority_live_run_uses_fallback_signing_key_when_env_missing(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("run_daily_analysis._is_beta6_authority_enabled", lambda: True)
     monkeypatch.delenv("BETA6_GATE_SIGNING_KEY", raising=False)
     monkeypatch.setattr(
@@ -336,13 +336,19 @@ def test_beta6_authority_live_run_fails_closed_when_signing_key_missing(monkeypa
         registry_v2=registry,
     )
 
-    assert gate_pass is False
-    assert report["pass"] is False
-    assert report["reason_code"] == "fail_gate_policy"
-    assert report["phase4_dynamic_gate"]["status"] == "error"
-    assert "BETA6_GATE_SIGNING_KEY" in str(report["phase4_dynamic_gate"]["error"])
-    assert report["phase4_dynamic_gate"]["evaluation_report_path"] is None
+    assert gate_pass is True
+    assert report["pass"] is True
+    assert report["phase4_dynamic_gate"]["status"] == "ok"
+    eval_path = report["phase4_dynamic_gate"]["evaluation_report_path"]
+    assert isinstance(eval_path, str) and eval_path
+    assert Path(eval_path).exists()
+    assert report["phase4_dynamic_gate"]["evaluation_report_signature"].startswith("sha256:")
     assert report["phase4_dynamic_gate"]["rejection_artifact_path"] is None
+    assert report["phase6_shadow_compare"]["status"] == "ok"
+    shadow_path = report["phase6_shadow_compare"]["summary"]["report_path"]
+    assert isinstance(shadow_path, str) and shadow_path
+    assert Path(shadow_path).exists()
+    assert report["phase6_shadow_compare"]["summary"]["signature"].startswith("sha256:")
 
 
 def test_beta6_authority_live_run_persists_phase4_artifacts(monkeypatch, tmp_path: Path):
@@ -374,6 +380,61 @@ def test_beta6_authority_live_run_persists_phase4_artifacts(monkeypatch, tmp_pat
     assert isinstance(shadow_path, str) and shadow_path
     assert Path(shadow_path).exists()
     assert report["phase6_shadow_compare"]["summary"]["signature"].startswith("sha256:")
+
+
+def test_phase62_auto_rollback_tolerates_missing_room_fallback_target(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr("run_daily_analysis._is_beta6_authority_enabled", lambda: True)
+    monkeypatch.setenv("BETA6_GATE_SIGNING_KEY", "test-live-key")
+    monkeypatch.setattr(
+        "run_daily_analysis._beta6_gate_artifact_output_dir",
+        lambda elder_id, run_id, registry_v2: tmp_path / "artifacts",  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        run_daily_analysis.PilotOverrideManager,
+        "activate_baseline_fallback",
+        lambda self, *, reason: (True, {"reason": reason, "profile": "production"}),
+    )
+
+    class _RollbackAssessment:
+        should_rollback = True
+        reason_codes = ("pipeline_reliability_breach",)
+
+        def to_dict(self):
+            return {
+                "should_rollback": True,
+                "reason_codes": ["pipeline_reliability_breach"],
+                "details": {"source": "test"},
+            }
+
+    class _TestRolloutManager(run_daily_analysis.T80RolloutManager):
+        def __init__(self):
+            super().__init__(state_dir=tmp_path / "rollout_state")
+
+        def evaluate_auto_rollback(self, nightly_metrics):  # noqa: ANN001, ARG002
+            return _RollbackAssessment()
+
+    monkeypatch.setattr(run_daily_analysis, "T80RolloutManager", _TestRolloutManager)
+
+    registry = run_daily_analysis.RegistryV2(root=tmp_path / "registry_v2")
+
+    gate_pass, report = run_daily_analysis._apply_beta6_gate_authority(
+        metrics=[{"room": "LivingRoom", "gate_pass": True, "gate_reasons": []}],
+        elder_id="HK001",
+        run_id="run-2",
+        registry_v2=registry,
+    )
+
+    assert gate_pass is False
+    assert report["pass"] is False
+    assert report["reason_code"] == "rollback_triggered"
+    assert report["phase6_auto_rollback"]["status"] == "rollback_applied"
+    assert report["phase6_auto_rollback"]["rooms"] == ["livingroom"]
+    assert len(report["phase6_auto_rollback"]["registry_action"]) == 1
+    assert report["phase6_auto_rollback"]["registry_action"][0]["room"] == "livingroom"
+    assert "No fallback target available" in report["phase6_auto_rollback"]["registry_action"][0]["error"]
+    assert report["phase6_auto_rollback"]["registry_action"][0]["fallback_state"] is None
+    assert report["details"].get("phase6_step6_2_failed") is not True
+    assert report["phase6_auto_rollback"]["baseline_fallback"]["success"] is True
 
 
 def test_beta6_authority_stage4_error_does_not_report_nonexistent_paths(monkeypatch, tmp_path: Path):

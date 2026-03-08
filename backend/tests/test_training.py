@@ -458,6 +458,41 @@ class TestTrainingPipeline(unittest.TestCase):
             float(result.get("min_predicted_occupied_rate", 0.0)) - 1e-6,
         )
 
+    def test_summarize_gate_aligned_validation_detects_collapse(self):
+        self.mock_platform.label_encoders["room1"].classes_ = np.array(["unoccupied", "sleep"], dtype=object)
+        y_true = np.asarray(([0] * 40) + ([1] * 40), dtype=np.int32)
+        y_pred_probs = np.tile(np.asarray([[0.99, 0.01]], dtype=np.float32), (len(y_true), 1))
+        with patch.object(self.pipeline, "_resolve_critical_labels", return_value=["sleep"]):
+            summary = self.pipeline._summarize_gate_aligned_validation(
+                room_name="room1",
+                y_true=y_true,
+                y_pred_probs=y_pred_probs,
+            )
+        self.assertTrue(bool(summary.get("collapsed")))
+        self.assertAlmostEqual(float(summary.get("dominant_class_share", 0.0)), 1.0, places=6)
+        self.assertEqual(str(summary.get("dominant_class_label")), "unoccupied")
+        self.assertLess(
+            float(summary.get("gate_aligned_score", 1.0)),
+            float(summary.get("macro_f1", 0.0)) + 1e-8,
+        )
+
+    @patch("ml.training.get_release_gates_config")
+    def test_resolve_checkpoint_no_regress_floor_uses_release_policy(self, mock_get_policy):
+        mock_get_policy.return_value = {
+            "release_gates": {
+                "no_regress": {
+                    "max_drop_from_champion": 0.05,
+                    "exempt_rooms": [],
+                }
+            }
+        }
+        ctx = self.pipeline._resolve_no_regress_macro_f1_floor(
+            room_name="Bedroom",
+            champion_meta={"metrics": {"macro_f1": 0.82}},
+        )
+        self.assertTrue(bool(ctx.get("enabled")))
+        self.assertAlmostEqual(float(ctx.get("target_macro_f1_floor", 0.0)), 0.77, places=6)
+        self.assertFalse(bool(ctx.get("exempt")))
     def test_write_decision_trace_persists_latest_and_versioned(self):
         with TemporaryDirectory() as tmp:
             models_dir = Path(tmp)

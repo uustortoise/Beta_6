@@ -51,7 +51,7 @@ from ml.reproducibility_report import ReproducibilityTracker, compute_data_finge
 from ml.transformer_head_ab import derive_dual_head_probabilities
 from ml.event_decoder import EventDecoder, DecoderConfig
 from ml.event_kpi import EventKPICalculator, EventKPIConfig
-from ml.event_gates import EventGateChecker, EventGateThresholds
+from ml.event_gates import CriticalityTier, EventGateChecker, EventGateThresholds
 from ml.label_taxonomy import (
     get_critical_labels_for_room,
     get_label_alias_equivalents,
@@ -75,6 +75,146 @@ logger = logging.getLogger(__name__)
 def _utc_now_iso_z() -> str:
     """Return timezone-aware UTC timestamp with Z suffix."""
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+class _GateAlignedCheckpointCallback(tf.keras.callbacks.Callback):
+    """
+    Restore the checkpoint with the strongest gate-aligned validation score.
+    """
+
+    def __init__(
+        self,
+        *,
+        pipeline: "TrainingPipeline",
+        room_name: str,
+        X_val: np.ndarray,
+        y_val: np.ndarray,
+        timeline_multitask_enabled: bool,
+        no_regress_macro_f1_floor: Optional[float] = None,
+    ) -> None:
+        super().__init__()
+        self.pipeline = pipeline
+        self.room_name = room_name
+        self.X_val = np.asarray(X_val, dtype=np.float32)
+        self.y_val = np.asarray(y_val, dtype=np.int32)
+        self.timeline_multitask_enabled = bool(timeline_multitask_enabled)
+        self.no_regress_macro_f1_floor = (
+            float(no_regress_macro_f1_floor)
+            if no_regress_macro_f1_floor is not None and np.isfinite(float(no_regress_macro_f1_floor))
+            else None
+        )
+        self.best_score = float("-inf")
+        self.best_epoch = -1
+        self.best_weights = None
+        self.best_summary: Dict[str, Any] = {}
+        self.best_floor_score = float("-inf")
+        self.best_floor_epoch = -1
+        self.best_floor_weights = None
+        self.best_floor_summary: Dict[str, Any] = {}
+        self.best_macro_f1 = float("-inf")
+        self.best_macro_epoch = -1
+        self.best_macro_weights = None
+        self.best_macro_summary: Dict[str, Any] = {}
+        self.selection_mode = "overall_best"
+        self.last_summary: Dict[str, Any] = {}
+        self.last_error: Optional[str] = None
+
+    def on_epoch_end(self, epoch, logs=None):
+        if self.X_val.size == 0 or self.y_val.size == 0:
+            return
+        try:
+            raw_pred = self.model.predict(self.X_val, verbose=0)
+            y_pred_probs = self.pipeline._extract_activity_probabilities(
+                raw_pred,
+                timeline_multitask_enabled=self.timeline_multitask_enabled,
+            )
+            summary = self.pipeline._summarize_gate_aligned_validation(
+                room_name=self.room_name,
+                y_true=self.y_val,
+                y_pred_probs=y_pred_probs,
+            )
+            score = float(summary.get("gate_aligned_score", float("-inf")))
+            macro_f1 = summary.get("macro_f1")
+            passes_floor = True
+            if self.no_regress_macro_f1_floor is not None:
+                if macro_f1 is None:
+                    passes_floor = False
+                else:
+                    passes_floor = float(macro_f1) >= (float(self.no_regress_macro_f1_floor) - 1e-8)
+            self.last_summary = {
+                "epoch": int(epoch),
+                "score": score,
+                "passes_no_regress_floor": bool(passes_floor),
+                "no_regress_macro_f1_floor": self.no_regress_macro_f1_floor,
+                **summary,
+            }
+            if score > (self.best_score + 1e-8):
+                self.best_score = score
+                self.best_epoch = int(epoch)
+                self.best_weights = self.model.get_weights()
+                self.best_summary = dict(self.last_summary)
+            if passes_floor and score > (self.best_floor_score + 1e-8):
+                self.best_floor_score = score
+                self.best_floor_epoch = int(epoch)
+                self.best_floor_weights = self.model.get_weights()
+                self.best_floor_summary = dict(self.last_summary)
+            if macro_f1 is not None:
+                macro_f1_value = float(macro_f1)
+                better_macro = macro_f1_value > (self.best_macro_f1 + 1e-8)
+                tie_macro_better_score = (
+                    abs(macro_f1_value - self.best_macro_f1) <= 1e-8
+                    and score > float(self.best_macro_summary.get("score", float("-inf")))
+                )
+                if better_macro or tie_macro_better_score:
+                    self.best_macro_f1 = macro_f1_value
+                    self.best_macro_epoch = int(epoch)
+                    self.best_macro_weights = self.model.get_weights()
+                    self.best_macro_summary = dict(self.last_summary)
+        except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
+
+    def on_train_end(self, logs=None):
+        if self.best_floor_weights is not None:
+            self.model.set_weights(self.best_floor_weights)
+            self.best_score = float(self.best_floor_score)
+            self.best_epoch = int(self.best_floor_epoch)
+            self.best_weights = self.best_floor_weights
+            self.best_summary = dict(self.best_floor_summary)
+            self.selection_mode = "no_regress_floor"
+        elif (
+            self.no_regress_macro_f1_floor is not None
+            and self.best_macro_weights is not None
+            and self.pipeline._resolve_gate_aligned_no_regress_fallback_mode() == "macro_f1"
+        ):
+            self.model.set_weights(self.best_macro_weights)
+            self.best_score = float(self.best_macro_summary.get("score", float("-inf")))
+            self.best_epoch = int(self.best_macro_epoch)
+            self.best_weights = self.best_macro_weights
+            self.best_summary = dict(self.best_macro_summary)
+            self.selection_mode = "no_regress_macro_f1_fallback"
+        elif self.best_weights is not None:
+            self.model.set_weights(self.best_weights)
+            self.selection_mode = "overall_best"
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload = {
+            "enabled": True,
+            "best_epoch": int(self.best_epoch),
+            "best_score": float(self.best_score) if np.isfinite(self.best_score) else None,
+            "best_summary": dict(self.best_summary),
+            "last_summary": dict(self.last_summary),
+            "selection_mode": str(self.selection_mode),
+            "no_regress_macro_f1_floor": self.no_regress_macro_f1_floor,
+            "best_floor_epoch": int(self.best_floor_epoch) if self.best_floor_epoch >= 0 else None,
+            "best_floor_score": float(self.best_floor_score) if np.isfinite(self.best_floor_score) else None,
+            "best_floor_summary": dict(self.best_floor_summary),
+            "best_macro_epoch": int(self.best_macro_epoch) if self.best_macro_epoch >= 0 else None,
+            "best_macro_f1": float(self.best_macro_f1) if np.isfinite(self.best_macro_f1) else None,
+            "best_macro_summary": dict(self.best_macro_summary),
+        }
+        if self.last_error:
+            payload["error"] = self.last_error
+        return payload
 
 class TrainingPipeline:
     """
@@ -140,6 +280,224 @@ class TrainingPipeline:
         """Stable hash for an effective training policy."""
         payload = json.dumps(policy.to_dict(), sort_keys=True, separators=(",", ":"), default=str)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _env_bool(name: str, default: bool) -> bool:
+        raw = os.getenv(name)
+        if raw is None:
+            return bool(default)
+        return str(raw).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+    @staticmethod
+    def _env_float(
+        name: str,
+        default: float,
+        min_value: Optional[float] = None,
+        max_value: Optional[float] = None,
+    ) -> float:
+        raw = os.getenv(name)
+        try:
+            value = float(raw) if raw is not None else float(default)
+        except (TypeError, ValueError):
+            value = float(default)
+        if min_value is not None:
+            value = max(float(min_value), value)
+        if max_value is not None:
+            value = min(float(max_value), value)
+        return float(value)
+
+    def _resolve_gate_aligned_checkpoint_enabled(self) -> bool:
+        return self._env_bool("ENABLE_GATE_ALIGNED_CHECKPOINT", True)
+
+    def _resolve_gate_aligned_critical_support_floor(self) -> int:
+        raw = os.getenv("GATE_ALIGNED_CRITICAL_SUPPORT_FLOOR")
+        try:
+            value = int(raw) if raw is not None else 10
+        except (TypeError, ValueError):
+            value = 10
+        return max(1, int(value))
+
+    def _resolve_gate_aligned_critical_recall_floor(self) -> float:
+        return self._env_float(
+            "GATE_ALIGNED_CRITICAL_RECALL_FLOOR",
+            0.20,
+            min_value=0.0,
+            max_value=1.0,
+        )
+
+    def _resolve_gate_aligned_collapse_ratio(self) -> float:
+        return self._env_float(
+            "GATE_ALIGNED_COLLAPSE_RATIO",
+            0.95,
+            min_value=0.50,
+            max_value=1.0,
+        )
+
+    def _resolve_gate_aligned_critical_weight(self) -> float:
+        return self._env_float(
+            "GATE_ALIGNED_CRITICAL_WEIGHT",
+            0.35,
+            min_value=0.0,
+            max_value=2.0,
+        )
+
+    def _resolve_gate_aligned_collapse_penalty(self) -> float:
+        return self._env_float(
+            "GATE_ALIGNED_COLLAPSE_PENALTY",
+            0.45,
+            min_value=0.0,
+            max_value=2.0,
+        )
+
+    def _resolve_gate_aligned_floor_penalty(self) -> float:
+        return self._env_float(
+            "GATE_ALIGNED_CRITICAL_FLOOR_PENALTY",
+            0.25,
+            min_value=0.0,
+            max_value=2.0,
+        )
+
+    def _resolve_gate_aligned_lane_b_weight(self) -> float:
+        return self._env_float(
+            "GATE_ALIGNED_LANE_B_WEIGHT",
+            0.50,
+            min_value=0.0,
+            max_value=3.0,
+        )
+
+    def _resolve_gate_aligned_lane_b_floor_penalty(self) -> float:
+        return self._env_float(
+            "GATE_ALIGNED_LANE_B_FLOOR_PENALTY",
+            0.35,
+            min_value=0.0,
+            max_value=3.0,
+        )
+
+    @staticmethod
+    def _resolve_gate_aligned_no_regress_fallback_mode() -> str:
+        raw = str(os.getenv("GATE_ALIGNED_NO_REGRESS_FALLBACK_MODE", "macro_f1")).strip().lower()
+        if raw in {"score", "macro_f1"}:
+            return raw
+        return "macro_f1"
+
+    def _resolve_gate_aligned_precision_floor_penalty(self) -> float:
+        return self._env_float(
+            "GATE_ALIGNED_PRECISION_FLOOR_PENALTY",
+            0.35,
+            min_value=0.0,
+            max_value=3.0,
+        )
+
+    def _resolve_gate_aligned_precision_floors(self, room_name: str) -> Dict[str, float]:
+        room_key = normalize_room_name(room_name)
+        floors: Dict[str, float] = {"out": 0.20} if room_key == "entrance" else {}
+        raw = str(os.getenv("GATE_ALIGNED_PRECISION_FLOOR_BY_ROOM_LABEL", "")).strip()
+        if not raw:
+            return floors
+        for token in raw.split(","):
+            part = str(token).strip()
+            if not part or ":" not in part or "." not in part:
+                continue
+            key, value = part.split(":", 1)
+            room_label = str(key).strip().lower()
+            if "." not in room_label:
+                continue
+            room_name_part, label_part = room_label.split(".", 1)
+            if normalize_room_name(room_name_part) != room_key:
+                continue
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                continue
+            floors[str(label_part).strip().lower()] = float(np.clip(parsed, 0.0, 1.0))
+        return floors
+
+    def _resolve_no_regress_macro_f1_floor(
+        self,
+        *,
+        room_name: str,
+        champion_meta: Optional[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        context: Dict[str, Any] = {
+            "enabled": False,
+            "target_macro_f1_floor": None,
+            "max_drop_from_champion": None,
+            "champion_macro_f1": None,
+            "exempt": False,
+        }
+        if not isinstance(champion_meta, Mapping):
+            return context
+
+        champion_metrics = champion_meta.get("metrics")
+        if not isinstance(champion_metrics, Mapping):
+            return context
+
+        champion_f1_raw = champion_metrics.get("macro_f1")
+        if champion_f1_raw is None:
+            return context
+
+        try:
+            champion_f1 = float(champion_f1_raw)
+        except (TypeError, ValueError):
+            return context
+
+        if not np.isfinite(champion_f1):
+            return context
+
+        try:
+            policy = get_release_gates_config()
+            no_regress_cfg = (policy.get("release_gates", {}) or {}).get("no_regress", {}) or {}
+            exempt_rooms = {
+                normalize_room_name(room)
+                for room in (no_regress_cfg.get("exempt_rooms", []) or [])
+            }
+            room_key = normalize_room_name(room_name)
+            if room_key in exempt_rooms:
+                context.update(
+                    {
+                        "enabled": False,
+                        "champion_macro_f1": champion_f1,
+                        "exempt": True,
+                    }
+                )
+                return context
+
+            gate_policy = self._active_policy().release_gate
+            max_drop = float(
+                no_regress_cfg.get(
+                    "max_drop_from_champion",
+                    gate_policy.max_drop_from_champion_default,
+                )
+            )
+            context.update(
+                {
+                    "enabled": True,
+                    "target_macro_f1_floor": float(champion_f1 - max_drop),
+                    "max_drop_from_champion": float(max_drop),
+                    "champion_macro_f1": float(champion_f1),
+                    "exempt": False,
+                }
+            )
+        except Exception as e:
+            context["error"] = f"{type(e).__name__}: {e}"
+        return context
+
+    @staticmethod
+    def _extract_activity_probabilities(raw_pred: Any, *, timeline_multitask_enabled: bool) -> np.ndarray:
+        if isinstance(raw_pred, dict):
+            raw_pred = raw_pred.get("activity_logits")
+        if raw_pred is None:
+            raise ValueError("missing_activity_logits")
+        y_pred = np.asarray(raw_pred, dtype=np.float32)
+        if y_pred.ndim == 0:
+            y_pred = np.zeros((0, 1), dtype=np.float32)
+        elif y_pred.ndim == 1:
+            y_pred = np.reshape(y_pred, (-1, 1))
+        elif y_pred.ndim > 2:
+            y_pred = np.reshape(y_pred, (y_pred.shape[0], -1))
+        if bool(timeline_multitask_enabled):
+            y_pred = tf.nn.softmax(y_pred, axis=1).numpy()
+        return np.asarray(y_pred, dtype=np.float32)
 
     def _get_label_name(self, room_name: str, class_id: int) -> str | None:
         """Resolve encoded class ID to label name for a given room."""
@@ -2567,6 +2925,292 @@ class TrainingPipeline:
         recall_raw = per_label_recall.get(selected)
         recall = float(recall_raw) if recall_raw is not None else None
         return selected, support, recall
+
+    def _summarize_gate_aligned_validation(
+        self,
+        *,
+        room_name: str,
+        y_true: np.ndarray,
+        y_pred_probs: np.ndarray,
+    ) -> Dict[str, Any]:
+        y_true_arr = np.asarray(y_true, dtype=np.int32)
+        y_pred_arr = np.asarray(y_pred_probs, dtype=np.float32)
+        if y_pred_arr.ndim != 2:
+            raise ValueError(f"unexpected_prediction_shape:{getattr(y_pred_arr, 'shape', None)}")
+        if int(y_pred_arr.shape[0]) != int(len(y_true_arr)):
+            raise ValueError(
+                f"prediction_length_mismatch:{int(y_pred_arr.shape[0])}!={int(len(y_true_arr))}"
+            )
+
+        y_pred_classes = np.argmax(y_pred_arr, axis=1).astype(np.int32)
+        report = classification_report(y_true_arr, y_pred_classes, output_dict=True, zero_division=0)
+        macro_f1 = float(report.get("macro avg", {}).get("f1-score", 0.0) or 0.0)
+
+        label_encoder = self.platform.label_encoders.get(room_name)
+        classes = getattr(label_encoder, "classes_", None) if label_encoder is not None else None
+        per_label_precision: Dict[str, float] = {}
+        per_label_recall: Dict[str, float] = {}
+        per_label_support: Dict[str, int] = {}
+        if classes is not None:
+            for class_id in range(len(classes)):
+                class_key = str(int(class_id))
+                label_name = str(classes[int(class_id)]).strip().lower()
+                class_metrics = report.get(class_key, {})
+                per_label_precision[label_name] = float(class_metrics.get("precision", 0.0) or 0.0)
+                per_label_recall[label_name] = float(class_metrics.get("recall", 0.0) or 0.0)
+                per_label_support[label_name] = int(class_metrics.get("support", 0) or 0)
+
+        equivalents = self._resolve_room_label_equivalents(room_name)
+        critical_labels = list(self._resolve_critical_labels(room_name))
+        critical_support_floor = self._resolve_gate_aligned_critical_support_floor()
+        critical_recall_floor = self._resolve_gate_aligned_critical_recall_floor()
+
+        critical_stats: Dict[str, Dict[str, Any]] = {}
+        critical_recalls: List[float] = []
+        critical_floor_failures: List[str] = []
+        for label in critical_labels:
+            selected_label, support, recall = self._select_best_label_variant(
+                label,
+                per_label_support=per_label_support,
+                per_label_recall=per_label_recall,
+                equivalents=equivalents,
+            )
+            recall_value = float(recall) if recall is not None else 0.0
+            eligible = int(support) >= int(critical_support_floor)
+            critical_stats[str(label)] = {
+                "selected_label": str(selected_label),
+                "support": int(support),
+                "recall": float(recall_value),
+                "eligible_for_floor": bool(eligible),
+            }
+            if eligible:
+                critical_recalls.append(float(recall_value))
+                if float(recall_value) < float(critical_recall_floor):
+                    critical_floor_failures.append(str(selected_label))
+
+        critical_recall_mean = float(np.mean(critical_recalls)) if critical_recalls else 0.0
+        critical_recall_min = float(np.min(critical_recalls)) if critical_recalls else 0.0
+
+        lane_b_event_map = get_lane_b_event_labels_for_room(normalize_room_name(room_name))
+        lane_b_thresholds = EventGateThresholds()
+        lane_b_floor_failures: List[str] = []
+        lane_b_stats: Dict[str, Dict[str, Any]] = {}
+        lane_b_recalls: List[float] = []
+        for event_name, labels in lane_b_event_map.items():
+            total_support = 0
+            weighted_recall = 0.0
+            for label in labels:
+                key = str(label).strip().lower()
+                support = int(per_label_support.get(key, 0) or 0)
+                recall = float(per_label_recall.get(key, 0.0) or 0.0)
+                total_support += support
+                weighted_recall += recall * float(support)
+            event_recall = float(weighted_recall / float(total_support)) if total_support > 0 else 0.0
+            tier = EventGateChecker.EVENT_TIERS.get(str(event_name), CriticalityTier.TIER_3)
+            if tier == CriticalityTier.TIER_1:
+                required_recall = float(lane_b_thresholds.tier_1_recall_min)
+            elif tier == CriticalityTier.TIER_2:
+                required_recall = float(lane_b_thresholds.tier_2_recall_min)
+            else:
+                required_recall = float(lane_b_thresholds.tier_3_recall_min)
+            eligible = int(total_support) >= int(lane_b_thresholds.min_support_for_tier_gates)
+            lane_b_stats[str(event_name)] = {
+                "labels": [str(item).strip().lower() for item in labels],
+                "support": int(total_support),
+                "recall": float(event_recall),
+                "required_recall": float(required_recall),
+                "tier": int(tier.value),
+                "eligible_for_floor": bool(eligible),
+            }
+            if eligible:
+                lane_b_recalls.append(float(event_recall))
+                if float(event_recall) < float(required_recall):
+                    lane_b_floor_failures.append(str(event_name))
+        lane_b_recall_mean = float(np.mean(lane_b_recalls)) if lane_b_recalls else 0.0
+
+        precision_floor_by_label = self._resolve_gate_aligned_precision_floors(room_name)
+        precision_floor_failures: List[str] = []
+        precision_floor_stats: Dict[str, Dict[str, Any]] = {}
+        for label, floor in precision_floor_by_label.items():
+            selected_label, support, precision = self._select_best_label_variant(
+                label,
+                per_label_support=per_label_support,
+                per_label_recall=per_label_precision,
+                equivalents=equivalents,
+            )
+            precision_value = float(precision) if precision is not None else 0.0
+            eligible = int(support) >= int(critical_support_floor)
+            precision_floor_stats[str(label)] = {
+                "selected_label": str(selected_label),
+                "support": int(support),
+                "precision": float(precision_value),
+                "required_precision": float(floor),
+                "eligible_for_floor": bool(eligible),
+            }
+            if eligible and float(precision_value) < float(floor):
+                precision_floor_failures.append(str(selected_label))
+
+        dominant_class_id = -1
+        dominant_class_count = 0
+        dominant_class_share = 0.0
+        predicted_distribution: Dict[str, int] = {}
+        if len(y_pred_classes) > 0:
+            pred_ids, pred_counts = np.unique(y_pred_classes, return_counts=True)
+            idx = int(np.argmax(pred_counts))
+            dominant_class_id = int(pred_ids[idx])
+            dominant_class_count = int(pred_counts[idx])
+            dominant_class_share = float(dominant_class_count) / float(len(y_pred_classes))
+            for class_id, count in zip(pred_ids, pred_counts):
+                label_name = self._get_label_name(room_name, int(class_id))
+                key = str(label_name).strip().lower() if label_name else f"class_{int(class_id)}"
+                predicted_distribution[key] = int(count)
+
+        collapse_ratio = self._resolve_gate_aligned_collapse_ratio()
+        collapsed = bool(dominant_class_share >= float(collapse_ratio))
+        critical_floor_failed = bool(len(critical_floor_failures) > 0)
+        lane_b_floor_failed = bool(len(lane_b_floor_failures) > 0)
+        precision_floor_failed = bool(len(precision_floor_failures) > 0)
+
+        score = float(macro_f1)
+        score += float(self._resolve_gate_aligned_critical_weight()) * float(critical_recall_mean)
+        score += float(self._resolve_gate_aligned_lane_b_weight()) * float(lane_b_recall_mean)
+        if collapsed:
+            score -= float(self._resolve_gate_aligned_collapse_penalty())
+        if critical_floor_failed:
+            score -= float(self._resolve_gate_aligned_floor_penalty())
+        if lane_b_floor_failed:
+            score -= float(self._resolve_gate_aligned_lane_b_floor_penalty())
+        if precision_floor_failed:
+            score -= float(self._resolve_gate_aligned_precision_floor_penalty())
+
+        dominant_label = self._get_label_name(room_name, dominant_class_id)
+        return {
+            "macro_f1": float(macro_f1),
+            "critical_labels": critical_labels,
+            "critical_support_floor": int(critical_support_floor),
+            "critical_recall_floor": float(critical_recall_floor),
+            "critical_recall_mean": float(critical_recall_mean),
+            "critical_recall_min": float(critical_recall_min),
+            "critical_floor_failures": critical_floor_failures,
+            "critical_stats": critical_stats,
+            "per_label_recall": per_label_recall,
+            "per_label_support": per_label_support,
+            "per_label_precision": per_label_precision,
+            "precision_floor_by_label": precision_floor_by_label,
+            "precision_floor_failures": precision_floor_failures,
+            "precision_floor_stats": precision_floor_stats,
+            "dominant_class_id": int(dominant_class_id),
+            "dominant_class_label": (
+                str(dominant_label).strip().lower()
+                if dominant_label is not None else f"class_{int(dominant_class_id)}"
+            ),
+            "dominant_class_count": int(dominant_class_count),
+            "dominant_class_share": float(dominant_class_share),
+            "collapse_ratio": float(collapse_ratio),
+            "collapsed": bool(collapsed),
+            "predicted_class_distribution": predicted_distribution,
+            "lane_b_event_stats": lane_b_stats,
+            "lane_b_recall_mean": float(lane_b_recall_mean),
+            "lane_b_floor_failures": lane_b_floor_failures,
+            "gate_aligned_score": float(score),
+        }
+
+    def _select_final_two_stage_gate_source(
+        self,
+        *,
+        room_name: str,
+        y_true: np.ndarray,
+        single_stage_probs: np.ndarray,
+        two_stage_probs: Optional[np.ndarray],
+        gate_mode: str,
+        champion_meta: Optional[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        gate_mode_norm = str(gate_mode or "shadow").strip().lower()
+        y_true_arr = np.asarray(y_true, dtype=np.int32)
+        single_probs = np.asarray(single_stage_probs, dtype=np.float32)
+
+        no_regress = self._resolve_no_regress_macro_f1_floor(
+            room_name=room_name,
+            champion_meta=champion_meta,
+        )
+
+        def _build_payload(source_name: str, probs: np.ndarray) -> Dict[str, Any]:
+            summary = self._summarize_gate_aligned_validation(
+                room_name=room_name,
+                y_true=y_true_arr,
+                y_pred_probs=np.asarray(probs, dtype=np.float32),
+            )
+            macro_f1 = summary.get("macro_f1")
+            macro_f1_value = float(macro_f1) if macro_f1 is not None else None
+            no_regress_ok = True
+            floor = no_regress.get("target_macro_f1_floor")
+            if bool(no_regress.get("enabled")) and floor is not None:
+                no_regress_ok = bool(
+                    macro_f1_value is not None and macro_f1_value + 1e-9 >= float(floor)
+                )
+            return {
+                "source": str(source_name),
+                "summary": dict(summary),
+                "collapsed": bool(summary.get("collapsed", False)),
+                "macro_f1": macro_f1_value,
+                "gate_aligned_score": float(summary.get("gate_aligned_score", float("-inf"))),
+                "no_regress_ok": bool(no_regress_ok),
+            }
+
+        single_payload = _build_payload("single_stage", single_probs)
+        two_payload: Optional[Dict[str, Any]] = None
+        if two_stage_probs is not None:
+            two_payload = _build_payload("two_stage", np.asarray(two_stage_probs, dtype=np.float32))
+
+        selection: Dict[str, Any] = {
+            "gate_mode": gate_mode_norm,
+            "no_regress": dict(no_regress),
+            "single_stage": single_payload,
+            "two_stage": two_payload,
+            "selected_source": "single_stage_only",
+            "runtime_use_two_stage": False,
+            "selected_summary": dict(single_payload.get("summary") or {}),
+        }
+        if two_payload is None:
+            return selection
+        if gate_mode_norm != "primary":
+            selection["selected_source"] = "single_stage_shadow"
+            return selection
+
+        def _rank(payload: Mapping[str, Any]) -> Tuple[int, int, float, float, int]:
+            return (
+                0 if bool(payload.get("collapsed", False)) else 1,
+                1 if bool(payload.get("no_regress_ok", True)) else 0,
+                float(payload.get("gate_aligned_score", float("-inf"))),
+                float(payload.get("macro_f1", float("-inf"))),
+                1 if str(payload.get("source")) == "two_stage" else 0,
+            )
+
+        selected = max((single_payload, two_payload), key=_rank)
+        if str(selected.get("source")) == "two_stage":
+            selection["selected_source"] = "two_stage_primary"
+            selection["runtime_use_two_stage"] = True
+            selection["selected_summary"] = dict(two_payload.get("summary") or {})
+            return selection
+
+        if bool(two_payload.get("collapsed", False)) and not bool(single_payload.get("collapsed", False)):
+            source = "single_stage_fallback_collapse"
+        elif (
+            bool(no_regress.get("enabled"))
+            and bool(single_payload.get("no_regress_ok"))
+            and not bool(two_payload.get("no_regress_ok"))
+        ):
+            source = "single_stage_fallback_no_regress"
+        elif float(single_payload.get("gate_aligned_score", float("-inf"))) > (
+            float(two_payload.get("gate_aligned_score", float("-inf"))) + 1e-8
+        ):
+            source = "single_stage_fallback_score"
+        else:
+            source = "single_stage_fallback_macro_f1"
+
+        selection["selected_source"] = source
+        selection["selected_summary"] = dict(single_payload.get("summary") or {})
+        return selection
 
     def _resolve_critical_class_support(
         self,
@@ -5202,6 +5846,17 @@ class TrainingPipeline:
             timeline_validation_debug: Dict[str, Any] = {}
             timeline_targets_train: Dict[str, np.ndarray] = {}
             timeline_targets_val: Dict[str, np.ndarray] = {}
+            checkpoint_selector: Optional[_GateAlignedCheckpointCallback] = None
+            checkpoint_no_regress = self._resolve_no_regress_macro_f1_floor(
+                room_name=room_name,
+                champion_meta=champion_meta,
+            )
+            checkpoint_no_regress_floor = (
+                float(checkpoint_no_regress.get("target_macro_f1_floor"))
+                if bool(checkpoint_no_regress.get("enabled", False))
+                and checkpoint_no_regress.get("target_macro_f1_floor") is not None
+                else None
+            )
             if timeline_multitask_enabled:
                 timeline_targets_train, timeline_target_debug = self._build_timeline_targets(
                     room_name=room_name,
@@ -5226,6 +5881,17 @@ class TrainingPipeline:
                             f"proceeding without validation targets. Details={timeline_validation_debug}"
                         )
                         timeline_targets_val = {}
+
+            if validation_data is not None and self._resolve_gate_aligned_checkpoint_enabled():
+                checkpoint_selector = _GateAlignedCheckpointCallback(
+                    pipeline=self,
+                    room_name=room_name,
+                    X_val=np.asarray(validation_data[0], dtype=np.float32),
+                    y_val=np.asarray(validation_data[1], dtype=np.int32),
+                    timeline_multitask_enabled=bool(timeline_multitask_enabled),
+                    no_regress_macro_f1_floor=checkpoint_no_regress_floor,
+                )
+                callbacks.append(checkpoint_selector)
 
             if timeline_multitask_enabled:
                 activity_labels_train = np.asarray(timeline_targets_train["activity_labels"], dtype=np.int32)
@@ -5475,6 +6141,12 @@ class TrainingPipeline:
                     'validation_targets': timeline_validation_debug,
                     'activity_weighting': activity_weighting_diagnostics,
                 },
+                'checkpoint_selection': (
+                    checkpoint_selector.to_dict()
+                    if checkpoint_selector is not None
+                    else {"enabled": False}
+                ),
+                'checkpoint_no_regress': dict(checkpoint_no_regress),
                 'two_stage_core': {
                     'enabled': bool(two_stage_result.get('enabled', False)),
                     'reason': str(two_stage_result.get('reason', 'disabled')),
@@ -5536,13 +6208,10 @@ class TrainingPipeline:
                 metrics["validation_class_support"] = val_support_map
                 metrics["validation_min_class_support"] = min(val_support_map.values()) if val_support_map else 0
                 y_pred_single = model.predict(validation_data[0], verbose=0)
-                if isinstance(y_pred_single, dict):
-                    y_pred_single = y_pred_single.get("activity_logits")
-                if y_pred_single is None:
-                    raise ModelTrainError(f"Missing activity logits for validation predictions ({room_name})")
-                if bool(timeline_multitask_enabled):
-                    y_pred_single = tf.nn.softmax(np.asarray(y_pred_single), axis=1).numpy()
-                y_pred = np.asarray(y_pred_single, dtype=np.float32)
+                y_pred = self._extract_activity_probabilities(
+                    y_pred_single,
+                    timeline_multitask_enabled=bool(timeline_multitask_enabled),
+                )
 
                 if bool(two_stage_result.get("enabled", False)):
                     gate_mode = str(
@@ -5583,6 +6252,9 @@ class TrainingPipeline:
                             selection.get("selected_summary") or two_stage_payload
                         )
                         metrics["two_stage_core"]["validation_summary_raw_two_stage"] = dict(two_stage_payload)
+                        metrics["two_stage_core"]["gate_source"] = str(
+                            selection.get("selected_source") or "single_stage_shadow"
+                        )
                         metrics["two_stage_core"]["runtime_use_two_stage"] = bool(
                             selection.get("runtime_use_two_stage", False)
                         )

@@ -66,6 +66,13 @@ def test_load_policy_env_overrides_unoccupied_and_minority():
     assert minority_room["max_multiplier"] == 4
 
 
+def test_load_policy_defaults_include_livingroom_downsample_override():
+    policy = load_policy_from_env({})
+    livingroom_cfg = policy.unoccupied_downsample.resolve("LivingRoom")
+    assert livingroom_cfg["min_share"] == 0.30
+    assert livingroom_cfg["stride"] == 4
+
+
 def test_empty_room_override_env_disables_default_room_map():
     env = {
         "MINORITY_TARGET_SHARE_BY_ROOM": "",

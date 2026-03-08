@@ -21,6 +21,7 @@ Options:
 Notes:
 - This script is opt-in and does not change default start.sh behavior.
 - It runs preflight checks, then hands off to ./start.sh.
+- When running from a feature or integration worktree, pass --skip-pull to avoid switching back to main.
 EOF
 }
 

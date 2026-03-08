@@ -1608,9 +1608,10 @@ class TrainingPipeline:
             summary = candidate.get("summary") or {}
             return summary if isinstance(summary, Mapping) else {}
 
-        def _score(candidate: Mapping[str, Any]) -> Tuple[int, int, float, float, int]:
+        def _score(candidate: Mapping[str, Any]) -> Tuple[int, int, int, float, float, int]:
             summary = _summary(candidate)
             collapsed = bool(summary.get("collapsed", False))
+            gate_pass = bool(summary.get("gate_pass", False))
             no_regress_ok = bool(candidate.get("no_regress_ok", False))
             try:
                 gate_aligned_score = float(summary.get("gate_aligned_score", float("-inf")))
@@ -1626,6 +1627,7 @@ class TrainingPipeline:
                 seed_value = 0
             return (
                 1 if not collapsed else 0,
+                1 if gate_pass else 0,
                 1 if no_regress_ok else 0,
                 gate_aligned_score,
                 macro_f1,
@@ -1767,6 +1769,17 @@ class TrainingPipeline:
                     "seed": int(seed),
                     "summary": summary,
                     "no_regress_ok": bool(no_regress_ok),
+                    "metrics": copy.deepcopy(candidate_metrics or {}),
+                    "artifacts": {
+                        "model": self.platform.room_models.get(room_name),
+                        "scaler": self.platform.scalers.get(room_name),
+                        "label_encoder": self.platform.label_encoders.get(room_name),
+                        "class_thresholds": copy.deepcopy(
+                            (self.platform.class_thresholds.get(room_name) or {})
+                            if hasattr(self.platform, "class_thresholds")
+                            else {}
+                        ),
+                    },
                 }
             )
 
@@ -1785,25 +1798,40 @@ class TrainingPipeline:
                 for candidate in candidates
             ],
         }
+        final_metrics = copy.deepcopy(selected.get("metrics") or {})
+        selected_artifacts = selected.get("artifacts") or {}
+        if selected_artifacts.get("model") is not None:
+            self.platform.room_models[room_name] = selected_artifacts.get("model")
+        if selected_artifacts.get("scaler") is not None:
+            self.platform.scalers[room_name] = selected_artifacts.get("scaler")
+        if selected_artifacts.get("label_encoder") is not None:
+            self.platform.label_encoders[room_name] = selected_artifacts.get("label_encoder")
+        if hasattr(self.platform, "class_thresholds"):
+            self.platform.class_thresholds[room_name] = copy.deepcopy(
+                selected_artifacts.get("class_thresholds") or {}
+            )
 
-        with self._temporary_env_overrides(
-            {
-                "TRAINING_RANDOM_SEED": str(int(seed_panel_debug["selected_seed"])),
-                "TRAINING_MULTI_SEED_ACTIVE": "1",
-            }
+        selected_saved_version = final_metrics.get("saved_version")
+        selected_gate_pass = bool(final_metrics.get("gate_pass", False))
+        if (
+            selected_saved_version is not None
+            and selected_gate_pass
+            and not bool(defer_promotion)
         ):
-            selected_pipeline = self._spawn_candidate_pipeline()
-            selected_pipeline._seed_panel_debug_context = dict(seed_panel_debug)
-            final_metrics = selected_pipeline.train_room(
-                room_name=room_name,
-                processed_df=processed_df,
-                seq_length=seq_length,
-                elder_id=elder_id,
-                progress_callback=progress_callback,
-                training_mode=training_mode,
-                defer_promotion=defer_promotion,
-                gate_evaluation_result=gate_evaluation_result,
-                event_first_shadow=event_first_shadow,
+            try:
+                promoted = bool(
+                    self.registry.rollback_to_version(
+                        elder_id=elder_id,
+                        room_name=room_name,
+                        version=int(selected_saved_version),
+                    )
+                )
+            except Exception as e:
+                promoted = False
+                final_metrics["seed_panel_promotion_error"] = f"{type(e).__name__}: {e}"
+            final_metrics["promoted_to_latest"] = bool(promoted)
+            final_metrics["promotion_deferred"] = False if promoted else bool(
+                final_metrics.get("promotion_deferred", False)
             )
         final_metrics["seed_panel_debug"] = dict(seed_panel_debug)
         return final_metrics
@@ -2065,6 +2093,7 @@ class TrainingPipeline:
         validation_min_support = int(candidate_metrics.get("validation_min_class_support", 0) or 0)
         calibration_low_support_count = int(candidate_metrics.get("calibration_low_support_count", 0) or 0)
         metric_source = str(candidate_metrics.get("metric_source") or "")
+        two_stage_core = candidate_metrics.get("two_stage_core") or {}
         data_viability = candidate_metrics.get("data_viability") or {}
         raw_per_label_recall = candidate_metrics.get("per_label_recall") or {}
         raw_per_label_support = candidate_metrics.get("per_label_support") or {}
@@ -2271,6 +2300,15 @@ class TrainingPipeline:
             else:
                 _add_watch(f"no_room_policy:{room_key}")
             return _finalize()
+
+        if isinstance(two_stage_core, Mapping):
+            gate_mode = str(two_stage_core.get("gate_mode") or "").strip().lower()
+            gate_source = str(two_stage_core.get("gate_source") or "unknown").strip().lower()
+            if bool(two_stage_core.get("enabled")) and gate_mode == "primary":
+                if bool(two_stage_core.get("fail_closed")) or not bool(
+                    two_stage_core.get("selected_reliable", True)
+                ):
+                    _add_blocking(f"two_stage_primary_unreliable:{room_key}:{gate_source}")
 
         if candidate_f1 is not None:
             threshold = self._resolve_scheduled_threshold(room_policy.get("schedule", []), training_days)
@@ -3170,11 +3208,49 @@ class TrainingPipeline:
             "selected_source": "single_stage_only",
             "runtime_use_two_stage": False,
             "selected_summary": dict(single_payload.get("summary") or {}),
+            "selected_reliable": bool(
+                (not bool(single_payload.get("collapsed", False)))
+                and bool(single_payload.get("no_regress_ok", True))
+            ),
+            "fail_closed": False,
+            "fail_closed_reason": None,
         }
         if two_payload is None:
             return selection
         if gate_mode_norm != "primary":
             selection["selected_source"] = "single_stage_shadow"
+            return selection
+
+        single_reliable = bool(
+            (not bool(single_payload.get("collapsed", False)))
+            and bool(single_payload.get("no_regress_ok", True))
+        )
+        two_reliable = bool(
+            (not bool(two_payload.get("collapsed", False)))
+            and bool(two_payload.get("no_regress_ok", True))
+        )
+
+        if not single_reliable and not two_reliable:
+            selection["selected_source"] = "single_stage_fail_closed_unreliable"
+            selection["selected_summary"] = dict(single_payload.get("summary") or {})
+            selection["selected_reliable"] = False
+            selection["fail_closed"] = True
+            selection["fail_closed_reason"] = "no_reliable_primary_candidate"
+            return selection
+        if two_reliable and not single_reliable:
+            selection["selected_source"] = "two_stage_primary"
+            selection["runtime_use_two_stage"] = True
+            selection["selected_summary"] = dict(two_payload.get("summary") or {})
+            selection["selected_reliable"] = True
+            return selection
+        if single_reliable and not two_reliable:
+            if bool(two_payload.get("collapsed", False)):
+                source = "single_stage_fallback_collapse"
+            else:
+                source = "single_stage_fallback_no_regress"
+            selection["selected_source"] = source
+            selection["selected_summary"] = dict(single_payload.get("summary") or {})
+            selection["selected_reliable"] = True
             return selection
 
         def _rank(payload: Mapping[str, Any]) -> Tuple[int, int, float, float, int]:
@@ -3191,6 +3267,7 @@ class TrainingPipeline:
             selection["selected_source"] = "two_stage_primary"
             selection["runtime_use_two_stage"] = True
             selection["selected_summary"] = dict(two_payload.get("summary") or {})
+            selection["selected_reliable"] = True
             return selection
 
         if bool(two_payload.get("collapsed", False)) and not bool(single_payload.get("collapsed", False)):
@@ -3210,6 +3287,7 @@ class TrainingPipeline:
 
         selection["selected_source"] = source
         selection["selected_summary"] = dict(single_payload.get("summary") or {})
+        selection["selected_reliable"] = True
         return selection
 
     def _resolve_critical_class_support(

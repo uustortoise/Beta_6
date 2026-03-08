@@ -13,7 +13,16 @@ from elderlycare_v1_16.config.settings import (
     DEFAULT_DENOISING_WINDOW,
 )
 from elderlycare_v1_16.preprocessing.noise import hampel_filter
-from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder, GridUpdateMode
+
+try:
+    from st_aggrid import AgGrid, DataReturnMode, GridOptionsBuilder, GridUpdateMode
+    AGGRID_AVAILABLE = True
+except ModuleNotFoundError:
+    AgGrid = None
+    DataReturnMode = None
+    GridOptionsBuilder = None
+    GridUpdateMode = None
+    AGGRID_AVAILABLE = False
 
 import services.correction_service as correction_service
 from app._sidebar import render_sidebar
@@ -38,6 +47,82 @@ def _selected_time_bounds(selected_rows: list[dict]):
     if not timestamps:
         return None, None
     return min(timestamps), max(timestamps)
+
+
+def _render_review_queue_selector(queue_df: pd.DataFrame) -> list[dict]:
+    display_cols = [
+        "timestamp",
+        "activity_type",
+        "confidence",
+        "duration_minutes",
+        "review_reason",
+        "training_activity_type",
+        "review_source",
+    ]
+    display_cols = [col for col in display_cols if col in queue_df.columns]
+    queue_display_df = queue_df.copy().reset_index(drop=True)
+    queue_display_df["_queue_row_id"] = queue_display_df.index.astype(int)
+
+    if AGGRID_AVAILABLE:
+        gb = GridOptionsBuilder.from_dataframe(queue_display_df[["_queue_row_id", *display_cols]])
+        gb.configure_selection("multiple", use_checkbox=True, header_checkbox=True)
+        gb.configure_column("_queue_row_id", hide=True)
+        if "confidence" in queue_display_df.columns:
+            gb.configure_column(
+                "confidence",
+                type=["numericColumn", "numberColumnFilter", "customNumericFormat"],
+                valueFormatter="data.confidence.toFixed(2)",
+            )
+
+        jscode = """
+        function(params) {
+            if (params.data.confidence < 0.3) {
+                return {'backgroundColor': '#ffebee'};
+            } else if (params.data.confidence < 0.5) {
+                return {'backgroundColor': '#fff3e0'};
+            } else {
+                return {'backgroundColor': '#f1f8e9'};
+            }
+        }
+        """
+        gb.configure_grid_options(getRowStyle=jscode)
+        grid_response = AgGrid(
+            queue_display_df,
+            gridOptions=gb.build(),
+            data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
+            update_mode=GridUpdateMode.SELECTION_CHANGED,
+            fit_columns_on_grid_load=True,
+            theme="balham",
+            allow_unsafe_jscode=True,
+            height=500,
+        )
+        return _normalize_selected_rows(grid_response.get("selected_rows"))
+
+    st.warning("`st_aggrid` is not installed. Using the built-in fallback review selector.")
+    fallback_df = queue_display_df[display_cols].copy()
+    if "timestamp" in fallback_df.columns:
+        fallback_df["timestamp"] = pd.to_datetime(fallback_df["timestamp"], errors="coerce")
+    st.dataframe(fallback_df, use_container_width=True, height=500)
+
+    option_labels = []
+    option_map: dict[str, int] = {}
+    for _, row in queue_display_df.iterrows():
+        ts = pd.to_datetime(row.get("timestamp"), errors="coerce")
+        ts_txt = ts.strftime("%Y-%m-%d %H:%M:%S") if pd.notna(ts) else "unknown time"
+        label = row.get("activity_type") or "unknown"
+        reason = row.get("review_reason") or "clear"
+        option = f"{ts_txt} | {label} | {reason}"
+        option_labels.append(option)
+        option_map[option] = int(row["_queue_row_id"])
+
+    selected_options = st.multiselect(
+        "Select review rows",
+        options=option_labels,
+        key="fallback_review_queue_selector",
+    )
+    selected_ids = {option_map[option] for option in selected_options}
+    selected_df = queue_display_df[queue_display_df["_queue_row_id"].isin(selected_ids)].copy()
+    return selected_df.drop(columns=["_queue_row_id"], errors="ignore").to_dict("records")
 
 
 def _render_sensor_panel(sensor_df: pd.DataFrame):
@@ -162,6 +247,50 @@ def _render_activity_timeline_chart(timeline_df: pd.DataFrame, title: str, y_fie
                 alt.Tooltip("activity_type:N", title="Activity"),
                 alt.Tooltip("confidence:Q", title="Confidence", format=".2f"),
                 alt.Tooltip("is_corrected:N", title="Corrected"),
+            ],
+        )
+        .properties(
+            title=title,
+            height=220,
+            width="container",
+        )
+        .interactive()
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
+def _render_prediction_compare_chart(timeline_df: pd.DataFrame, title: str):
+    timeline_clean = timeline_df[
+        timeline_df["activity_type"].notna() & (timeline_df["activity_type"] != "")
+    ].copy()
+    if timeline_clean.empty:
+        st.info("No prediction timeline blocks found for this day.")
+        return
+
+    chart = (
+        alt.Chart(timeline_clean)
+        .mark_bar()
+        .encode(
+            x=alt.X("timestamp:T", axis=alt.Axis(format="%H:%M", title="Time")),
+            x2="end_time:T",
+            y=alt.Y("activity_type:N", title="Prediction", sort="-x"),
+            color=alt.condition(
+                "datum.review_reason != 'clear'",
+                alt.value("#d97706"),
+                alt.Color("activity_type:N", scale=alt.Scale(scheme="tableau20"), legend=None),
+            ),
+            opacity=alt.condition(
+                "datum.review_reason != 'clear'",
+                alt.value(1.0),
+                alt.value(0.7),
+            ),
+            tooltip=[
+                alt.Tooltip("time:N", title="Time"),
+                alt.Tooltip("activity_type:N", title="Predicted Label"),
+                alt.Tooltip("prediction_state_label:N", title="Prediction State"),
+                alt.Tooltip("training_activity_type:N", title="Training / Corrected Label"),
+                alt.Tooltip("review_reason:N", title="Review Reason"),
+                alt.Tooltip("confidence:Q", title="Confidence", format=".2f"),
             ],
         )
         .properties(
@@ -478,14 +607,78 @@ def render():
         st.markdown("---")
         sensor_df = correction_service.get_sensor_timeseries(elder_id, selected_room, selected_date)
         _render_sensor_panel(sensor_df)
-        
-    # ── Low-Confidence Queue ─────────────────────────────────────────
-    queue_df = correction_service.get_low_confidence_queue(elder_id, selected_room, selected_date, confidence_threshold)
+
+    compare_payload = correction_service.build_compare_timeline_payload(
+        elder_id=elder_id,
+        room=selected_room,
+        date=selected_date,
+        confidence_threshold=float(confidence_threshold),
+    )
+    training_compare_df = compare_payload.get("training_timeline", pd.DataFrame())
+    prediction_compare_df = compare_payload.get("prediction_timeline", pd.DataFrame())
+
+    st.markdown("---")
+    st.subheader("Compare Timelines")
+    st.caption(
+        "Top shows training/corrected labels from `adl_history`. "
+        "Bottom shows raw predictions from `predictions`. Orange blocks need review."
+    )
+    if training_compare_df is None or training_compare_df.empty:
+        st.info("No training/corrected labels found for this resident, room, and day.")
+    else:
+        _render_activity_timeline_chart(
+            training_compare_df,
+            title=f"Training / Corrected Timeline — {selected_room} — {selected_date}",
+            y_field="activity_type",
+        )
+    if prediction_compare_df is None or prediction_compare_df.empty:
+        st.info("No raw prediction rows found for this resident, room, and day.")
+    else:
+        review_blocks = prediction_compare_df[prediction_compare_df["review_reason"] != "clear"].copy()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Training Blocks", int(len(training_compare_df.index)) if training_compare_df is not None else 0)
+        c2.metric("Prediction Blocks", int(len(prediction_compare_df.index)))
+        c3.metric("Review Needed", int(len(review_blocks.index)))
+        _render_prediction_compare_chart(
+            prediction_compare_df,
+            title=f"Prediction / Runtime Timeline — {selected_room} — {selected_date}",
+        )
+
+    low_confidence_df = correction_service.get_low_confidence_queue(
+        elder_id, selected_room, selected_date, confidence_threshold
+    )
+    review_queue_parts = []
+    if low_confidence_df is not None and not low_confidence_df.empty:
+        low_confidence_df = low_confidence_df.copy()
+        low_confidence_df["review_reason"] = "low_confidence"
+        low_confidence_df["review_source"] = "low_confidence_queue"
+        low_confidence_df["training_activity_type"] = None
+        low_confidence_df["prediction_state_label"] = "low confidence / review needed"
+        review_queue_parts.append(low_confidence_df)
+    if prediction_compare_df is not None and not prediction_compare_df.empty:
+        compare_review_df = prediction_compare_df[
+            prediction_compare_df["review_reason"] != "clear"
+        ].copy()
+        if not compare_review_df.empty:
+            compare_review_df["review_source"] = "compare_timeline"
+            review_queue_parts.append(compare_review_df)
+    if review_queue_parts:
+        queue_df = pd.concat(review_queue_parts, ignore_index=True, sort=False)
+        queue_df["timestamp"] = pd.to_datetime(queue_df["timestamp"], errors="coerce")
+        queue_df = (
+            queue_df.sort_values("timestamp")
+            .dropna(subset=["timestamp"])
+            .drop_duplicates(subset=["timestamp", "activity_type"], keep="first")
+        )
+    else:
+        queue_df = pd.DataFrame()
     
     st.markdown("---")
     
     if queue_df.empty:
-        st.success(f"No low-confidence records found for {selected_room} on {selected_date} below {confidence_threshold:.2f}.")
+        st.success(
+            f"No low-confidence or compare-flagged records found for {selected_room} on {selected_date}."
+        )
         if is_advanced_mode:
             st.markdown("---")
             _render_batch_queue_panel(elder_id=elder_id, room=selected_room, selected_date=selected_date)
@@ -495,40 +688,9 @@ def render():
     
     # 3. Left Pane: AgGrid
     with col_left:
-        st.subheader("Low Confidence Queue")
-        
-        gb = GridOptionsBuilder.from_dataframe(queue_df[['timestamp', 'activity_type', 'confidence', 'duration_minutes']])
-        gb.configure_selection('multiple', use_checkbox=True, header_checkbox=True)
-        gb.configure_column('confidence', type=["numericColumn", "numberColumnFilter", "customNumericFormat"], valueFormatter="data.confidence.toFixed(2)")
-        
-        # Color coding rows by confidence
-        jscode = """
-        function(params) {
-            if (params.data.confidence < 0.3) {
-                return {'backgroundColor': '#ffebee'}; // Red-ish
-            } else if (params.data.confidence < 0.5) {
-                return {'backgroundColor': '#fff3e0'}; // Orange-ish
-            } else {
-                return {'backgroundColor': '#f1f8e9'}; // Green-ish
-            }
-        }
-        """
-        gb.configure_grid_options(getRowStyle=jscode)
-        
-        grid_options = gb.build()
-        
-        grid_response = AgGrid(
-            queue_df,
-            gridOptions=grid_options,
-            data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
-            update_mode=GridUpdateMode.SELECTION_CHANGED,
-            fit_columns_on_grid_load=True,
-            theme='balham', 
-            allow_unsafe_jscode=True, # Required for getRowStyle
-            height=500
-        )
-        
-        selected_rows = grid_response['selected_rows']
+        st.subheader("Review Queue")
+        st.caption("Combined low-confidence queue plus prediction/training mismatch blocks.")
+        selected_rows = _render_review_queue_selector(queue_df)
         
     # 4. Right Pane: Edit Panel
     with col_right:
@@ -546,6 +708,25 @@ def render():
         else:
             n_selected = len(selected_rows)
             st.write(f"**{n_selected} row(s) selected.**")
+
+            review_reasons = sorted(
+                {
+                    str(row.get("review_reason", "")).strip()
+                    for row in selected_rows
+                    if str(row.get("review_reason", "")).strip()
+                }
+            )
+            training_labels = sorted(
+                {
+                    str(row.get("training_activity_type", "")).strip()
+                    for row in selected_rows
+                    if str(row.get("training_activity_type", "")).strip()
+                }
+            )
+            if review_reasons:
+                st.write(f"Review reason: `{', '.join(review_reasons)}`")
+            if training_labels:
+                st.write(f"Training label(s): `{', '.join(training_labels)}`")
 
             selection_start, selection_end = _selected_time_bounds(selected_rows)
             if selection_start is None or selection_end is None:

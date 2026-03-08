@@ -7,11 +7,13 @@ from services.export_service import get_residents, export_predicted_results
 from services.audit_service import fetch_correction_trail, rollback_correction
 from services.correction_service import (
     apply_batch_corrections,
+    build_compare_timeline_payload,
     find_nearest_activity_date,
     get_activity_timeline,
     get_activity_timeline_any_room,
     get_low_confidence_queue,
     get_sensor_timeseries,
+    get_training_timeline,
     preview_batch_corrections,
     save_correction,
 )
@@ -263,7 +265,26 @@ def test_ops_service_sample_collection_uses_adl_day_coverage(test_db):
     counts = samples.get("counts", {})
     assert counts.get("bedroom") == 2
     assert counts.get("living_room") == 1
-    assert samples.get("target") == 21
+    assert samples.get("target") == 14
+
+
+def test_ops_service_sample_collection_target_respects_env_override(test_db, monkeypatch):
+    elder = "OPS_SAMPLE_2"
+    monkeypatch.setenv("UI_SAMPLE_COLLECTION_TARGET_DAYS", "9")
+    with test_db.get_connection() as conn:
+        conn.execute("INSERT INTO elders (elder_id, full_name) VALUES (?, ?)", (elder, "Ops Sample Target"))
+        conn.execute(
+            """
+            INSERT INTO adl_history
+            (elder_id, timestamp, room, activity_type, record_date, duration_minutes)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (elder, "2025-12-04 00:00:10", "Bedroom", "sleep", "2025-12-04", 10),
+        )
+        conn.commit()
+
+    samples = ops_service.get_sample_collection_status(elder)
+    assert samples.get("target") == 9
 
 
 def test_ops_service_hard_negative_last_run_falls_back_to_training(test_db):
@@ -374,6 +395,151 @@ def test_correction_service_get_activity_timeline(test_db):
     assert "end_time" in df.columns
     assert "time" in df.columns
     assert df.iloc[0]["activity_type"] == "sleep"
+
+
+def test_correction_service_get_training_timeline_marks_corrected_source(test_db):
+    elder = "TRAIN_TL001"
+    room = "livingroom"
+
+    with test_db.get_connection() as conn:
+        conn.execute("INSERT INTO elders (elder_id, full_name) VALUES (?, ?)", (elder, "Training Timeline"))
+        conn.execute(
+            """
+            INSERT INTO adl_history
+            (elder_id, timestamp, room, activity_type, confidence, is_corrected, record_date, duration_minutes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (elder, "2026-03-05 08:00:00", room, "watch_tv", 1.0, 1, "2026-03-05", 30),
+        )
+        conn.execute(
+            """
+            INSERT INTO adl_history
+            (elder_id, timestamp, room, activity_type, confidence, is_corrected, record_date, duration_minutes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (elder, "2026-03-05 08:30:00", room, "nap", 0.95, 0, "2026-03-05", 15),
+        )
+        conn.commit()
+
+    df = get_training_timeline(elder, room, date(2026, 3, 5))
+    assert len(df) == 2
+    assert "source_label" in df.columns
+    assert "end_time" in df.columns
+    assert df.iloc[0]["source_label"] == "corrected"
+    assert df.iloc[1]["source_label"] == "recorded"
+
+
+def test_correction_service_build_compare_timeline_payload_marks_review_states(test_db):
+    elder = "COMPARE001"
+    room = "livingroom"
+    record_day = date(2026, 3, 6)
+
+    with test_db.get_connection() as conn:
+        conn.execute("INSERT INTO elders (elder_id, full_name) VALUES (?, ?)", (elder, "Compare Timeline"))
+        conn.execute(
+            """
+            INSERT INTO adl_history
+            (elder_id, timestamp, room, activity_type, confidence, is_corrected, record_date, duration_minutes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (elder, "2026-03-06 10:00:00", room, "watch_tv", 1.0, 1, "2026-03-06", 10),
+        )
+        conn.execute(
+            """
+            INSERT INTO adl_history
+            (elder_id, timestamp, room, activity_type, confidence, is_corrected, record_date, duration_minutes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (elder, "2026-03-06 10:10:00", room, "watch_tv", 1.0, 1, "2026-03-06", 10),
+        )
+        conn.execute(
+            """
+            INSERT INTO predictions
+            (resident_id, timestamp, room, activity, confidence, is_anomaly)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (elder, "2026-03-06 10:00:00", room, "low_confidence", 0.35, 0),
+        )
+        conn.execute(
+            """
+            INSERT INTO predictions
+            (resident_id, timestamp, room, activity, confidence, is_anomaly)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (elder, "2026-03-06 10:10:00", room, "nap", 0.92, 0),
+        )
+        conn.commit()
+
+    payload = build_compare_timeline_payload(elder, room, record_day, confidence_threshold=0.60)
+    training_df = payload.get("training_timeline")
+    prediction_df = payload.get("prediction_timeline")
+
+    assert training_df is not None and len(training_df) == 2
+    assert prediction_df is not None and len(prediction_df) == 2
+
+    first = prediction_df.iloc[0]
+    second = prediction_df.iloc[1]
+    assert bool(first["is_unknown"])
+    assert bool(first["is_low_confidence"])
+    assert bool(first["is_mismatch"])
+    assert bool(first["is_corrected"])
+    assert first["training_activity_type"] == "watch_tv"
+    assert first["prediction_state_label"] == "unknown / review needed"
+
+    assert not bool(second["is_unknown"])
+    assert not bool(second["is_low_confidence"])
+    assert bool(second["is_mismatch"])
+    assert second["training_activity_type"] == "watch_tv"
+
+
+def test_ops_service_model_update_monitor_exposes_metric_source_labels(test_db):
+    elder = "OPS_MONITOR_1"
+    metadata = {
+        "walk_forward_gate": {
+            "reason": "evaluated",
+            "pass": True,
+            "room_reports": [
+                {
+                    "room": "livingroom",
+                    "pass": True,
+                    "candidate_summary": {
+                        "macro_f1_mean": 0.72,
+                        "accuracy_mean": 0.81,
+                    },
+                    "candidate_stability_accuracy_mean": 0.77,
+                    "candidate_transition_macro_f1_mean": 0.61,
+                    "champion_macro_f1_mean": 0.68,
+                    "candidate_threshold_required": 0.50,
+                    "training_days": 14.0,
+                    "reasons": [],
+                }
+            ],
+        },
+        "metrics": [],
+    }
+    with test_db.get_connection() as conn:
+        conn.execute("INSERT INTO elders (elder_id, full_name) VALUES (?, ?)", (elder, "Ops Monitor"))
+        conn.execute(
+            """
+            INSERT INTO training_history (elder_id, training_date, model_type, status, accuracy, metadata)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                elder,
+                "2026-03-06 09:00:00",
+                "baseline",
+                "SUCCESS",
+                0.91,
+                json.dumps(metadata),
+            ),
+        )
+        conn.commit()
+
+    monitor = ops_service.get_model_update_monitor(elder, days=30, limit=10)
+    labels = monitor.get("metric_labels", {})
+    assert labels.get("latest_candidate_macro_f1_mean") == "WF Candidate F1"
+    assert labels.get("latest_candidate_accuracy_mean") == "WF Candidate Accuracy"
+    assert labels.get("latest_run_accuracy") == "Raw Training Run Accuracy"
 
 
 def test_correction_service_activity_timeline_room_alias_match(test_db):

@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch, ANY
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import tensorflow as tf
 
 # Add parent directory to path
@@ -117,6 +118,31 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertTrue(bool(selection["runtime_use_two_stage"]))
         self.assertTrue(bool(selection["single_stage"]["collapsed"]))
         self.assertFalse(bool(selection["two_stage"]["collapsed"]))
+
+    def test_select_final_two_stage_gate_source_marks_both_collapsed_as_fail_closed(self):
+        self.mock_platform.label_encoders["LivingRoom"] = MagicMock()
+        self.mock_platform.label_encoders["LivingRoom"].classes_ = np.array(
+            ["livingroom_normal_use", "unoccupied"],
+            dtype=object,
+        )
+        y_true = np.asarray(([0] * 50) + ([1] * 50), dtype=np.int32)
+        single_stage_probs = np.tile(np.asarray([[1.0, 0.0]], dtype=np.float32), (len(y_true), 1))
+        two_stage_probs = np.tile(np.asarray([[0.0, 1.0]], dtype=np.float32), (len(y_true), 1))
+
+        selection = self.pipeline._select_final_two_stage_gate_source(
+            room_name="LivingRoom",
+            y_true=y_true,
+            single_stage_probs=single_stage_probs,
+            two_stage_probs=two_stage_probs,
+            gate_mode="primary",
+            champion_meta=None,
+        )
+
+        self.assertFalse(bool(selection["runtime_use_two_stage"]))
+        self.assertTrue(bool(selection.get("fail_closed")))
+        self.assertFalse(bool(selection.get("selected_reliable", True)))
+        self.assertEqual(selection.get("fail_closed_reason"), "no_reliable_primary_candidate")
+        self.assertEqual(selection["selected_source"], "single_stage_fail_closed_unreliable")
 
     def test_should_shuffle_post_split_batches_matches_room_policy(self):
         self.assertTrue(self.pipeline._should_shuffle_post_split_batches("Entrance"))
@@ -1726,6 +1752,54 @@ class TestTrainingPipeline(unittest.TestCase):
         )
 
     @patch('ml.training.get_release_gates_config')
+    def test_evaluate_release_gate_blocks_fail_closed_two_stage_primary(self, mock_get_policy):
+        mock_get_policy.return_value = {
+            "release_gates": {
+                "rooms": {
+                    "livingroom": {
+                        "schedule": [
+                            {"min_days": 1, "max_days": None, "min_value": 0.5}
+                        ]
+                    }
+                },
+                "no_regress": {"max_drop_from_champion": 0.05, "exempt_rooms": []},
+            }
+        }
+        self.pipeline.policy.release_gate.evidence_profile = "production"
+        self.pipeline._policy_snapshot = self.pipeline.policy
+        gate_pass, reasons = self.pipeline._evaluate_release_gate(
+            room_name="LivingRoom",
+            candidate_metrics={
+                "macro_f1": 0.0,
+                "training_days": 3.0,
+                "samples": 300,
+                "metric_source": "holdout_validation_single_stage_fallback",
+                "validation_min_class_support": 5,
+                "per_label_recall": {"livingroom_normal_use": 0.0},
+                "per_label_support": {"livingroom_normal_use": 5},
+                "two_stage_core": {
+                    "enabled": True,
+                    "gate_mode": "primary",
+                    "gate_source": "single_stage_fail_closed_unreliable",
+                    "fail_closed": True,
+                    "selected_reliable": False,
+                    "validation_summary": {"collapsed": True},
+                },
+            },
+            champion_meta=None,
+        )
+
+        self.assertFalse(gate_pass)
+        self.assertTrue(
+            any(
+                r.startswith(
+                    "two_stage_primary_unreliable:livingroom:single_stage_fail_closed_unreliable"
+                )
+                for r in reasons
+            )
+        )
+
+    @patch('ml.training.get_release_gates_config')
     def test_evaluate_release_gate_pilot_profile_treats_missing_critical_label_as_non_evaluable(self, mock_get_policy):
         mock_get_policy.return_value = {
             "release_gates": {
@@ -2107,6 +2181,93 @@ class TestTrainingPipeline(unittest.TestCase):
 
         selected = self.pipeline._select_multi_seed_candidate(candidates)
         self.assertEqual(selected["seed"], 45)
+
+    def test_select_multi_seed_candidate_prefers_gate_passing_candidate(self):
+        candidates = [
+            {
+                "seed": 11,
+                "summary": {
+                    "collapsed": False,
+                    "gate_pass": False,
+                    "gate_aligned_score": 0.45,
+                    "macro_f1": 0.95,
+                },
+                "no_regress_ok": True,
+            },
+            {
+                "seed": 13,
+                "summary": {
+                    "collapsed": False,
+                    "gate_pass": True,
+                    "gate_aligned_score": 0.40,
+                    "macro_f1": 0.40,
+                },
+                "no_regress_ok": True,
+            },
+        ]
+
+        selected = self.pipeline._select_multi_seed_candidate(candidates)
+        self.assertEqual(selected["seed"], 13)
+
+    def test_train_room_with_multi_seed_panel_reuses_selected_candidate_metrics(self):
+        self.pipeline._active_policy = MagicMock(
+            return_value=SimpleNamespace(
+                reproducibility=SimpleNamespace(
+                    multi_seed_candidate_seeds=[11, 13],
+                    random_seed=11,
+                )
+            )
+        )
+        first_candidate = MagicMock()
+        first_candidate.train_room.return_value = {
+            "macro_f1": 0.95,
+            "gate_pass": False,
+            "gate_reasons": ["room_threshold_failed:livingroom"],
+            "predicted_class_distribution": {
+                "livingroom_normal_use": 90,
+                "unoccupied": 10,
+            },
+            "saved_version": 101,
+        }
+        selected_candidate = MagicMock()
+        selected_candidate.train_room.return_value = {
+            "macro_f1": 0.40,
+            "gate_pass": True,
+            "gate_reasons": [],
+            "predicted_class_distribution": {
+                "livingroom_normal_use": 55,
+                "unoccupied": 45,
+            },
+            "saved_version": 102,
+        }
+        unexpected_retrain = MagicMock()
+        unexpected_retrain.train_room.return_value = {
+            "macro_f1": 0.99,
+            "gate_pass": True,
+            "gate_reasons": [],
+            "predicted_class_distribution": {
+                "livingroom_normal_use": 50,
+                "unoccupied": 50,
+            },
+            "saved_version": 999,
+        }
+
+        with patch.object(
+            self.pipeline,
+            "_spawn_candidate_pipeline",
+            side_effect=[first_candidate, selected_candidate, unexpected_retrain],
+        ) as spawn:
+            result = self.pipeline._train_room_with_multi_seed_panel(
+                room_name="LivingRoom",
+                processed_df=pd.DataFrame(),
+                seq_length=5,
+                elder_id="elder-1",
+            )
+
+        self.assertEqual(spawn.call_count, 2)
+        unexpected_retrain.train_room.assert_not_called()
+        self.assertEqual(result["saved_version"], 102)
+        self.assertEqual(result["seed_panel_debug"]["selected_seed"], 13)
 
     def test_spawn_candidate_pipeline_respects_runtime_seed_override_with_explicit_policy(self):
         policy = load_policy_from_env(

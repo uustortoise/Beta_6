@@ -2130,6 +2130,12 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertFalse(spawned._use_env_policy)
         self.assertEqual(spawned._active_policy().reproducibility.random_seed, 77)
 
+    def test_multi_seed_enabled_for_livingroom_by_default(self):
+        policy = load_policy_from_env({})
+        pipeline = TrainingPipeline(self.mock_platform, self.mock_registry, policy=policy)
+
+        self.assertTrue(pipeline._multi_seed_enabled_for_room("LivingRoom"))
+
     def test_resolve_training_strategy_marks_bedroom_factorized_primary(self):
         self.pipeline.policy = load_policy_from_env(
             {

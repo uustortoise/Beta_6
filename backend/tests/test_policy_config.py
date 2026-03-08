@@ -26,6 +26,8 @@ def test_load_policy_defaults_match_legacy_knobs():
     assert bathroom_viability["min_training_windows"] == 2000
     assert policy.reproducibility.random_seed == 42
     assert policy.reproducibility.skip_if_same_data_and_policy is True
+    assert policy.reproducibility.multi_seed_rooms == ["entrance", "livingroom"]
+    assert policy.reproducibility.multi_seed_candidate_seeds == [40, 41, 42, 43, 44, 45]
     assert policy.promotion_eligibility.min_training_days_with_champion == 7.0
     assert policy.training_profile.post_split_shuffle_rooms == ["entrance", "bedroom"]
     assert policy.training_profile.transition_focus_prior_drift_guard_rooms == ["bedroom"]

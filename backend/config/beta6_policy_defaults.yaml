@@ -161,6 +161,7 @@ training:
 reproducibility:
   multi_seed_rooms:
     - entrance
+    - livingroom
   multi_seed_candidate_seeds:
     - 40
     - 41

@@ -922,6 +922,243 @@ class TrainingPipeline:
         )
         return result
 
+    def _resolve_no_regress_macro_f1_floor(
+        self,
+        *,
+        room_name: str,
+        champion_meta: Optional[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        context: Dict[str, Any] = {
+            "enabled": False,
+            "target_macro_f1_floor": None,
+            "max_drop_from_champion": None,
+            "champion_macro_f1": None,
+            "exempt": False,
+        }
+        if not isinstance(champion_meta, Mapping):
+            return context
+
+        champion_metrics = champion_meta.get("metrics")
+        if not isinstance(champion_metrics, Mapping):
+            return context
+
+        champion_f1_raw = champion_metrics.get("macro_f1")
+        if champion_f1_raw is None:
+            return context
+
+        try:
+            champion_f1 = float(champion_f1_raw)
+        except (TypeError, ValueError):
+            return context
+
+        if not np.isfinite(champion_f1):
+            return context
+
+        try:
+            policy = get_release_gates_config()
+            no_regress_cfg = (policy.get("release_gates", {}) or {}).get("no_regress", {}) or {}
+            exempt_rooms = {
+                normalize_room_name(room)
+                for room in (no_regress_cfg.get("exempt_rooms", []) or [])
+            }
+            room_key = normalize_room_name(room_name)
+            if room_key in exempt_rooms:
+                context.update(
+                    {
+                        "enabled": False,
+                        "champion_macro_f1": champion_f1,
+                        "exempt": True,
+                    }
+                )
+                return context
+
+            gate_policy = self._active_policy().release_gate
+            max_drop = float(
+                no_regress_cfg.get(
+                    "max_drop_from_champion",
+                    gate_policy.max_drop_from_champion_default,
+                )
+            )
+            context.update(
+                {
+                    "enabled": True,
+                    "target_macro_f1_floor": float(champion_f1 - max_drop),
+                    "max_drop_from_champion": float(max_drop),
+                    "champion_macro_f1": float(champion_f1),
+                    "exempt": False,
+                }
+            )
+        except Exception as e:
+            context["error"] = f"{type(e).__name__}: {e}"
+        return context
+
+    def _summarize_gate_aligned_validation(
+        self,
+        *,
+        room_name: str,
+        y_true: np.ndarray,
+        y_pred_probs: np.ndarray,
+    ) -> Dict[str, Any]:
+        y_true_arr = np.asarray(y_true, dtype=np.int32)
+        y_pred_arr = np.asarray(y_pred_probs, dtype=np.float32)
+        if y_pred_arr.ndim != 2:
+            raise ValueError(f"unexpected_prediction_shape:{getattr(y_pred_arr, 'shape', None)}")
+        if int(y_pred_arr.shape[0]) != int(len(y_true_arr)):
+            raise ValueError(
+                f"prediction_length_mismatch:{int(y_pred_arr.shape[0])}!={int(len(y_true_arr))}"
+            )
+
+        y_pred_classes = np.argmax(y_pred_arr, axis=1).astype(np.int32)
+        report = classification_report(y_true_arr, y_pred_classes, output_dict=True, zero_division=0)
+        macro_f1 = float(report.get("macro avg", {}).get("f1-score", 0.0) or 0.0)
+
+        label_encoder = self.platform.label_encoders.get(room_name)
+        classes = getattr(label_encoder, "classes_", None) if label_encoder is not None else None
+        per_label_precision: Dict[str, float] = {}
+        per_label_recall: Dict[str, float] = {}
+        per_label_support: Dict[str, int] = {}
+        if classes is not None:
+            for class_id in range(len(classes)):
+                class_key = str(int(class_id))
+                label_name = str(classes[int(class_id)]).strip().lower()
+                class_metrics = report.get(class_key, {})
+                per_label_precision[label_name] = float(class_metrics.get("precision", 0.0) or 0.0)
+                per_label_recall[label_name] = float(class_metrics.get("recall", 0.0) or 0.0)
+                per_label_support[label_name] = int(class_metrics.get("support", 0) or 0)
+
+        dominant_class_id = -1
+        dominant_class_count = 0
+        dominant_class_share = 0.0
+        predicted_distribution: Dict[str, int] = {}
+        if len(y_pred_classes) > 0:
+            pred_ids, pred_counts = np.unique(y_pred_classes, return_counts=True)
+            idx = int(np.argmax(pred_counts))
+            dominant_class_id = int(pred_ids[idx])
+            dominant_class_count = int(pred_counts[idx])
+            dominant_class_share = float(dominant_class_count) / float(len(y_pred_classes))
+            for class_id, count in zip(pred_ids, pred_counts):
+                label_name = self._get_label_name(room_name, int(class_id))
+                key = str(label_name).strip().lower() if label_name else f"class_{int(class_id)}"
+                predicted_distribution[key] = int(count)
+
+        collapse_ratio = 0.95
+        collapsed = bool(dominant_class_share >= collapse_ratio)
+        dominant_label = self._get_label_name(room_name, dominant_class_id)
+        return {
+            "macro_f1": float(macro_f1),
+            "per_label_recall": per_label_recall,
+            "per_label_support": per_label_support,
+            "per_label_precision": per_label_precision,
+            "dominant_class_id": int(dominant_class_id),
+            "dominant_class_label": (
+                str(dominant_label).strip().lower()
+                if dominant_label is not None else f"class_{int(dominant_class_id)}"
+            ),
+            "dominant_class_count": int(dominant_class_count),
+            "dominant_class_share": float(dominant_class_share),
+            "collapse_ratio": float(collapse_ratio),
+            "collapsed": bool(collapsed),
+            "predicted_class_distribution": predicted_distribution,
+            "gate_aligned_score": float(macro_f1),
+        }
+
+    def _select_final_two_stage_gate_source(
+        self,
+        *,
+        room_name: str,
+        y_true: np.ndarray,
+        single_stage_probs: np.ndarray,
+        two_stage_probs: Optional[np.ndarray],
+        gate_mode: str,
+        champion_meta: Optional[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        gate_mode_norm = str(gate_mode or "shadow").strip().lower()
+        y_true_arr = np.asarray(y_true, dtype=np.int32)
+        single_probs = np.asarray(single_stage_probs, dtype=np.float32)
+
+        no_regress = self._resolve_no_regress_macro_f1_floor(
+            room_name=room_name,
+            champion_meta=champion_meta,
+        )
+
+        def _build_payload(source_name: str, probs: np.ndarray) -> Dict[str, Any]:
+            summary = self._summarize_gate_aligned_validation(
+                room_name=room_name,
+                y_true=y_true_arr,
+                y_pred_probs=np.asarray(probs, dtype=np.float32),
+            )
+            macro_f1 = summary.get("macro_f1")
+            macro_f1_value = float(macro_f1) if macro_f1 is not None else None
+            no_regress_ok = True
+            floor = no_regress.get("target_macro_f1_floor")
+            if bool(no_regress.get("enabled")) and floor is not None:
+                no_regress_ok = bool(
+                    macro_f1_value is not None and macro_f1_value + 1e-9 >= float(floor)
+                )
+            return {
+                "source": str(source_name),
+                "summary": dict(summary),
+                "collapsed": bool(summary.get("collapsed", False)),
+                "macro_f1": macro_f1_value,
+                "gate_aligned_score": float(summary.get("gate_aligned_score", float("-inf"))),
+                "no_regress_ok": bool(no_regress_ok),
+            }
+
+        single_payload = _build_payload("single_stage", single_probs)
+        two_payload: Optional[Dict[str, Any]] = None
+        if two_stage_probs is not None:
+            two_payload = _build_payload("two_stage", np.asarray(two_stage_probs, dtype=np.float32))
+
+        selection: Dict[str, Any] = {
+            "gate_mode": gate_mode_norm,
+            "no_regress": dict(no_regress),
+            "single_stage": single_payload,
+            "two_stage": two_payload,
+            "selected_source": "single_stage_only",
+            "runtime_use_two_stage": False,
+            "selected_summary": dict(single_payload.get("summary") or {}),
+        }
+        if two_payload is None:
+            return selection
+        if gate_mode_norm != "primary":
+            selection["selected_source"] = "single_stage_shadow"
+            return selection
+
+        def _rank(payload: Mapping[str, Any]) -> Tuple[int, int, float, float, int]:
+            return (
+                0 if bool(payload.get("collapsed", False)) else 1,
+                1 if bool(payload.get("no_regress_ok", True)) else 0,
+                float(payload.get("gate_aligned_score", float("-inf"))),
+                float(payload.get("macro_f1", float("-inf"))),
+                1 if str(payload.get("source")) == "two_stage" else 0,
+            )
+
+        selected = max((single_payload, two_payload), key=_rank)
+        if str(selected.get("source")) == "two_stage":
+            selection["selected_source"] = "two_stage_primary"
+            selection["runtime_use_two_stage"] = True
+            selection["selected_summary"] = dict(two_payload.get("summary") or {})
+            return selection
+
+        if bool(two_payload.get("collapsed", False)) and not bool(single_payload.get("collapsed", False)):
+            source = "single_stage_fallback_collapse"
+        elif (
+            bool(no_regress.get("enabled"))
+            and bool(single_payload.get("no_regress_ok"))
+            and not bool(two_payload.get("no_regress_ok"))
+        ):
+            source = "single_stage_fallback_no_regress"
+        elif float(single_payload.get("gate_aligned_score", float("-inf"))) > (
+            float(two_payload.get("gate_aligned_score", float("-inf"))) + 1e-8
+        ):
+            source = "single_stage_fallback_score"
+        else:
+            source = "single_stage_fallback_macro_f1"
+
+        selection["selected_source"] = source
+        selection["selected_summary"] = dict(single_payload.get("summary") or {})
+        return selection
+
     @classmethod
     def _compute_class_share_drift_from_labels(
         cls,
@@ -2383,34 +2620,17 @@ class TrainingPipeline:
         result["class_ids"] = sorted(set(required_ids))
         return result
 
-    @staticmethod
-    def _resolve_two_stage_core_rooms() -> set[str]:
-        default_rooms = "bathroom,bedroom,kitchen,livingroom"
-        raw = str(os.getenv("TWO_STAGE_CORE_ROOMS", default_rooms))
-        return {
-            normalize_room_name(token)
-            for token in raw.split(",")
-            if str(token).strip()
-        }
+    def _resolve_two_stage_core_rooms(self) -> set[str]:
+        return self._active_policy().two_stage_core.normalized_rooms()
 
-    @staticmethod
-    def _resolve_two_stage_gate_mode() -> str:
-        raw = str(os.getenv("TWO_STAGE_CORE_GATE_MODE", "shadow")).strip().lower()
-        if raw in {"primary", "shadow"}:
-            return raw
-        return "shadow"
+    def _resolve_two_stage_gate_mode(self) -> str:
+        return self._active_policy().two_stage_core.resolved_gate_mode()
 
-    @staticmethod
-    def _resolve_two_stage_stage_a_default_threshold() -> float:
-        raw = os.getenv("TWO_STAGE_CORE_STAGE_A_OCCUPIED_THRESHOLD", "0.5")
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            value = 0.5
+    def _resolve_two_stage_stage_a_default_threshold(self) -> float:
+        value = self._active_policy().two_stage_core.stage_a_occupied_threshold
         return float(np.clip(value, 0.0, 1.0))
 
-    @staticmethod
-    def _resolve_two_stage_stage_a_threshold_bounds() -> Tuple[float, float]:
+    def _resolve_two_stage_stage_a_threshold_bounds(self) -> Tuple[float, float]:
         """
         Resolve stage-A occupancy threshold bounds.
 
@@ -2418,24 +2638,9 @@ class TrainingPipeline:
         because stage-A (occupied-vs-unoccupied) needs room to lower threshold
         aggressively when collapse pressure is high.
         """
-        raw_min = os.getenv("TWO_STAGE_CORE_STAGE_A_THRESHOLD_MIN", "0.00")
-        raw_max = os.getenv("TWO_STAGE_CORE_STAGE_A_THRESHOLD_MAX", "0.95")
-        try:
-            min_thr = float(raw_min)
-        except (TypeError, ValueError):
-            min_thr = 0.00
-        try:
-            max_thr = float(raw_max)
-        except (TypeError, ValueError):
-            max_thr = 0.95
-        min_thr = float(np.clip(min_thr, 0.0, 1.0))
-        max_thr = float(np.clip(max_thr, 0.0, 1.0))
-        if min_thr > max_thr:
-            min_thr, max_thr = max_thr, min_thr
-        return min_thr, max_thr
+        return self._active_policy().two_stage_core.resolved_threshold_bounds()
 
-    @staticmethod
-    def _resolve_two_stage_stage_a_min_predicted_occupied_floor() -> Tuple[float, float]:
+    def _resolve_two_stage_stage_a_min_predicted_occupied_floor(self) -> Tuple[float, float]:
         """
         Resolve safeguards for minimum predicted occupied rate on calibration.
 
@@ -2444,16 +2649,9 @@ class TrainingPipeline:
         where:
             min_pred_rate = max(absolute_floor, true_occupied_rate * relative_ratio)
         """
-        raw_ratio = os.getenv("TWO_STAGE_CORE_STAGE_A_MIN_PRED_OCCUPIED_RATIO", "0.50")
-        raw_abs = os.getenv("TWO_STAGE_CORE_STAGE_A_MIN_PRED_OCCUPIED_ABS", "0.05")
-        try:
-            ratio = float(raw_ratio)
-        except (TypeError, ValueError):
-            ratio = 0.50
-        try:
-            abs_floor = float(raw_abs)
-        except (TypeError, ValueError):
-            abs_floor = 0.05
+        two_stage_policy = self._active_policy().two_stage_core
+        ratio = float(two_stage_policy.stage_a_min_predicted_occupied_ratio)
+        abs_floor = float(two_stage_policy.stage_a_min_predicted_occupied_abs)
         ratio = float(np.clip(ratio, 0.0, 1.0))
         abs_floor = float(np.clip(abs_floor, 0.0, 1.0))
         return ratio, abs_floor
@@ -2461,12 +2659,7 @@ class TrainingPipeline:
     def _two_stage_core_enabled_for_room(self, room_name: str) -> bool:
         if self._active_policy().training_profile.is_factorized_primary_room(room_name):
             return True
-        enabled = str(os.getenv("ENABLE_TWO_STAGE_CORE_MODELING", "false")).strip().lower() in {
-            "1", "true", "yes", "on", "enabled"
-        }
-        if not enabled:
-            return False
-        return normalize_room_name(room_name) in self._resolve_two_stage_core_rooms()
+        return self._active_policy().two_stage_core.enabled_for_room(room_name)
 
     def _resolve_two_stage_class_profile(self, room_name: str) -> Dict[str, Any]:
         """
@@ -2562,7 +2755,7 @@ class TrainingPipeline:
             "gate_mode": self._resolve_two_stage_gate_mode(),
             "room": normalize_room_name(room_name),
             "stage_a_occupied_threshold": self._resolve_two_stage_stage_a_default_threshold(),
-            "stage_a_threshold_source": "env_default",
+            "stage_a_threshold_source": "policy_default",
         }
         if not self._two_stage_core_enabled_for_room(room_name):
             return result
@@ -2729,7 +2922,7 @@ class TrainingPipeline:
         result: Dict[str, Any] = {
             "threshold": float(default_thr),
             "status": "fallback_default",
-            "source": "env_default",
+            "source": "policy_default",
             "support_occupied": 0,
             "samples": 0,
             "target_precision": None,
@@ -2796,18 +2989,24 @@ class TrainingPipeline:
             return result
 
         calibration_policy = self._active_policy().calibration
-        raw_target_precision = os.getenv(
-            "TWO_STAGE_CORE_STAGE_A_TARGET_PRECISION",
-            str(calibration_policy.default_precision_target),
+        two_stage_policy = self._active_policy().two_stage_core
+        target_precision = float(
+            np.clip(
+                float(two_stage_policy.stage_a_target_precision),
+                0.0,
+                1.0,
+            )
         )
-        raw_recall_floor = os.getenv("TWO_STAGE_CORE_STAGE_A_RECALL_FLOOR", "0.20")
-        try:
-            target_precision = float(raw_target_precision)
-        except (TypeError, ValueError):
+        recall_floor = float(
+            np.clip(
+                float(two_stage_policy.stage_a_recall_floor),
+                0.0,
+                1.0,
+            )
+        )
+        if not np.isfinite(target_precision):
             target_precision = float(calibration_policy.default_precision_target)
-        try:
-            recall_floor = float(raw_recall_floor)
-        except (TypeError, ValueError):
+        if not np.isfinite(recall_floor):
             recall_floor = 0.20
         result["target_precision"] = target_precision
         result["recall_floor"] = recall_floor
@@ -3005,7 +3204,7 @@ class TrainingPipeline:
                     self._resolve_two_stage_stage_a_default_threshold(),
                 )
             ),
-            "stage_a_threshold_source": str(two_stage_result.get("stage_a_threshold_source") or "env_default"),
+            "stage_a_threshold_source": str(two_stage_result.get("stage_a_threshold_source") or "policy_default"),
             "stage_a_calibration": dict(two_stage_result.get("stage_a_calibration") or {}),
             "num_classes": int(two_stage_result.get("num_classes", 0) or 0),
             "classes": list((two_stage_result.get("class_profile") or {}).get("classes", [])),
@@ -5198,7 +5397,7 @@ class TrainingPipeline:
                     )
                 )
                 two_stage_result["stage_a_threshold_source"] = str(
-                    stage_a_calibration.get("source", "env_default")
+                    stage_a_calibration.get("source", "policy_default")
                 )
                 two_stage_result["stage_a_calibration"] = stage_a_calibration
             
@@ -5292,7 +5491,7 @@ class TrainingPipeline:
                         )
                     ),
                     'stage_a_threshold_source': str(
-                        two_stage_result.get('stage_a_threshold_source', 'env_default')
+                        two_stage_result.get('stage_a_threshold_source', 'policy_default')
                     ),
                     'stage_a_calibration': dict(two_stage_result.get('stage_a_calibration', {})),
                 },
@@ -5366,20 +5565,62 @@ class TrainingPipeline:
                             "macro_recall": float(report_two_stage.get("macro avg", {}).get("recall", 0.0)),
                             "macro_precision": float(report_two_stage.get("macro avg", {}).get("precision", 0.0)),
                         }
-                        metrics["two_stage_core"]["validation_summary"] = two_stage_payload
-                        if gate_mode == "primary":
+                        selection = self._select_final_two_stage_gate_source(
+                            room_name=room_name,
+                            y_true=np.asarray(y_val_eval, dtype=np.int32),
+                            single_stage_probs=np.asarray(y_pred, dtype=np.float32),
+                            two_stage_probs=np.asarray(y_pred_two_stage, dtype=np.float32),
+                            gate_mode=gate_mode,
+                            champion_meta=champion_meta,
+                        )
+                        metrics["two_stage_core"]["single_stage_validation"] = dict(
+                            selection.get("single_stage") or {}
+                        )
+                        metrics["two_stage_core"]["two_stage_validation"] = dict(
+                            selection.get("two_stage") or {}
+                        )
+                        metrics["two_stage_core"]["validation_summary"] = dict(
+                            selection.get("selected_summary") or two_stage_payload
+                        )
+                        metrics["two_stage_core"]["validation_summary_raw_two_stage"] = dict(two_stage_payload)
+                        metrics["two_stage_core"]["runtime_use_two_stage"] = bool(
+                            selection.get("runtime_use_two_stage", False)
+                        )
+                        two_stage_result["runtime_enabled"] = bool(
+                            selection.get("runtime_use_two_stage", False)
+                        )
+                        if bool(selection.get("runtime_use_two_stage", False)):
                             y_pred = y_pred_two_stage
                             if training_strategy == "factorized_primary":
                                 metrics["two_stage_core"]["gate_source"] = "factorized_primary"
                                 metrics["metric_source"] = "holdout_validation_factorized_primary"
+                                two_stage_result["runtime_gate_source"] = "factorized_primary"
                             else:
-                                metrics["two_stage_core"]["gate_source"] = "two_stage_primary"
+                                metrics["two_stage_core"]["gate_source"] = str(
+                                    selection.get("selected_source") or "two_stage_primary"
+                                )
                                 metrics["metric_source"] = "holdout_validation_two_stage_primary"
+                                two_stage_result["runtime_gate_source"] = str(
+                                    selection.get("selected_source") or "two_stage_primary"
+                                )
                         else:
-                            metrics["two_stage_core"]["gate_source"] = "single_stage_shadow"
+                            metrics["two_stage_core"]["gate_source"] = str(
+                                selection.get("selected_source") or "single_stage_shadow"
+                            )
+                            metrics["metric_source"] = (
+                                "holdout_validation_single_stage_fallback"
+                                if gate_mode == "primary"
+                                else "holdout_validation_single_stage_shadow"
+                            )
+                            two_stage_result["runtime_gate_source"] = str(
+                                selection.get("selected_source") or "single_stage_shadow"
+                            )
                     except Exception as e:
                         metrics["two_stage_core"]["error"] = f"{type(e).__name__}: {e}"
                         metrics["two_stage_core"]["gate_source"] = "single_stage_fallback_error"
+                        metrics["two_stage_core"]["runtime_use_two_stage"] = False
+                        two_stage_result["runtime_enabled"] = False
+                        two_stage_result["runtime_gate_source"] = "single_stage_fallback_error"
                         logger.warning(f"Two-stage validation fallback for {room_name}: {e}")
 
                 shadow_eval_y_true = np.asarray(y_val_eval, dtype=np.int32)

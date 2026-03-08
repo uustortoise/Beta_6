@@ -50,6 +50,74 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertEqual(h1, h2)
         self.assertEqual(len(h1), 64)
 
+    def test_policy_hash_changes_when_two_stage_core_policy_changes(self):
+        p1 = load_policy_from_env({"ENABLE_TWO_STAGE_CORE_MODELING": "true"})
+        p2 = load_policy_from_env({"ENABLE_TWO_STAGE_CORE_MODELING": "false"})
+        self.assertNotEqual(self.pipeline._policy_hash(p1), self.pipeline._policy_hash(p2))
+
+    def test_select_final_two_stage_gate_source_falls_back_to_single_stage_on_no_regress(self):
+        self.mock_platform.label_encoders["Kitchen"] = MagicMock()
+        self.mock_platform.label_encoders["Kitchen"].classes_ = np.array(
+            ["kitchen_normal_use", "unoccupied"],
+            dtype=object,
+        )
+        y_true = np.asarray(([0] * 50) + ([1] * 50), dtype=np.int32)
+        single_probs = np.zeros((len(y_true), 2), dtype=np.float32)
+        single_probs[np.arange(len(y_true)), y_true] = 1.0
+
+        two_stage_pred = np.asarray(([0] * 70) + ([1] * 30), dtype=np.int32)
+        two_stage_probs = np.zeros((len(y_true), 2), dtype=np.float32)
+        two_stage_probs[np.arange(len(y_true)), two_stage_pred] = 1.0
+
+        release_cfg = {
+            "release_gates": {
+                "no_regress": {
+                    "max_drop_from_champion": 0.05,
+                    "exempt_rooms": [],
+                }
+            }
+        }
+        champion_meta = {"metrics": {"macro_f1": 0.95}}
+        with patch("ml.training.get_release_gates_config", return_value=release_cfg):
+            selection = self.pipeline._select_final_two_stage_gate_source(
+                room_name="Kitchen",
+                y_true=y_true,
+                single_stage_probs=single_probs,
+                two_stage_probs=two_stage_probs,
+                gate_mode="primary",
+                champion_meta=champion_meta,
+            )
+
+        self.assertEqual(selection["selected_source"], "single_stage_fallback_no_regress")
+        self.assertFalse(bool(selection["runtime_use_two_stage"]))
+        self.assertTrue(bool(selection["single_stage"]["no_regress_ok"]))
+        self.assertFalse(bool(selection["two_stage"]["no_regress_ok"]))
+
+    def test_select_final_two_stage_gate_source_keeps_two_stage_when_single_collapses(self):
+        self.mock_platform.label_encoders["LivingRoom"] = MagicMock()
+        self.mock_platform.label_encoders["LivingRoom"].classes_ = np.array(
+            ["livingroom_normal_use", "unoccupied"],
+            dtype=object,
+        )
+        y_true = np.asarray(([0] * 50) + ([1] * 50), dtype=np.int32)
+        single_probs = np.tile(np.asarray([[1.0, 0.0]], dtype=np.float32), (len(y_true), 1))
+        two_stage_probs = np.zeros((len(y_true), 2), dtype=np.float32)
+        two_stage_probs[np.arange(len(y_true)), y_true] = 1.0
+
+        selection = self.pipeline._select_final_two_stage_gate_source(
+            room_name="LivingRoom",
+            y_true=y_true,
+            single_stage_probs=single_probs,
+            two_stage_probs=two_stage_probs,
+            gate_mode="primary",
+            champion_meta=None,
+        )
+
+        self.assertEqual(selection["selected_source"], "two_stage_primary")
+        self.assertTrue(bool(selection["runtime_use_two_stage"]))
+        self.assertTrue(bool(selection["single_stage"]["collapsed"]))
+        self.assertFalse(bool(selection["two_stage"]["collapsed"]))
+
     def test_should_shuffle_post_split_batches_matches_room_policy(self):
         self.assertTrue(self.pipeline._should_shuffle_post_split_batches("Entrance"))
         self.assertTrue(self.pipeline._should_shuffle_post_split_batches("Bedroom"))
@@ -554,6 +622,59 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertTrue(bool(result.get("enabled")))
         self.assertEqual(stage_a_model.fit.call_args.kwargs["shuffle"], True)
         self.assertEqual(stage_b_model.fit.call_args.kwargs["shuffle"], True)
+
+    @patch("ml.training.build_transformer_model")
+    def test_train_two_stage_core_models_uses_typed_policy_over_conflicting_env(self, mock_build_model):
+        self.mock_platform.label_encoders["Bathroom"] = MagicMock()
+        self.mock_platform.label_encoders["Bathroom"].classes_ = [
+            "bathroom_normal_use",
+            "shower",
+            "unoccupied",
+        ]
+        policy = load_policy_from_env(
+            {
+                "ENABLE_TWO_STAGE_CORE_MODELING": "true",
+                "TWO_STAGE_CORE_ROOMS": "bathroom",
+                "TWO_STAGE_CORE_GATE_MODE": "primary",
+                "TWO_STAGE_CORE_STAGE_A_OCCUPIED_THRESHOLD": "0.42",
+            }
+        )
+        pipeline = TrainingPipeline(self.mock_platform, self.mock_registry, policy=policy)
+
+        stage_a_model = MagicMock()
+        stage_b_model = MagicMock()
+        mock_build_model.side_effect = [stage_a_model, stage_b_model]
+
+        X_train = np.zeros((12, 5, 3), dtype=np.float32)
+        y_train = np.asarray([0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2], dtype=np.int32)
+        validation_data = (
+            np.zeros((6, 5, 3), dtype=np.float32),
+            np.asarray([0, 1, 2, 0, 1, 2], dtype=np.int32),
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "ENABLE_TWO_STAGE_CORE_MODELING": "false",
+                "TWO_STAGE_CORE_ROOMS": "",
+                "TWO_STAGE_CORE_GATE_MODE": "shadow",
+                "TWO_STAGE_CORE_STAGE_A_OCCUPIED_THRESHOLD": "0.91",
+            },
+            clear=False,
+        ):
+            result = pipeline._train_two_stage_core_models(
+                room_name="Bathroom",
+                seq_length=5,
+                X_train=X_train,
+                y_train=y_train,
+                validation_data=validation_data,
+                max_epochs=2,
+            )
+
+        self.assertTrue(bool(result.get("enabled")))
+        self.assertEqual(result.get("gate_mode"), "primary")
+        self.assertAlmostEqual(float(result.get("stage_a_occupied_threshold", 0.0)), 0.42, places=6)
+        self.assertEqual(result.get("stage_a_threshold_source"), "policy_default")
 
     @patch.object(TrainingPipeline, "_evaluate_lane_b_event_gates")
     @patch.object(TrainingPipeline, "_write_event_first_shadow_artifact")

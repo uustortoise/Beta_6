@@ -23,6 +23,16 @@ from ml.policy_defaults import (
     get_reproducibility_multi_seed_rooms_default,
     get_training_factorized_primary_rooms_default,
     get_training_post_split_shuffle_rooms_default,
+    get_training_two_stage_core_enabled_default,
+    get_training_two_stage_core_gate_mode_default,
+    get_training_two_stage_core_rooms_default,
+    get_training_two_stage_core_stage_a_min_predicted_occupied_abs_default,
+    get_training_two_stage_core_stage_a_min_predicted_occupied_ratio_default,
+    get_training_two_stage_core_stage_a_occupied_threshold_default,
+    get_training_two_stage_core_stage_a_recall_floor_default,
+    get_training_two_stage_core_stage_a_target_precision_default,
+    get_training_two_stage_core_stage_a_threshold_max_default,
+    get_training_two_stage_core_stage_a_threshold_min_default,
     get_training_transition_focus_max_post_sampling_prior_drift_by_room,
     get_training_transition_focus_max_multiplier_by_room,
     get_training_transition_focus_prior_drift_guard_rooms,
@@ -620,6 +630,45 @@ class TrainingProfilePolicy:
 
 
 @dataclass
+class TwoStageCorePolicy:
+    enabled: bool = get_training_two_stage_core_enabled_default()
+    rooms: list[str] = field(default_factory=get_training_two_stage_core_rooms_default)
+    gate_mode: str = get_training_two_stage_core_gate_mode_default()
+    stage_a_occupied_threshold: float = get_training_two_stage_core_stage_a_occupied_threshold_default()
+    stage_a_target_precision: float = get_training_two_stage_core_stage_a_target_precision_default()
+    stage_a_recall_floor: float = get_training_two_stage_core_stage_a_recall_floor_default()
+    stage_a_threshold_min: float = get_training_two_stage_core_stage_a_threshold_min_default()
+    stage_a_threshold_max: float = get_training_two_stage_core_stage_a_threshold_max_default()
+    stage_a_min_predicted_occupied_ratio: float = (
+        get_training_two_stage_core_stage_a_min_predicted_occupied_ratio_default()
+    )
+    stage_a_min_predicted_occupied_abs: float = (
+        get_training_two_stage_core_stage_a_min_predicted_occupied_abs_default()
+    )
+
+    def normalized_rooms(self) -> set[str]:
+        return {
+            normalize_room_name(item)
+            for item in self.rooms
+            if str(item).strip()
+        }
+
+    def enabled_for_room(self, room_name: str) -> bool:
+        return bool(self.enabled) and normalize_room_name(room_name) in self.normalized_rooms()
+
+    def resolved_gate_mode(self) -> str:
+        mode = str(self.gate_mode).strip().lower()
+        return mode if mode in {"primary", "shadow"} else "shadow"
+
+    def resolved_threshold_bounds(self) -> tuple[float, float]:
+        min_thr = float(min(max(self.stage_a_threshold_min, 0.0), 1.0))
+        max_thr = float(min(max(self.stage_a_threshold_max, 0.0), 1.0))
+        if min_thr > max_thr:
+            min_thr, max_thr = max_thr, min_thr
+        return min_thr, max_thr
+
+
+@dataclass
 class EventFirstPolicy:
     """
     Event-first shadow/runtime controls (Lane C).
@@ -654,6 +703,7 @@ class TrainingPolicy:
     reproducibility: ReproducibilityPolicy = field(default_factory=ReproducibilityPolicy)
     promotion_eligibility: PromotionEligibilityPolicy = field(default_factory=PromotionEligibilityPolicy)
     training_profile: TrainingProfilePolicy = field(default_factory=TrainingProfilePolicy)
+    two_stage_core: TwoStageCorePolicy = field(default_factory=TwoStageCorePolicy)
     event_first: EventFirstPolicy = field(default_factory=EventFirstPolicy)
 
     def to_dict(self) -> dict[str, Any]:
@@ -1253,6 +1303,67 @@ def load_policy_from_env(environ: Mapping[str, str] | None = None) -> TrainingPo
         env,
         "TRANSITION_FOCUS_PRIOR_DRIFT_GUARD_ROOMS",
         profile_policy.transition_focus_prior_drift_guard_rooms,
+    )
+
+    two_stage_core = policy.two_stage_core
+    if env.get("ENABLE_TWO_STAGE_CORE_MODELING") is not None:
+        two_stage_core.enabled = _is_truthy(env.get("ENABLE_TWO_STAGE_CORE_MODELING"))
+    two_stage_core.rooms = _read_lower_token_list_env(
+        env,
+        "TWO_STAGE_CORE_ROOMS",
+        two_stage_core.rooms,
+    )
+    gate_mode = str(env.get("TWO_STAGE_CORE_GATE_MODE", two_stage_core.gate_mode)).strip().lower()
+    if gate_mode in {"primary", "shadow"}:
+        two_stage_core.gate_mode = gate_mode
+    two_stage_core.stage_a_occupied_threshold = _read_float_env(
+        env,
+        "TWO_STAGE_CORE_STAGE_A_OCCUPIED_THRESHOLD",
+        two_stage_core.stage_a_occupied_threshold,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    two_stage_core.stage_a_target_precision = _read_float_env(
+        env,
+        "TWO_STAGE_CORE_STAGE_A_TARGET_PRECISION",
+        two_stage_core.stage_a_target_precision,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    two_stage_core.stage_a_recall_floor = _read_float_env(
+        env,
+        "TWO_STAGE_CORE_STAGE_A_RECALL_FLOOR",
+        two_stage_core.stage_a_recall_floor,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    two_stage_core.stage_a_threshold_min = _read_float_env(
+        env,
+        "TWO_STAGE_CORE_STAGE_A_THRESHOLD_MIN",
+        two_stage_core.stage_a_threshold_min,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    two_stage_core.stage_a_threshold_max = _read_float_env(
+        env,
+        "TWO_STAGE_CORE_STAGE_A_THRESHOLD_MAX",
+        two_stage_core.stage_a_threshold_max,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    two_stage_core.stage_a_min_predicted_occupied_ratio = _read_float_env(
+        env,
+        "TWO_STAGE_CORE_STAGE_A_MIN_PRED_OCCUPIED_RATIO",
+        two_stage_core.stage_a_min_predicted_occupied_ratio,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    two_stage_core.stage_a_min_predicted_occupied_abs = _read_float_env(
+        env,
+        "TWO_STAGE_CORE_STAGE_A_MIN_PRED_OCCUPIED_ABS",
+        two_stage_core.stage_a_min_predicted_occupied_abs,
+        minimum=0.0,
+        maximum=1.0,
     )
     
     # Apply profile-specific overrides.

@@ -56,14 +56,14 @@ unoccupied_downsample:
     bathroom: 0.08
     bedroom: 0.60
     entrance: 0.08
-    livingroom: 0.12
+    livingroom: 0.30
     kitchen: 0.14
   stride_by_room:
     bathroom: 12
     bedroom: 2
     entrance: 14
     kitchen: 10
-    livingroom: 12
+    livingroom: 4
   max_post_downsample_prior_drift_by_room:
     entrance: 0.03
   prior_drift_guard_rooms:
@@ -117,6 +117,21 @@ training:
   timeline_native_rooms:
     - bedroom
     - livingroom
+  two_stage_core:
+    enabled: true
+    rooms:
+      - bedroom
+      - livingroom
+      - kitchen
+      - bathroom
+    gate_mode: primary
+    stage_a_occupied_threshold: 0.50
+    stage_a_target_precision: 0.70
+    stage_a_recall_floor: 0.20
+    stage_a_threshold_min: 0.00
+    stage_a_threshold_max: 0.95
+    stage_a_min_predicted_occupied_ratio: 0.50
+    stage_a_min_predicted_occupied_abs: 0.05
   factorized_primary_rooms:
     - bedroom
   post_split_shuffle_rooms:

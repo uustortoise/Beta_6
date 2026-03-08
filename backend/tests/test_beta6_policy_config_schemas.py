@@ -175,6 +175,30 @@ def test_beta6_runtime_eval_parity_yaml_schema():
     assert isinstance(policy, DecoderPolicy)
 
 
+def test_beta6_policy_defaults_yaml_includes_two_stage_core_training_contract():
+    path = CONFIG_DIR / "beta6_policy_defaults.yaml"
+    payload = _load_yaml(path)
+    _assert_version_v1(payload, path)
+
+    training = payload.get("training")
+    assert isinstance(training, dict), "training section must be a mapping"
+    two_stage = training.get("two_stage_core")
+    assert isinstance(two_stage, dict), "training.two_stage_core must be a mapping"
+    for key in (
+        "enabled",
+        "rooms",
+        "gate_mode",
+        "stage_a_occupied_threshold",
+        "stage_a_target_precision",
+        "stage_a_recall_floor",
+        "stage_a_threshold_min",
+        "stage_a_threshold_max",
+        "stage_a_min_predicted_occupied_ratio",
+        "stage_a_min_predicted_occupied_abs",
+    ):
+        assert key in two_stage, f"missing training.two_stage_core.{key}"
+
+
 def test_beta6_canary_gate_yaml_schema():
     path = CONFIG_DIR / "beta6_canary_gate.yaml"
     payload = _load_yaml(path)

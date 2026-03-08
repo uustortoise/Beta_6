@@ -11,6 +11,7 @@ from ml.policy_defaults import (
     get_calibration_precision_targets_by_label,
     get_calibration_recall_floors_by_label,
     get_clinical_priority_multipliers_by_label,
+    get_clinical_priority_multipliers_by_room_label,
     get_data_viability_max_unresolved_drop_ratio_by_room,
     get_data_viability_min_observed_days_by_room,
     get_data_viability_min_post_gap_rows_by_room,
@@ -333,7 +334,9 @@ class ClinicalPriorityPolicy:
     )
     class_weight_cap: float = 8.0
     class_weight_floor: float = 0.25
-    multipliers_by_room_label: dict[str, float] = field(default_factory=dict)
+    multipliers_by_room_label: dict[str, float] = field(
+        default_factory=get_clinical_priority_multipliers_by_room_label
+    )
 
     def get_multiplier(self, label_name: str | None) -> float:
         if not label_name:

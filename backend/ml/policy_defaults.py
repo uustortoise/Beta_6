@@ -48,6 +48,14 @@ def get_clinical_priority_multipliers_by_label() -> dict[str, float]:
     }
 
 
+def get_clinical_priority_multipliers_by_room_label() -> dict[str, float]:
+    return {
+        str(k).strip().lower(): float(v)
+        for k, v in _get_map("clinical_priority", "multipliers_by_room_label").items()
+        if str(k).strip()
+    }
+
+
 def get_calibration_precision_targets_by_label() -> dict[str, float]:
     return {
         str(k).strip().lower(): float(v)

@@ -215,6 +215,7 @@ _NESTED_SCHEMA_RULES: dict[str, dict[str, str]] = {
     },
     "beta6_policy_defaults.yaml": {
         "clinical_priority.multipliers_by_label": "mapping",
+        "clinical_priority.multipliers_by_room_label": "mapping",
         "calibration.precision_targets_by_label": "mapping",
         "calibration.recall_floors_by_label": "mapping",
         "unoccupied_downsample.min_share_by_room": "mapping",

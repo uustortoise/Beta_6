@@ -178,6 +178,18 @@ def test_room_label_clinical_priority_overrides_global_multiplier():
     assert policy.clinical_priority.get_room_label_multiplier("Kitchen", "unoccupied") == 0.9
 
 
+def test_production_defaults_neutralize_livingroom_room_label_clinical_priority():
+    policy = load_policy_from_env({})
+
+    assert policy.release_gate.evidence_profile == "production"
+    assert (
+        policy.clinical_priority.get_room_label_multiplier("LivingRoom", "livingroom_normal_use") == 1.0
+    )
+    assert policy.clinical_priority.get_room_label_multiplier("LivingRoom", "unoccupied") == 1.0
+    assert policy.clinical_priority.get_room_label_multiplier("Kitchen", "kitchen_normal_use") == 1.2
+    assert policy.clinical_priority.get_room_label_multiplier("Kitchen", "unoccupied") == 0.75
+
+
 def test_resampling_policy_parses_env_tokens():
     policy = load_policy_from_env({"MAX_RESAMPLE_FFILL_GAP_SECONDS": "unbounded"})
     assert policy.resampling.max_ffill_gap_seconds is None

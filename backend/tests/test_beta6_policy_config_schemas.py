@@ -303,3 +303,20 @@ def test_beta6_policy_defaults_yaml_supports_bedroom_entrance_fix_controls():
     assert isinstance(reproducibility, dict), "reproducibility section must be a mapping"
     assert isinstance(reproducibility.get("multi_seed_rooms"), list)
     assert isinstance(reproducibility.get("multi_seed_candidate_seeds"), list)
+
+
+def test_beta6_policy_defaults_yaml_includes_livingroom_room_label_clinical_priority_overrides():
+    path = CONFIG_DIR / "beta6_policy_defaults.yaml"
+    payload = _load_yaml(path)
+    _assert_version_v1(payload, path)
+
+    clinical_priority = payload.get("clinical_priority")
+    assert isinstance(clinical_priority, dict), "clinical_priority section must be a mapping"
+
+    room_label_overrides = clinical_priority.get("multipliers_by_room_label")
+    assert isinstance(
+        room_label_overrides,
+        dict,
+    ), "clinical_priority.multipliers_by_room_label must be a mapping"
+    assert room_label_overrides.get("livingroom.livingroom_normal_use") == 1.0
+    assert room_label_overrides.get("livingroom.unoccupied") == 1.0

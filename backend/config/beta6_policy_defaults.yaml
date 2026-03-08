@@ -19,6 +19,9 @@ clinical_priority:
     inactive: 0.85
     unoccupied: 0.75
     low_confidence: 0.60
+  multipliers_by_room_label:
+    livingroom.livingroom_normal_use: 1.0
+    livingroom.unoccupied: 1.0
 
 calibration:
   precision_targets_by_label:

@@ -59,14 +59,14 @@ unoccupied_downsample:
     bathroom: 0.08
     bedroom: 0.60
     entrance: 0.08
-    livingroom: 0.30
+    livingroom: 0.40
     kitchen: 0.14
   stride_by_room:
     bathroom: 12
     bedroom: 2
     entrance: 14
     kitchen: 10
-    livingroom: 4
+    livingroom: 3
   max_post_downsample_prior_drift_by_room:
     entrance: 0.03
   prior_drift_guard_rooms:

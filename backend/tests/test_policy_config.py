@@ -6,8 +6,8 @@ def test_load_policy_defaults_match_legacy_knobs():
     assert policy.unoccupied_downsample.min_share == 0.45
     assert policy.unoccupied_downsample.stride == 10
     livingroom_downsample = policy.unoccupied_downsample.resolve("LivingRoom")
-    assert livingroom_downsample["min_share"] == 0.30
-    assert livingroom_downsample["stride"] == 4
+    assert livingroom_downsample["min_share"] == 0.40
+    assert livingroom_downsample["stride"] == 3
     assert policy.minority_sampling.enabled is True
     assert policy.minority_sampling.target_share == 0.14
     assert policy.calibration.threshold_floor == 0.35
@@ -71,8 +71,8 @@ def test_load_policy_env_overrides_unoccupied_and_minority():
 def test_load_policy_defaults_include_livingroom_downsample_override():
     policy = load_policy_from_env({})
     livingroom_cfg = policy.unoccupied_downsample.resolve("LivingRoom")
-    assert livingroom_cfg["min_share"] == 0.30
-    assert livingroom_cfg["stride"] == 4
+    assert livingroom_cfg["min_share"] == 0.40
+    assert livingroom_cfg["stride"] == 3
 
 
 def test_empty_room_override_env_disables_default_room_map():

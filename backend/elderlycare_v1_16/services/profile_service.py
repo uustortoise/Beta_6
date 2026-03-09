@@ -3,8 +3,31 @@ import logging
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from .base_service import BaseService
+from processors.profile_processor import apply_resident_home_context_contract
 
 logger = logging.getLogger(__name__)
+
+
+def _decode_profile_blob(raw_value: Any) -> Dict[str, Any]:
+    if isinstance(raw_value, dict):
+        return dict(raw_value)
+    if isinstance(raw_value, str):
+        try:
+            parsed = json.loads(raw_value)
+        except Exception:
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _deep_merge_dicts(base: Dict[str, Any], updates: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(base)
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(dict(merged[key]), value)
+        else:
+            merged[key] = value
+    return merged
 
 class ProfileService(BaseService):
     """
@@ -15,28 +38,78 @@ class ProfileService(BaseService):
         """
         Create or update the master elder record.
         """
-        full_name = profile_data.get('personal_info', {}).get('full_name', f'Elder_{elder_id}')
-        dob = profile_data.get('personal_info', {}).get('date_of_birth')
-        gender = profile_data.get('personal_info', {}).get('gender')
-        blood_type = profile_data.get('personal_info', {}).get('blood_type')
-
         with self.db.get_connection() as conn:
+            existing_row = conn.execute(
+                """
+                SELECT full_name, date_of_birth, gender, blood_type, profile_data
+                FROM elders
+                WHERE elder_id = ?
+                """,
+                (elder_id,),
+            ).fetchone()
+            existing_profile = {}
+            if existing_row:
+                profile_blob = (
+                    existing_row["profile_data"]
+                    if hasattr(existing_row, "keys")
+                    else existing_row[4] if len(existing_row) > 4 else None
+                )
+                existing_profile = _decode_profile_blob(profile_blob)
+
+            merged_profile = _deep_merge_dicts(existing_profile, dict(profile_data or {}))
+            normalized_profile = apply_resident_home_context_contract(merged_profile)
+            personal_info = normalized_profile.get("personal_info", {})
+
+            existing_full_name = (
+                existing_row["full_name"]
+                if existing_row and hasattr(existing_row, "keys")
+                else existing_row[0] if existing_row else None
+            )
+            existing_dob = (
+                existing_row["date_of_birth"]
+                if existing_row and hasattr(existing_row, "keys")
+                else existing_row[1] if existing_row else None
+            )
+            existing_gender = (
+                existing_row["gender"]
+                if existing_row and hasattr(existing_row, "keys")
+                else existing_row[2] if existing_row else None
+            )
+            existing_blood_type = (
+                existing_row["blood_type"]
+                if existing_row and hasattr(existing_row, "keys")
+                else existing_row[3] if existing_row else None
+            )
+
+            full_name = personal_info.get('full_name') or existing_full_name or f'Elder_{elder_id}'
+            dob = personal_info.get('date_of_birth') or existing_dob
+            gender = personal_info.get('gender') or existing_gender
+            blood_type = personal_info.get('blood_type') or existing_blood_type
+
             conn.execute('''
-                INSERT INTO elders (elder_id, full_name, date_of_birth, gender, blood_type, last_updated)
-                VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                INSERT INTO elders (elder_id, full_name, date_of_birth, gender, blood_type, profile_data, last_updated)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                 ON CONFLICT(elder_id) DO UPDATE SET
                     full_name=excluded.full_name,
                     date_of_birth=excluded.date_of_birth,
                     gender=excluded.gender,
                     blood_type=excluded.blood_type,
+                    profile_data=excluded.profile_data,
                     last_updated=CURRENT_TIMESTAMP
-            ''', (elder_id, full_name, dob, gender, blood_type))
+            ''', (
+                elder_id,
+                full_name,
+                dob,
+                gender,
+                blood_type,
+                json.dumps(normalized_profile, default=str),
+            ))
             
             # Save Medical History Components
-            self._save_medical_history(conn, elder_id, profile_data.get('medical_history', {}))
+            self._save_medical_history(conn, elder_id, normalized_profile.get('medical_history', {}))
             
             # Save Emergency Contacts
-            self._save_contacts(conn, elder_id, profile_data.get('emergency_contacts', []))
+            self._save_contacts(conn, elder_id, normalized_profile.get('emergency_contacts', []))
             
             conn.commit()
             
@@ -51,7 +124,10 @@ class ProfileService(BaseService):
         with self.db.get_connection() as conn:
             # 1. Elder Info
             # Explicit column selection for tuple access
-            cur = conn.execute("SELECT full_name, date_of_birth, gender, blood_type FROM elders WHERE elder_id = ?", (elder_id,))
+            cur = conn.execute(
+                "SELECT full_name, date_of_birth, gender, blood_type, profile_data FROM elders WHERE elder_id = ?",
+                (elder_id,),
+            )
             elder = cur.fetchone()
             if not elder:
                 return {} # Or raise
@@ -66,12 +142,15 @@ class ProfileService(BaseService):
 
         # Reconstruct logical structure
         # Tuple indices: 0=full_name, 1=dob, 2=gender, 3=blood_type
-        profile = {
+        stored_profile = _decode_profile_blob(
+            elder["profile_data"] if hasattr(elder, "keys") else elder[4] if len(elder) > 4 else None
+        )
+        profile = _deep_merge_dicts(stored_profile, {
             "personal_info": {
-                "full_name": elder[0],
-                "date_of_birth": elder[1],
-                "gender": elder[2],
-                "blood_type": elder[3]
+                "full_name": elder["full_name"] if hasattr(elder, "keys") else elder[0],
+                "date_of_birth": elder["date_of_birth"] if hasattr(elder, "keys") else elder[1],
+                "gender": elder["gender"] if hasattr(elder, "keys") else elder[2],
+                "blood_type": elder["blood_type"] if hasattr(elder, "keys") else elder[3]
             },
             "medical_history": {
                 "chronic_conditions": [],
@@ -81,7 +160,8 @@ class ProfileService(BaseService):
                 "vaccinations": []
             },
             "emergency_contacts": []
-            }
+            })
+        profile = apply_resident_home_context_contract(profile)
         
         # Legacy flat keys kept for backward compatibility with older callers/tests.
         profile["full_name"] = profile["personal_info"]["full_name"]

@@ -1,6 +1,10 @@
 import pandas as pd
 
-from ml.beta6.active_learning import ActiveLearningPolicy, build_active_learning_queue
+from ml.beta6.active_learning import (
+    ActiveLearningPolicy,
+    build_active_learning_queue,
+    build_correction_learning_payloads,
+)
 
 
 def _candidates_frame() -> pd.DataFrame:
@@ -175,3 +179,69 @@ def test_active_learning_refills_after_caps_to_hit_queue_target():
     assert result["status"] == "pass"
     assert len(queue) == policy.queue_size
     assert queue["room"].value_counts().max() <= int(policy.queue_size * policy.max_share_per_room)
+
+
+def test_accepted_corrections_emit_boundary_and_hard_negative_payloads():
+    payloads = build_correction_learning_payloads(
+        [
+            {
+                "correction_id": 7,
+                "elder_id": "HK001",
+                "room": "bedroom",
+                "timestamp_start": "2026-03-09 10:00:00",
+                "timestamp_end": "2026-03-09 10:10:00",
+                "old_activity": "sleep",
+                "new_activity": "nap",
+                "triage_priority_score": 0.9,
+            }
+        ]
+    )
+
+    assert len(payloads) == 1
+    assert payloads[0]["boundary_target"]["onset_time"] == "2026-03-09 10:00:00"
+    assert payloads[0]["hard_negative"]["is_hard_negative"] is True
+    assert payloads[0]["residual_review_pack"]["priority_score"] == 0.9
+
+
+def test_active_learning_triage_prioritizes_high_yield_segments():
+    frame = pd.DataFrame(
+        [
+            {
+                "candidate_id": "low",
+                "room": "bedroom",
+                "activity": "sleep",
+                "confidence": 0.45,
+                "predicted_label": "sleep",
+                "baseline_label": "sleep",
+                "boundary_score": 0.0,
+                "rare_context_score": 0.0,
+                "hard_negative_flag": False,
+            },
+            {
+                "candidate_id": "high",
+                "room": "livingroom",
+                "activity": "watch_tv",
+                "confidence": 0.40,
+                "predicted_label": "watch_tv",
+                "baseline_label": "nap",
+                "boundary_score": 1.0,
+                "rare_context_score": 0.5,
+                "hard_negative_flag": True,
+            },
+        ]
+    )
+    result = build_active_learning_queue(
+        frame,
+        policy=ActiveLearningPolicy(
+            queue_size=2,
+            uncertainty_fraction=1.0,
+            disagreement_fraction=0.0,
+            diversity_fraction=0.0,
+            random_seed=5,
+        ),
+    )
+
+    queue = pd.DataFrame(result["queue"])
+    assert result["status"] == "pass"
+    assert queue.iloc[0]["candidate_id"] == "high"
+    assert queue.iloc[0]["training_signal_type"] == "hard_negative"

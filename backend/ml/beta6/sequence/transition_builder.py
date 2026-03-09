@@ -34,12 +34,55 @@ class DurationPriorPolicy:
     transition: TransitionPolicy
 
 
+@dataclass(frozen=True)
+class LayoutTransitionContext:
+    topology: Optional[str]
+    adjacency: Dict[str, Tuple[str, ...]]
+    cohort_key: Optional[str] = None
+    status: str = "missing_required_context"
+    missing_fields: Tuple[str, ...] = ()
+
+
 def _norm(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
 def _as_mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _extract_room_token(label: str, known_rooms: set[str]) -> Optional[str]:
+    token = _norm(label)
+    if token in known_rooms:
+        return token
+    for room in known_rooms:
+        if token.startswith(f"{room}:") or token.endswith(f":{room}"):
+            return room
+        if token.startswith(f"{room}_") or token.endswith(f"_{room}"):
+            return room
+    return None
+
+
+def build_layout_transition_context(resident_home_context: Optional[Mapping[str, Any]]) -> LayoutTransitionContext:
+    payload = _as_mapping(resident_home_context)
+    layout = _as_mapping(payload.get("layout"))
+    adjacency_payload = _as_mapping(layout.get("adjacency"))
+    adjacency: Dict[str, Tuple[str, ...]] = {}
+    for room, neighbors in adjacency_payload.items():
+        room_key = _norm(room)
+        if not room_key:
+            continue
+        if isinstance(neighbors, Sequence) and not isinstance(neighbors, (str, bytes)):
+            adjacency[room_key] = tuple(
+                sorted({_norm(item) for item in neighbors if _norm(item) and _norm(item) != room_key})
+            )
+    return LayoutTransitionContext(
+        topology=_norm(layout.get("topology")) or None,
+        adjacency=adjacency,
+        cohort_key=str(payload.get("cohort_key") or "").strip() or None,
+        status=str(payload.get("status") or "missing_required_context"),
+        missing_fields=tuple(str(item) for item in payload.get("missing_fields") or []),
+    )
 
 
 def load_duration_prior_policy(path: str | Path | None) -> DurationPriorPolicy:
@@ -92,9 +135,23 @@ def build_allowed_transition_map(
     labels: Sequence[str],
     *,
     disallowed_pairs: Optional[Iterable[Tuple[str, str]]] = None,
+    resident_home_context: Optional[Mapping[str, Any]] = None,
 ) -> Dict[Tuple[str, str], bool]:
     normalized = [_norm(label) for label in labels]
     disallowed = {(_norm(a), _norm(b)) for a, b in (disallowed_pairs or [])}
+    layout_context = build_layout_transition_context(resident_home_context)
+    if layout_context.adjacency and layout_context.status == "ready":
+        known_rooms = set(layout_context.adjacency.keys())
+        for src in normalized:
+            src_room = _extract_room_token(src, known_rooms)
+            if src_room is None:
+                continue
+            allowed_rooms = set(layout_context.adjacency.get(src_room, ())) | {src_room}
+            for dst in normalized:
+                dst_room = _extract_room_token(dst, known_rooms)
+                if dst_room is None or dst_room in allowed_rooms:
+                    continue
+                disallowed.add((src, dst))
     allowed: Dict[Tuple[str, str], bool] = {}
     for src in normalized:
         for dst in normalized:
@@ -159,7 +216,9 @@ def duration_log_penalty(
 __all__ = [
     "DurationPrior",
     "DurationPriorPolicy",
+    "LayoutTransitionContext",
     "TransitionPolicy",
+    "build_layout_transition_context",
     "build_allowed_transition_map",
     "build_transition_log_matrix",
     "duration_log_penalty",

@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from backend.health_server import (
     _read_runtime_fallback_by_room,
+    build_ready_report,
     build_ml_snapshot_report,
     build_promotion_gate_report,
     build_walk_forward_report,
@@ -167,6 +168,119 @@ def test_render_walk_forward_prometheus_metrics():
     assert 'beta_walk_forward_rooms_with_drift{elder_id="elder_123"} 1' in text
     assert 'beta_walk_forward_room_macro_f1_mean{elder_id="elder_123",room="bedroom"} 0.72' in text
     assert 'beta_walk_forward_room_drift_detected{elder_id="elder_123",room="bedroom"} 1' in text
+
+
+def test_build_ready_report_surfaces_authority_preflight_failure(monkeypatch):
+    class _ReadyChecker:
+        def check_readiness(self):
+            return {
+                "ready": True,
+                "timestamp": "2026-03-09T00:00:00",
+                "components": {
+                    "database": {"status": "healthy", "message": "Connected"},
+                    "models": {"status": "healthy", "message": "OK"},
+                },
+            }
+
+    monkeypatch.setattr(
+        "backend.health_server.beta6_daily_analysis.validate_beta6_live_authority_preflight",
+        lambda **kwargs: (
+            False,
+            {
+                "pass": False,
+                "reason": "postgres_unavailable",
+                "live_authority": True,
+                "signing_key_configured": True,
+                "evidence_profile_configured": True,
+                "evidence_profile": "production",
+                "postgres_reachable": False,
+                "postgres_error": "OperationalError: connection refused",
+            },
+        ),
+    )
+
+    report, status = build_ready_report(checker=_ReadyChecker())
+
+    assert status == 503
+    assert report["ready"] is False
+    assert report["reason_code"] == "postgres_unavailable"
+    assert report["components"]["beta6_authority"]["status"] == "unhealthy"
+    assert report["beta6_authority_preflight"]["postgres_reachable"] is False
+    assert "connection refused" in report["components"]["beta6_authority"]["postgres_error"]
+
+
+def test_health_snapshot_reports_resident_home_context_contract(monkeypatch):
+    class _Cursor:
+        description = (
+            ("training_date",),
+            ("status",),
+            ("accuracy",),
+            ("metadata",),
+        )
+
+        def execute(self, query, params):
+            self.query = query
+            self.params = params
+
+        def fetchall(self):
+            return [
+                (
+                    "2026-03-09 10:00:00",
+                    "success",
+                    0.91,
+                    {
+                        "metrics": [],
+                        "walk_forward_gate": {
+                            "room_reports": [
+                                {
+                                    "room": "Bedroom",
+                                    "pass": True,
+                                    "candidate_summary": {"macro_f1_mean": 0.82},
+                                    "candidate_wf_config": {"lookback_days": 30},
+                                }
+                            ]
+                        },
+                    },
+                )
+            ]
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _Adapter:
+        def get_connection(self):
+            return _Conn()
+
+    monkeypatch.setattr("backend.health_server.adapter", _Adapter())
+    monkeypatch.setattr(
+        "backend.health_server._load_resident_home_context_snapshot",
+        lambda elder_id: {
+            "status": "missing_required_context",
+            "missing_fields": ["helper_presence", "layout.topology"],
+            "household_type": "single_resident",
+            "helper_presence": None,
+            "layout": {"topology": None, "adjacency": {}},
+            "cohort_key": "single_resident:unknown_helper:unknown_topology",
+        },
+    )
+    monkeypatch.setattr(
+        "backend.health_server._read_runtime_fallback_by_room",
+        lambda elder_id, room_candidates: {},
+    )
+
+    report, status = build_ml_snapshot_report("elder1")
+
+    assert status == 200
+    assert report["resident_home_context"]["status"] == "missing_required_context"
+    assert report["timeline_reliability"]["context_contract_status"] == "missing_required_context"
+    assert "helper_presence" in report["timeline_reliability"]["context_missing_fields"]
 
 
 def test_read_runtime_fallback_by_room_reads_registry_state(tmp_path, monkeypatch):
@@ -510,6 +624,96 @@ def test_build_ml_snapshot_report_routes_routine_uncertainty_to_review_queue(mon
     assert room["room"] == "bedroom"
     assert room["status"] == "watch"
     assert room["review_queue_recommended"] is True
+
+
+def test_health_snapshot_includes_timeline_reliability_metrics(monkeypatch):
+    class _FakeCursor:
+        def execute(self, query, params):
+            self.query = query
+            self.params = params
+
+        def fetchall(self):
+            return [
+                {
+                    "training_date": "2026-02-27T09:12:00Z",
+                    "status": "success",
+                    "accuracy": 0.91,
+                    "metadata": {
+                        "metrics": [
+                            {
+                                "room": "LivingRoom",
+                                "timeline_metrics": {
+                                    "duration_mae_minutes": 5.0,
+                                    "fragmentation_rate": 0.22,
+                                },
+                                "unknown_rate": 0.10,
+                                "abstain_rate": 0.04,
+                            }
+                        ],
+                        "beta6_gate_report": {
+                            "phase6_shadow_compare": {
+                                "summary": {
+                                    "status": "watch",
+                                    "unexplained_divergence_rate": 0.12,
+                                }
+                            }
+                        },
+                        "phase6_stability": {
+                            "active_system": "beta6_authority",
+                            "rollout_stage": "full",
+                        },
+                        "beta6_live_authority_preflight": {"pass": True},
+                        "beta6_runtime_activation_preflight": {"pass": True},
+                        "room_policy_sensitivity": {
+                            "livingroom": {
+                                "status": "active_tuning",
+                                "indicator": "downsample_sensitive",
+                            }
+                        },
+                        "walk_forward_gate": {
+                            "pass": True,
+                            "reason": "all_rooms_passed",
+                            "room_reports": [
+                                {
+                                    "room": "LivingRoom",
+                                    "pass": True,
+                                    "candidate_summary": {"macro_f1_mean": 0.82},
+                                    "champion_macro_f1_mean": 0.78,
+                                    "reasons": [],
+                                }
+                            ],
+                        },
+                    },
+                }
+            ]
+
+    class _FakeConn:
+        def cursor(self):
+            return _FakeCursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _FakeAdapter:
+        def get_connection(self):
+            return _FakeConn()
+
+    monkeypatch.setattr("backend.health_server.adapter", _FakeAdapter())
+
+    report, status = build_ml_snapshot_report(elder_id="elder_123", lookback_runs=10, include_raw=False)
+
+    assert status == 200
+    reliability = report["timeline_reliability"]
+    assert reliability["contradiction_rate"] == pytest.approx(0.12)
+    assert reliability["fragmentation_rate"] == pytest.approx(0.22)
+    assert reliability["unknown_rate"] == pytest.approx(0.10)
+    assert reliability["abstain_rate"] == pytest.approx(0.04)
+    assert reliability["active_system"] == "beta6_authority"
+    assert reliability["authority_state"] == "ready"
+    assert reliability["room_policy_sensitivity"][0]["room"] == "livingroom"
 
 
 def test_build_ml_snapshot_report_runtime_fallback_overrides_metadata(monkeypatch):

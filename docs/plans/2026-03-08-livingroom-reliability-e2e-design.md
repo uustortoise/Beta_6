@@ -1,5 +1,7 @@
 # Livingroom Reliability End-to-End Design
 
+Superseded for the active Beta 6.1 / Beta 6.2 roadmap by [2026-03-09-beta61-beta62-reliable-activity-timeline-design.md](/Users/dicksonng/DT/Development/Beta_6/docs/plans/2026-03-09-beta61-beta62-reliable-activity-timeline-design.md).
+
 **Date:** 2026-03-08
 
 **Goal:** Fix Livingroom model promotion so collapsed or misleading fallback models do not ship, and extend the Streamlit review surfaces so operators can see truthful model quality, compare training truth against prediction output, and review uncertain blocks efficiently.

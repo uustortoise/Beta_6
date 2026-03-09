@@ -63,6 +63,22 @@ class EpisodeAttributeTargets:
         }
 
 
+@dataclass
+class EventNativeTargets:
+    onset_flags: np.ndarray
+    offset_flags: np.ndarray
+    continuity_flags: np.ndarray
+    duration_minutes: np.ndarray
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "onset_flags": self.onset_flags.tolist(),
+            "offset_flags": self.offset_flags.tolist(),
+            "continuity_flags": self.continuity_flags.tolist(),
+            "duration_minutes": self.duration_minutes.tolist(),
+        }
+
+
 def build_boundary_targets(
     labels: np.ndarray,
     window_duration_seconds: float = 10.0,
@@ -264,6 +280,43 @@ def build_episode_attribute_targets(
         episode_starts=episode_starts,
         episode_ends=episode_ends,
         episode_labels=episode_labels_list,
+    )
+
+
+def build_event_native_targets(
+    timestamps: np.ndarray,
+    labels: np.ndarray,
+    *,
+    window_duration_seconds: float = 10.0,
+    excluded_labels: frozenset = frozenset({'unoccupied', 'unknown'}),
+) -> EventNativeTargets:
+    boundary = build_boundary_targets(
+        labels,
+        window_duration_seconds=window_duration_seconds,
+        excluded_labels=excluded_labels,
+    )
+    continuity = np.zeros(len(labels), dtype=np.int32)
+    durations = np.zeros(len(labels), dtype=np.float32)
+
+    current_start = None
+    current_label = None
+    for idx, label in enumerate(labels):
+        if label in excluded_labels:
+            current_start = None
+            current_label = None
+            continue
+        if current_label != label or current_start is None:
+            current_start = idx
+            current_label = label
+        continuity[idx] = 1
+        run_windows = idx - current_start + 1
+        durations[idx] = float(run_windows * window_duration_seconds / 60.0)
+
+    return EventNativeTargets(
+        onset_flags=boundary.start_flags.astype(np.int32),
+        offset_flags=boundary.end_flags.astype(np.int32),
+        continuity_flags=continuity,
+        duration_minutes=durations,
     )
 
 

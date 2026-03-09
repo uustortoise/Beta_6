@@ -28,6 +28,9 @@ class TimelineMetrics:
     segment_duration_mae_minutes: float = 0.0
     episode_count_error: float = 0.0
     fragmentation_rate: float = 0.0
+    event_iou: float = 0.0
+    onset_tolerance_rate: float = 0.0
+    offset_tolerance_rate: float = 0.0
     
     # Episode-level details for debugging
     num_pred_episodes: int = 0
@@ -42,10 +45,49 @@ class TimelineMetrics:
             'segment_duration_mae_minutes': round(self.segment_duration_mae_minutes, 4),
             'episode_count_error': round(self.episode_count_error, 4),
             'fragmentation_rate': round(self.fragmentation_rate, 4),
+            'event_iou': round(self.event_iou, 4),
+            'onset_tolerance_rate': round(self.onset_tolerance_rate, 4),
+            'offset_tolerance_rate': round(self.offset_tolerance_rate, 4),
             'num_pred_episodes': self.num_pred_episodes,
             'num_gt_episodes': self.num_gt_episodes,
             'matched_episodes': self.matched_episodes,
         }
+
+
+def compute_event_level_quality(
+    pred_episodes: List[Dict[str, Any]],
+    gt_episodes: List[Dict[str, Any]],
+    matches: List[Tuple[int, int, float]],
+    *,
+    tolerance_minutes: float,
+) -> Tuple[float, float, float]:
+    if not matches:
+        return 0.0, 0.0, 0.0
+
+    iou_scores = []
+    onset_hits = 0
+    offset_hits = 0
+    tolerance_seconds = float(tolerance_minutes) * 60.0
+    for pred_idx, gt_idx, _ in matches:
+        pred_ep = pred_episodes[pred_idx]
+        gt_ep = gt_episodes[gt_idx]
+        pred_start = pd.to_datetime(pred_ep['start_time'])
+        pred_end = pd.to_datetime(pred_ep['end_time'])
+        gt_start = pd.to_datetime(gt_ep['start_time'])
+        gt_end = pd.to_datetime(gt_ep['end_time'])
+        intersection = max(0.0, (min(pred_end, gt_end) - max(pred_start, gt_start)).total_seconds())
+        union = max((max(pred_end, gt_end) - min(pred_start, gt_start)).total_seconds(), 1e-6)
+        iou_scores.append(intersection / union)
+        if abs((pred_start - gt_start).total_seconds()) <= tolerance_seconds:
+            onset_hits += 1
+        if abs((pred_end - gt_end).total_seconds()) <= tolerance_seconds:
+            offset_hits += 1
+    total = len(matches)
+    return (
+        float(np.mean(iou_scores)) if iou_scores else 0.0,
+        float(onset_hits) / float(total),
+        float(offset_hits) / float(total),
+    )
 
 
 def compute_fragmentation_rate(
@@ -288,13 +330,22 @@ def compute_timeline_metrics(
     
     # Episode count error
     count_error = abs(len(pred_episodes) - len(gt_episodes))
-    
+    event_iou, onset_tolerance_rate, offset_tolerance_rate = compute_event_level_quality(
+        pred_episodes,
+        gt_episodes,
+        matches,
+        tolerance_minutes=tolerance_minutes,
+    )
+
     return TimelineMetrics(
         segment_start_mae_minutes=start_mae,
         segment_end_mae_minutes=end_mae,
         segment_duration_mae_minutes=duration_mae,
         episode_count_error=count_error,
         fragmentation_rate=fragmentation,
+        event_iou=event_iou,
+        onset_tolerance_rate=onset_tolerance_rate,
+        offset_tolerance_rate=offset_tolerance_rate,
         num_pred_episodes=len(pred_episodes),
         num_gt_episodes=len(gt_episodes),
         matched_episodes=len(matches),

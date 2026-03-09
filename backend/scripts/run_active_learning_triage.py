@@ -53,6 +53,9 @@ def main() -> int:
         f"Queue rows={stats.get('queue_rows', 0)} "
         f"input_rows={stats.get('input_rows', 0)}"
     )
+    print(
+        f"Training-ready records={len(result.get('training_ready_records', []))}"
+    )
     return 0 if str(result.get("status")) == "pass" else 2
 
 

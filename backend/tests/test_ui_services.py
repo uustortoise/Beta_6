@@ -11,6 +11,7 @@ from services.correction_service import (
     find_nearest_activity_date,
     get_activity_timeline,
     get_activity_timeline_any_room,
+    get_correction_training_ready_records,
     get_low_confidence_queue,
     get_sensor_timeseries,
     get_training_timeline,
@@ -19,6 +20,7 @@ from services.correction_service import (
 )
 import services.ops_service as ops_service
 from services.ops_service import get_daily_ops_summary, get_model_status
+from services.correction_service import get_manual_review_scorecard
 
 
 def test_export_service_predicted_results(test_db):
@@ -239,6 +241,115 @@ def test_ops_service_daily_summary(test_db):
     assert summary["open_alerts"] == 1
     assert round(summary["hours_since_last_ingestion"]) == 2
     assert not summary["is_stale"] # 2 < 6 limit
+
+
+def test_ops_scorecard_includes_correction_volume_and_backlog(test_db, monkeypatch):
+    elder = "OPS_SCORE_1"
+    now = datetime.now()
+    monkeypatch.setattr(
+        ops_service,
+        "build_ml_snapshot_report",
+        lambda **kwargs: (
+            {
+                "timeline_reliability": {
+                    "contradiction_rate": 0.12,
+                    "fragmentation_rate": 0.18,
+                    "unknown_rate": 0.08,
+                    "abstain_rate": 0.04,
+                    "active_system": "beta6_authority",
+                    "authority_state": "ready",
+                    "room_policy_sensitivity": [{"room": "livingroom", "indicator": "active_tuning"}],
+                }
+            },
+            200,
+        ),
+    )
+    with test_db.get_connection() as conn:
+        conn.execute("INSERT INTO elders (elder_id, full_name) VALUES (?, ?)", (elder, "Ops Score"))
+        conn.execute(
+            """
+            INSERT INTO adl_history
+            (elder_id, timestamp, room, activity_type, confidence, is_corrected, record_date, duration_minutes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (elder, now.strftime("%Y-%m-%d %H:%M:%S"), "livingroom", "low_confidence", 0.22, 0, now.date().isoformat(), 10),
+        )
+        conn.execute(
+            """
+            INSERT INTO correction_history
+            (elder_id, room, timestamp_start, timestamp_end, old_activity, new_activity, rows_affected, corrected_by, corrected_at, is_deleted)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                elder,
+                "livingroom",
+                now.strftime("%Y-%m-%d %H:%M:%S"),
+                now.strftime("%Y-%m-%d %H:%M:%S"),
+                "low_confidence",
+                "watch_tv",
+                1,
+                "tester",
+                now.strftime("%Y-%m-%d %H:%M:%S"),
+                0,
+            ),
+        )
+        conn.commit()
+
+    scorecard = ops_service.get_timeline_reliability_scorecard(elder, review_days=7)
+    assert scorecard["correction_volume"] == 1
+    assert scorecard["review_backlog"] == 1
+    assert scorecard["contradiction_rate"] == pytest.approx(0.12)
+    assert scorecard["authority_state"] == "ready"
+
+
+def test_review_ui_exposes_manual_review_rate(test_db):
+    elder = "OPS_SCORE_2"
+    now = datetime.now()
+    with test_db.get_connection() as conn:
+        conn.execute("INSERT INTO elders (elder_id, full_name) VALUES (?, ?)", (elder, "Manual Review"))
+        for idx, confidence in enumerate((0.20, 0.35, 0.95), start=1):
+            conn.execute(
+                """
+                INSERT INTO adl_history
+                (elder_id, timestamp, room, activity_type, confidence, is_corrected, record_date, duration_minutes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    elder,
+                    (now + pd.Timedelta(minutes=idx)).strftime("%Y-%m-%d %H:%M:%S"),
+                    "bedroom",
+                    "low_confidence" if confidence < 0.5 else "sleep",
+                    confidence,
+                    0,
+                    now.date().isoformat(),
+                    10,
+                ),
+            )
+        conn.execute(
+            """
+            INSERT INTO correction_history
+            (elder_id, room, timestamp_start, timestamp_end, old_activity, new_activity, rows_affected, corrected_by, corrected_at, is_deleted)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                elder,
+                "bedroom",
+                now.strftime("%Y-%m-%d %H:%M:%S"),
+                now.strftime("%Y-%m-%d %H:%M:%S"),
+                "low_confidence",
+                "sleep",
+                1,
+                "tester",
+                now.strftime("%Y-%m-%d %H:%M:%S"),
+                0,
+            ),
+        )
+        conn.commit()
+
+    scorecard = get_manual_review_scorecard(elder, days=7, threshold=0.5)
+    assert scorecard["review_backlog"] == 2
+    assert scorecard["correction_volume"] == 1
+    assert scorecard["manual_review_rate"] == pytest.approx(1 / 3)
 
 
 def test_ops_service_sample_collection_uses_adl_day_coverage(test_db):
@@ -795,3 +906,37 @@ def test_correction_service_preview_batch_detects_overlap(test_db):
     assert not preview["ok"]
     assert preview["has_invalid"]
     assert preview["has_overlap"]
+
+
+def test_correction_queue_outputs_training_ready_records(test_db):
+    elder_id = "HK900"
+    with test_db.get_connection() as conn:
+        conn.execute(
+            "INSERT INTO elders (elder_id, full_name, profile_data) VALUES (?, ?, ?)",
+            (elder_id, "Test", "{}"),
+        )
+        conn.execute(
+            """
+            INSERT INTO correction_history
+            (id, elder_id, room, timestamp_start, timestamp_end, old_activity, new_activity, corrected_by, corrected_at, is_deleted)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            """,
+            (
+                1,
+                elder_id,
+                "Bedroom",
+                "2026-03-09 10:00:00",
+                "2026-03-09 10:10:00",
+                "sleep",
+                "nap",
+                "tester",
+                "2026-03-09 10:15:00",
+            ),
+        )
+        conn.commit()
+
+    records = get_correction_training_ready_records(elder_id, days=30)
+
+    assert len(records) == 1
+    assert records[0]["corrected_event"]["label"] == "nap"
+    assert records[0]["hard_negative"]["is_hard_negative"] is True

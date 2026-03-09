@@ -736,6 +736,11 @@ def render_ml_health_snapshot_panel(snapshot: dict, panel_scope: str = "weekly",
     report = snapshot if isinstance(snapshot, dict) else {}
     status = report.get("status", {}) if isinstance(report.get("status"), dict) else {}
     rooms = report.get("rooms", []) if isinstance(report.get("rooms"), list) else []
+    resident_home_context = (
+        report.get("resident_home_context", {})
+        if isinstance(report.get("resident_home_context"), dict)
+        else {}
+    )
     overall_status = str(status.get("overall") or "not_available").lower()
     overall_reason = str(status.get("reason") or "No model-health details available.")
     freshness_hours = status.get("data_freshness_hours")
@@ -784,6 +789,32 @@ def render_ml_health_snapshot_panel(snapshot: dict, panel_scope: str = "weekly",
     top2.metric("Transition Quality", _ml_snapshot_metric(metrics.get("candidate_transition_macro_f1_mean")))
     top3.metric("Safety Drift Threshold", _ml_snapshot_metric(drift, digits=2))
     top4.metric("Safety Status", _ml_snapshot_label(primary.get("status")))
+
+    if resident_home_context:
+        ctx1, ctx2, ctx3, ctx4 = st.columns(4)
+        ctx1.metric(
+            "Household Context",
+            str(resident_home_context.get("household_type") or "missing").replace("_", " ").title(),
+        )
+        ctx2.metric(
+            "Helper Presence",
+            str(resident_home_context.get("helper_presence") or "missing").replace("_", " ").title(),
+        )
+        layout = resident_home_context.get("layout", {}) if isinstance(resident_home_context.get("layout"), dict) else {}
+        ctx3.metric(
+            "Layout Topology",
+            str(layout.get("topology") or "missing").replace("_", " ").title(),
+        )
+        ctx4.metric(
+            "Context Contract",
+            str(resident_home_context.get("status") or "unknown").replace("_", " ").title(),
+        )
+        missing_fields = resident_home_context.get("missing_fields", [])
+        if isinstance(missing_fields, list) and missing_fields:
+            st.warning(
+                "Resident/home context is incomplete: "
+                + ", ".join(str(item) for item in missing_fields)
+            )
 
     if compact:
         sec1, sec2, sec3, sec4 = st.columns(4)

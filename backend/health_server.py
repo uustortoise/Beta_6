@@ -29,6 +29,7 @@ from urllib.parse import urlparse, parse_qs
 import os
 import numpy as np
 import pandas as pd
+from processors.profile_processor import normalize_resident_home_context
 
 # Add backend to path
 BACKEND_DIR = Path(__file__).resolve().parent
@@ -68,6 +69,10 @@ except ImportError:
     from elderlycare_v1_16.database import db as adapter
 else:
     adapter = LegacyDatabaseAdapter()
+try:
+    from backend import run_daily_analysis as beta6_daily_analysis
+except Exception:
+    import run_daily_analysis as beta6_daily_analysis
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -80,6 +85,43 @@ health_checker = HealthChecker(
     models_dir=MODELS_DIR,
     check_postgresql=True
 )
+
+
+def build_ready_report(*, checker: HealthChecker | None = None) -> tuple[dict, int]:
+    checker = checker or health_checker
+    readiness = checker.check_readiness()
+    authority_ok, authority_report = beta6_daily_analysis.validate_beta6_live_authority_preflight(
+        live_authority=True,
+        require_postgres=True,
+    )
+
+    components = dict(readiness.get("components") or {})
+    components["beta6_authority"] = {
+        "status": "healthy" if authority_ok else "unhealthy",
+        "message": str(authority_report.get("reason") or "ok"),
+        "live_authority": bool(authority_report.get("live_authority")),
+        "signing_key_configured": bool(authority_report.get("signing_key_configured")),
+        "evidence_profile_configured": bool(authority_report.get("evidence_profile_configured")),
+        "evidence_profile": authority_report.get("evidence_profile"),
+        "postgres_reachable": authority_report.get("postgres_reachable"),
+        "postgres_error": authority_report.get("postgres_error"),
+    }
+
+    ready = bool(readiness.get("ready")) and bool(authority_ok)
+    if not authority_ok:
+        reason_code = str(authority_report.get("reason") or "beta6_authority_preflight_failed")
+    elif not bool(readiness.get("ready")):
+        reason_code = "component_unready"
+    else:
+        reason_code = "ok"
+
+    return {
+        **dict(readiness),
+        "ready": ready,
+        "reason_code": reason_code,
+        "components": components,
+        "beta6_authority_preflight": dict(authority_report),
+    }, (200 if ready else 503)
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -113,8 +155,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             
         elif path == '/health/ready':
             # Readiness check
-            result = health_checker.check_readiness()
-            status = 200 if result['ready'] else 503
+            result, status = build_ready_report()
             self._send_json(result, status)
             
         elif path == '/health/deep':
@@ -948,6 +989,136 @@ def _extract_room_reports_from_metadata(metadata: dict) -> list[dict]:
     return room_reports if isinstance(room_reports, list) else []
 
 
+def _load_resident_home_context_snapshot(elder_id: str) -> dict:
+    if not str(elder_id or "").strip():
+        return normalize_resident_home_context({})
+    try:
+        with adapter.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT profile_data FROM elders WHERE elder_id = ?", (elder_id,))
+            row = cursor.fetchone()
+    except Exception:
+        return normalize_resident_home_context({})
+
+    if row is None:
+        return normalize_resident_home_context({})
+    if isinstance(row, dict):
+        raw_value = row.get("profile_data")
+    elif hasattr(row, "keys"):
+        raw_value = row["profile_data"]
+    else:
+        raw_value = row[0] if len(row) > 0 else None
+
+    if isinstance(raw_value, str):
+        try:
+            payload = json.loads(raw_value)
+        except Exception:
+            payload = {}
+    elif isinstance(raw_value, dict):
+        payload = raw_value
+    else:
+        payload = {}
+    return normalize_resident_home_context(payload)
+
+
+def _build_timeline_reliability_metrics(
+    latest_metadata: dict,
+    *,
+    rooms: list[dict],
+    resident_home_context: dict | None = None,
+) -> dict:
+    metrics_rows = latest_metadata.get("metrics", []) if isinstance(latest_metadata, dict) else []
+    fragmentation_values: list[float] = []
+    unknown_values: list[float] = []
+    abstain_values: list[float] = []
+    if isinstance(metrics_rows, list):
+        for item in metrics_rows:
+            if not isinstance(item, dict):
+                continue
+            timeline = item.get("timeline_metrics", {})
+            if isinstance(timeline, dict):
+                fragmentation = _safe_float(timeline.get("fragmentation_rate"))
+                if fragmentation is not None:
+                    fragmentation_values.append(fragmentation)
+            unknown_rate = _safe_float(item.get("unknown_rate"))
+            if unknown_rate is not None:
+                unknown_values.append(unknown_rate)
+            abstain_rate = _safe_float(item.get("abstain_rate"))
+            if abstain_rate is not None:
+                abstain_values.append(abstain_rate)
+
+    beta6_gate_report = latest_metadata.get("beta6_gate_report", {}) if isinstance(latest_metadata, dict) else {}
+    beta6_gate_report = beta6_gate_report if isinstance(beta6_gate_report, dict) else {}
+    shadow_compare = beta6_gate_report.get("phase6_shadow_compare", {})
+    shadow_compare = shadow_compare if isinstance(shadow_compare, dict) else {}
+    shadow_summary = shadow_compare.get("summary", {})
+    shadow_summary = shadow_summary if isinstance(shadow_summary, dict) else {}
+    contradiction_rate = _safe_float(shadow_summary.get("unexplained_divergence_rate"))
+
+    stability = latest_metadata.get("phase6_stability", {}) if isinstance(latest_metadata, dict) else {}
+    stability = stability if isinstance(stability, dict) else {}
+    active_system = str(stability.get("active_system") or "").strip() or None
+
+    live_authority = latest_metadata.get("beta6_live_authority_preflight", {})
+    live_authority = live_authority if isinstance(live_authority, dict) else {}
+    runtime_preflight = latest_metadata.get("beta6_runtime_activation_preflight", {})
+    runtime_preflight = runtime_preflight if isinstance(runtime_preflight, dict) else {}
+    if live_authority.get("pass") is True and runtime_preflight.get("pass", True) is True:
+        authority_state = "ready"
+    elif live_authority or runtime_preflight:
+        authority_state = "blocked"
+    else:
+        authority_state = "unknown"
+
+    room_policy_sensitivity: list[dict] = []
+    sensitivity_payload = latest_metadata.get("room_policy_sensitivity", {}) if isinstance(latest_metadata, dict) else {}
+    if isinstance(sensitivity_payload, dict):
+        for room_name, payload in sensitivity_payload.items():
+            if not isinstance(payload, dict):
+                continue
+            room_policy_sensitivity.append(
+                {
+                    "room": normalize_room_name(room_name) or str(room_name).strip().lower(),
+                    "status": str(payload.get("status") or "").strip() or None,
+                    "indicator": str(payload.get("indicator") or "").strip() or None,
+                }
+            )
+
+    manual_review_rooms = sum(1 for room_item in rooms if bool(room_item.get("review_queue_recommended")))
+    manual_review_rate = (
+        float(manual_review_rooms) / float(len(rooms))
+        if isinstance(rooms, list) and len(rooms) > 0
+        else None
+    )
+
+    def _avg(values: list[float]) -> float | None:
+        return float(sum(values) / len(values)) if values else None
+
+    resident_context = resident_home_context if isinstance(resident_home_context, dict) else {}
+
+    return {
+        "contradiction_rate": contradiction_rate,
+        "fragmentation_rate": _avg(fragmentation_values),
+        "unknown_rate": _avg(unknown_values),
+        "abstain_rate": _avg(abstain_values),
+        "manual_review_rate": manual_review_rate,
+        "active_system": active_system,
+        "authority_state": authority_state,
+        "context_contract_status": resident_context.get("status"),
+        "context_missing_fields": resident_context.get("missing_fields", []),
+        "context_cohort": resident_context.get("cohort_key"),
+        "layout_topology": (
+            resident_context.get("layout", {}).get("topology")
+            if isinstance(resident_context.get("layout"), dict)
+            else None
+        ),
+        "room_policy_sensitivity": sorted(
+            room_policy_sensitivity,
+            key=lambda item: str(item.get("room") or ""),
+        ),
+    }
+
+
 def build_ml_snapshot_report(
     elder_id: str,
     room: str = "",
@@ -1375,6 +1546,7 @@ def build_ml_snapshot_report(
         cleaned.pop("status_reason", None)
         cleaned.pop("status_reason_code", None)
         normalized_rooms.append(cleaned)
+    resident_home_context = _load_resident_home_context_snapshot(elder_id)
 
     return {
         "elder_id": elder_id,
@@ -1392,7 +1564,13 @@ def build_ml_snapshot_report(
             "lookback_runs": int(lookback_runs),
             "lookback_days": _safe_int(latest_wf_config.get("lookback_days")),
         },
+        "resident_home_context": resident_home_context,
         "rooms": normalized_rooms,
+        "timeline_reliability": _build_timeline_reliability_metrics(
+            latest_metadata,
+            rooms=normalized_rooms,
+            resident_home_context=resident_home_context,
+        ),
         "raw": raw_items if include_raw else None,
     }, 200
 

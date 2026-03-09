@@ -4,6 +4,8 @@ import numpy as np
 import json
 from pathlib import Path
 from datetime import datetime, timedelta
+from typing import Dict
+from processors.profile_processor import normalize_resident_home_context
 
 # Configuration
 from config import DB_PATH
@@ -55,6 +57,32 @@ class HouseholdAnalyzer:
         except Exception as e:
             logger.error(f"Failed to load config: {e}")
             return defaults
+
+    def get_resident_home_context(self, elder_id: str) -> Dict[str, object]:
+        """Load typed resident/home context from elder profile_data."""
+        try:
+            with self._get_connection() as conn:
+                df = self._query_to_dataframe(
+                    conn,
+                    "SELECT profile_data FROM elders WHERE elder_id = ? LIMIT 1",
+                    (elder_id,),
+                )
+            if df.empty:
+                return normalize_resident_home_context({})
+            raw_value = df.iloc[0].get("profile_data")
+            if isinstance(raw_value, str):
+                try:
+                    payload = json.loads(raw_value)
+                except Exception:
+                    payload = {}
+            elif isinstance(raw_value, dict):
+                payload = raw_value
+            else:
+                payload = {}
+            return normalize_resident_home_context(payload)
+        except Exception as e:
+            logger.warning("Failed to load resident/home context for %s: %s", elder_id, e)
+            return normalize_resident_home_context({})
 
     def apply_conflict_resolution(self, df_min: pd.DataFrame) -> pd.DataFrame:
         """
@@ -156,6 +184,13 @@ class HouseholdAnalyzer:
             raise ValueError(f"date_str must be in YYYY-MM-DD format, got: '{date_str}'")
         
         config = self.get_config()
+        resident_context = self.get_resident_home_context(elder_id)
+        context_household_type = resident_context.get("household_type")
+        context_helper_presence = resident_context.get("helper_presence")
+        has_secondary_people = (
+            context_household_type == "multi_resident"
+            or context_helper_presence in {"scheduled", "live_in"}
+        )
         if not config['enable_empty_home_detection']:
             logger.info("Empty Home detection disabled in config.")
             return
@@ -202,7 +237,7 @@ class HouseholdAnalyzer:
                     return
 
                 # 2b. Apply Conflict Resolution for DOUBLE households
-                if config.get('household_type', 'single') == 'double':
+                if config.get('household_type', 'single') == 'double' or has_secondary_people:
                     logger.info("Applying Double-Household Conflict Resolution...")
                     df_min = self.apply_conflict_resolution(df_min)
 
@@ -250,12 +285,28 @@ class HouseholdAnalyzer:
                     if entrance_out:
                         if not rest_active:
                             state = 'empty_home'
-                            evidence = {"trigger": "entrance_out", "silence": True}
+                            evidence = {
+                                "trigger": "entrance_out",
+                                "silence": True,
+                                "context_household_type": context_household_type,
+                                "context_helper_presence": context_helper_presence,
+                                "context_topology": (
+                                    resident_context.get("layout", {}).get("topology")
+                                    if isinstance(resident_context.get("layout"), dict)
+                                    else None
+                                ),
+                                "context_status": resident_context.get("status"),
+                            }
                         else:
                             # Entrance says out, but someone is in kitchen? 
                             # Conflict! For now, safer to assume Home Active (maybe guest, or mis-classification)
                             state = 'home_active' 
-                            evidence = {"trigger": "conflict", "active_rooms": active_rooms}
+                            evidence = {
+                                "trigger": "conflict",
+                                "active_rooms": active_rooms,
+                                "context_household_type": context_household_type,
+                                "context_helper_presence": context_helper_presence,
+                            }
                     else:
                         # Entrance NOT out.
                         if not rest_active:

@@ -38,6 +38,7 @@ from elderlycare_v1_16.config.settings import (
     PROJECT_ROOT, MODELS_DIR, DEFAULT_SENSOR_COLUMNS,
     DEFAULT_EPOCHS
 )
+from ml.beta6.data_manifest import evaluate_beta62_corpus_contract, load_manifest
 from ml.beta6.gates.intake_precheck import IntakeGateBlockedError, enforce_approved_intake_artifact
 from ml.beta6.training.fine_tune_safe_classes import run_safe_class_finetune
 from ml.beta6.training.self_supervised_pretrain import (
@@ -50,6 +51,71 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+BETA62_AUTHORITATIVE_MODULE = "ml.beta6.training.beta6_trainer"
+BETA62_MODULE_SURFACE = "training"
+DEFAULT_DEMOGRAPHIC_CONTEXT_FIELDS: tuple[str, ...] = ()
+
+
+def evaluate_pretrain_manifest_intake_gate(
+    manifest_path: str | Path,
+    *,
+    required_residents: int = 20,
+    required_days: int = 14,
+) -> Dict[str, Any]:
+    manifest = load_manifest(manifest_path)
+    return evaluate_beta62_corpus_contract(
+        manifest,
+        required_residents=required_residents,
+        required_days=required_days,
+    )
+
+
+def build_timeline_native_training_flags(*, offline_only: bool = True) -> Dict[str, Any]:
+    return {
+        "offline_only": bool(offline_only),
+        "enable_onset_head": True,
+        "enable_offset_head": True,
+        "enable_duration_targets": True,
+        "enable_continuity_targets": True,
+    }
+
+
+def build_beta62_context_features(
+    resident_home_context: Dict[str, Any] | None,
+    *,
+    include_demographics: bool = False,
+) -> Dict[str, Any]:
+    context = resident_home_context if isinstance(resident_home_context, dict) else {}
+    layout = context.get("layout", {}) if isinstance(context.get("layout"), dict) else {}
+    features = {
+        "household_type": context.get("household_type"),
+        "helper_presence": context.get("helper_presence"),
+        "layout_topology": layout.get("topology"),
+        "adjacency_degree": len(layout.get("adjacency", {})) if isinstance(layout.get("adjacency"), dict) else 0,
+        "demographic_fields": list(DEFAULT_DEMOGRAPHIC_CONTEXT_FIELDS if include_demographics else ()),
+    }
+    return features
+
+
+def should_eliminate_candidate_early(
+    candidate_metrics: Dict[str, Any],
+    *,
+    min_event_iou: float = 0.25,
+    max_fragmentation_rate: float = 1.5,
+) -> Dict[str, Any]:
+    event_iou = float(candidate_metrics.get("event_iou", 0.0) or 0.0)
+    fragmentation_rate = float(candidate_metrics.get("fragmentation_rate", 0.0) or 0.0)
+    should_eliminate = event_iou < float(min_event_iou) or fragmentation_rate > float(max_fragmentation_rate)
+    reasons = []
+    if event_iou < float(min_event_iou):
+        reasons.append("event_iou_below_floor")
+    if fragmentation_rate > float(max_fragmentation_rate):
+        reasons.append("fragmentation_above_cap")
+    return {
+        "should_eliminate": should_eliminate,
+        "reason_codes": reasons,
+    }
 
 
 # =============================================================================

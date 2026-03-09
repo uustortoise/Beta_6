@@ -182,6 +182,14 @@ def get_runtime_wf_min_minority_support_by_room() -> dict[str, int]:
     }
 
 
+def get_room_diagnostic_profiles_default() -> dict[str, dict[str, Any]]:
+    return {
+        str(k).strip().lower(): dict(v)
+        for k, v in _get_map("diagnostic_profiles").items()
+        if str(k).strip() and isinstance(v, Mapping)
+    }
+
+
 def get_minority_sampling_target_share_by_room() -> dict[str, float]:
     return {
         str(k).strip().lower(): float(v)

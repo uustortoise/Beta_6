@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS elders (
     date_of_birth DATE,
     gender TEXT,
     blood_type TEXT,
+    profile_data JSON,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_updated TIMESTAMP
 );

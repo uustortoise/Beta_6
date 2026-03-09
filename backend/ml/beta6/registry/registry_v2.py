@@ -11,6 +11,9 @@ from ..contracts.decisions import ReasonCode
 from ..contracts.events import DecisionEvent, EventType
 from .registry_events import event_to_record
 
+BETA62_AUTHORITATIVE_MODULE = "ml.beta6.registry.registry_v2"
+BETA62_MODULE_SURFACE = "registry"
+
 
 class RegistryV2:
     """Minimal registry API used in Beta 6 Phase 1 scaffolding."""
@@ -144,13 +147,33 @@ class RegistryV2:
         current_pointer: Optional[Dict[str, object]],
         history: List[Dict[str, object]],
         fallback_candidate_id: Optional[str],
+        fallback_state: Optional[Mapping[str, object]] = None,
     ) -> Optional[Dict[str, object]]:
+        current_signature = self._pointer_signature(current_pointer)
+
+        def _coerce_pointer(raw: object, *, allow_current: bool) -> Optional[Dict[str, object]]:
+            if not isinstance(raw, Mapping):
+                return None
+            pointer = dict(raw)
+            if not allow_current and self._pointer_signature(pointer) == current_signature:
+                return None
+            return pointer
+
         if fallback_candidate_id:
             if (
                 isinstance(current_pointer, Mapping)
                 and str(current_pointer.get("candidate_id")) == str(fallback_candidate_id)
             ):
                 return dict(current_pointer)
+            for candidate in (
+                (fallback_state or {}).get("active_pointer"),
+                (fallback_state or {}).get("previous_pointer"),
+            ):
+                pointer = _coerce_pointer(candidate, allow_current=True)
+                if isinstance(pointer, Mapping) and str(pointer.get("candidate_id")) == str(
+                    fallback_candidate_id
+                ):
+                    return dict(pointer)
             for entry in reversed(history):
                 pointer = entry.get("pointer")
                 if isinstance(pointer, Mapping) and str(pointer.get("candidate_id")) == str(
@@ -158,13 +181,35 @@ class RegistryV2:
                 ):
                     return dict(pointer)
             return None
-        if isinstance(current_pointer, Mapping):
-            return dict(current_pointer)
+
+        previous_pointer = _coerce_pointer((fallback_state or {}).get("previous_pointer"), allow_current=False)
+        if previous_pointer is not None:
+            return previous_pointer
+
+        for entry in reversed(history):
+            pointer = _coerce_pointer(entry.get("pointer"), allow_current=False)
+            if pointer is not None:
+                return pointer
+
         if history:
-            pointer = history[-1].get("pointer")
-            if isinstance(pointer, Mapping):
-                return dict(pointer)
+            pointer = _coerce_pointer(history[-1].get("pointer"), allow_current=True)
+            if pointer is not None and current_pointer is None:
+                return pointer
         return None
+
+    def resolve_fallback_target(
+        self,
+        *,
+        elder_id: str,
+        room: str,
+        fallback_candidate_id: Optional[str] = None,
+    ) -> Optional[Dict[str, object]]:
+        return self._resolve_fallback_target(
+            current_pointer=self.read_champion_pointer(elder_id, room),
+            history=self.read_pointer_history(elder_id, room),
+            fallback_candidate_id=fallback_candidate_id,
+            fallback_state=self.read_fallback_state(elder_id, room),
+        )
 
     @staticmethod
     def _pointer_signature(pointer: Optional[Mapping[str, object]]) -> tuple[object, object]:
@@ -205,10 +250,12 @@ class RegistryV2:
 
         current_pointer = self.read_champion_pointer(elder_id, room)
         history = self.read_pointer_history(elder_id, room)
+        fallback_state = self.read_fallback_state(elder_id, room)
         target_pointer = self._resolve_fallback_target(
             current_pointer=current_pointer,
             history=history,
             fallback_candidate_id=fallback_candidate_id,
+            fallback_state=fallback_state,
         )
         if target_pointer is None:
             self.append_event(
@@ -392,6 +439,7 @@ class RegistryV2:
             "rollback_error": None,
             "rollback_pointer": None,
             "fallback_state": None,
+            "error": None,
         }
 
         candidate_hint = fallback_candidate_id
@@ -404,28 +452,32 @@ class RegistryV2:
         except ValueError as exc:
             result["rollback_error"] = str(exc)
             rollback_reason = ReasonCode.ROLLBACK_MISSING_TARGET.value
-            current_pointer = self.read_champion_pointer(elder_id, room)
-            if isinstance(current_pointer, Mapping):
-                candidate_hint = str(current_pointer.get("candidate_id") or "") or candidate_hint
+            safe_pointer = self.resolve_fallback_target(elder_id=elder_id, room=room)
+            if isinstance(safe_pointer, Mapping):
+                candidate_hint = str(safe_pointer.get("candidate_id") or "") or candidate_hint
 
         fallback_reason = str(trigger_reason_code or "").strip() or rollback_reason
         merged_flags = dict(fallback_flags or {})
         merged_flags.setdefault("operator_safe_mode", True)
         merged_flags.setdefault("serving_mode", "rule_hmm_baseline")
 
-        fallback_state = self.activate_fallback_mode(
-            elder_id=elder_id,
-            room=room,
-            run_id=run_id,
-            trigger_reason_code=fallback_reason,
-            fallback_candidate_id=candidate_hint,
-            fallback_flags=merged_flags,
-            metadata={
-                "auto_rollback_reason": rollback_reason,
-                "trigger_reason_code": fallback_reason,
-                **dict(metadata or {}),
-            },
-        )
+        try:
+            fallback_state = self.activate_fallback_mode(
+                elder_id=elder_id,
+                room=room,
+                run_id=run_id,
+                trigger_reason_code=fallback_reason,
+                fallback_candidate_id=candidate_hint,
+                fallback_flags=merged_flags,
+                metadata={
+                    "auto_rollback_reason": rollback_reason,
+                    "trigger_reason_code": fallback_reason,
+                    **dict(metadata or {}),
+                },
+            )
+        except ValueError as exc:
+            result["error"] = str(exc)
+            return result
         result["fallback_state"] = fallback_state
         return result
 

@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import pandas as pd
 
@@ -55,3 +56,5 @@ def test_active_learning_triage_script_writes_outputs(tmp_path: Path, monkeypatc
     assert rc == 0
     assert output_csv.exists()
     assert report_json.exists()
+    report = json.loads(report_json.read_text(encoding="utf-8"))
+    assert len(report["training_ready_records"]) == len(report["queue"])

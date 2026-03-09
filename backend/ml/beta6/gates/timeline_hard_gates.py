@@ -8,6 +8,9 @@ from typing import Any, Dict, Mapping, Optional
 from ..serving.capability_profiles import CapabilityProfile
 from ..contracts.decisions import ReasonCode
 
+BETA62_AUTHORITATIVE_MODULE = "ml.beta6.gates.timeline_hard_gates"
+BETA62_MODULE_SURFACE = "gates"
+
 
 @dataclass(frozen=True)
 class TimelineHardGateResult:
@@ -57,6 +60,11 @@ def evaluate_timeline_hard_gates(
     try:
         duration_mae_minutes = _to_float(raw_timeline_metrics["duration_mae_minutes"])
         fragmentation_rate = _to_float(raw_timeline_metrics["fragmentation_rate"])
+        event_iou = (
+            _to_float(raw_timeline_metrics["event_iou"])
+            if "event_iou" in raw_timeline_metrics
+            else None
+        )
     except TypeError as exc:
         return TimelineHardGateResult(
             checked=True,
@@ -70,6 +78,8 @@ def evaluate_timeline_hard_gates(
         "duration_mae_threshold_minutes": float(capability_profile.max_timeline_mae_minutes),
         "fragmentation_rate": fragmentation_rate,
         "fragmentation_rate_threshold": float(capability_profile.max_fragmentation_rate),
+        "event_iou": event_iou,
+        "event_iou_floor": 0.5 if event_iou is not None else None,
     }
 
     if duration_mae_minutes > float(capability_profile.max_timeline_mae_minutes):
@@ -85,6 +95,14 @@ def evaluate_timeline_hard_gates(
             checked=True,
             passed=False,
             reason_code=ReasonCode.FAIL_TIMELINE_FRAGMENTATION,
+            details=details,
+        )
+
+    if event_iou is not None and event_iou < 0.5:
+        return TimelineHardGateResult(
+            checked=True,
+            passed=False,
+            reason_code=ReasonCode.FAIL_TIMELINE_MAE,
             details=details,
         )
 

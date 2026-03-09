@@ -184,3 +184,18 @@ runtime:
     kitchen: 5
     livingroom: 5
     entrance: 3
+
+diagnostic_profiles:
+  livingroom_fast_diagnosis:
+    room: livingroom
+    replay_mode: replay_only
+    description: Replay-only candidate for policy-sensitive LivingRoom stability checks.
+    typed_policy:
+      unoccupied_downsample:
+        min_share: 0.12
+        stride: 12
+      minority_sampling:
+        target_share: 0.15
+        max_multiplier: 3
+      runtime:
+        wf_min_minority_support: 5

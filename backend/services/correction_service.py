@@ -428,6 +428,164 @@ def get_low_confidence_queue(elder_id: str, room: str, date: datetime.date, thre
     return query_df(query, (elder_id, room, record_date, record_date, threshold))
 
 
+def get_manual_review_scorecard(
+    elder_id: str,
+    *,
+    days: int = 14,
+    threshold: float = 0.50,
+) -> dict:
+    """
+    Summarize manual-review demand for correction workflows.
+    """
+    if not elder_id or elder_id == "All":
+        return {
+            "correction_volume": 0,
+            "review_backlog": 0,
+            "manual_review_rate": None,
+            "review_window_days": int(days),
+            "latest_correction_time": None,
+        }
+
+    window_days = max(1, int(days))
+    cutoff = datetime.now() - timedelta(days=window_days)
+    cutoff_text = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+    threshold = float(threshold)
+    try:
+        backlog_df = query_df(
+            """
+            SELECT COUNT(*) AS count
+            FROM adl_history
+            WHERE elder_id = ?
+              AND timestamp >= ?
+              AND is_corrected = 0
+              AND (
+                  confidence < ?
+                  OR LOWER(COALESCE(activity_type, '')) IN ('unknown', 'low_confidence')
+              )
+            """,
+            (elder_id, cutoff_text, threshold),
+        )
+        correction_df = query_df(
+            """
+            SELECT COUNT(*) AS count, MAX(corrected_at) AS latest_correction_time
+            FROM correction_history
+            WHERE elder_id = ?
+              AND COALESCE(is_deleted, 0) = 0
+              AND corrected_at >= ?
+            """,
+            (elder_id, cutoff_text),
+        )
+        total_rows_df = query_df(
+            """
+            SELECT COUNT(*) AS count
+            FROM adl_history
+            WHERE elder_id = ?
+              AND timestamp >= ?
+            """,
+            (elder_id, cutoff_text),
+        )
+    except Exception as exc:
+        logger.error("Failed to build manual review scorecard for %s: %s", elder_id, exc)
+        return {
+            "correction_volume": 0,
+            "review_backlog": 0,
+            "manual_review_rate": None,
+            "review_window_days": window_days,
+            "latest_correction_time": None,
+            "error": str(exc),
+        }
+
+    review_backlog = int(backlog_df["count"].iloc[0]) if backlog_df is not None and not backlog_df.empty else 0
+    correction_volume = int(correction_df["count"].iloc[0]) if correction_df is not None and not correction_df.empty else 0
+    total_rows = int(total_rows_df["count"].iloc[0]) if total_rows_df is not None and not total_rows_df.empty else 0
+    manual_review_rate = (float(correction_volume) / float(total_rows)) if total_rows > 0 else None
+    latest_correction_time = (
+        correction_df["latest_correction_time"].iloc[0]
+        if correction_df is not None and not correction_df.empty
+        else None
+    )
+
+    return {
+        "correction_volume": correction_volume,
+        "review_backlog": review_backlog,
+        "manual_review_rate": manual_review_rate,
+        "review_window_days": window_days,
+        "latest_correction_time": latest_correction_time,
+    }
+
+
+def get_correction_training_ready_records(
+    elder_id: str,
+    *,
+    days: int = 14,
+) -> list[dict]:
+    """
+    Convert accepted corrections into training-ready structured payloads.
+    """
+    if not elder_id or elder_id == "All":
+        return []
+
+    cutoff = (datetime.now() - timedelta(days=max(int(days), 1))).strftime("%Y-%m-%d %H:%M:%S")
+    df = query_df(
+        """
+        SELECT
+            id AS correction_id,
+            elder_id,
+            room,
+            timestamp_start,
+            timestamp_end,
+            old_activity,
+            new_activity,
+            corrected_at
+        FROM correction_history
+        WHERE elder_id = ?
+          AND COALESCE(is_deleted, 0) = 0
+          AND corrected_at >= ?
+        ORDER BY corrected_at DESC, id DESC
+        """,
+        (elder_id, cutoff),
+    )
+    if df is None or df.empty:
+        return []
+
+    out: list[dict] = []
+    for _, row in df.iterrows():
+        start = _normalize_ts_str(row.get("timestamp_start"))
+        end = _normalize_ts_str(row.get("timestamp_end"))
+        if not start or not end:
+            continue
+        old_activity = str(row.get("old_activity") or "").strip().lower()
+        new_activity = str(row.get("new_activity") or "").strip().lower()
+        out.append(
+            {
+                "correction_id": int(row.get("correction_id")),
+                "elder_id": str(row.get("elder_id") or elder_id),
+                "room": normalize_room_name(row.get("room") or ""),
+                "corrected_event": {
+                    "start_time": start,
+                    "end_time": end,
+                    "label": new_activity,
+                },
+                "boundary_target": {
+                    "onset_time": start,
+                    "offset_time": end,
+                    "label": new_activity,
+                },
+                "hard_negative": {
+                    "source_label": old_activity,
+                    "target_label": new_activity,
+                    "is_hard_negative": bool(old_activity and old_activity != new_activity),
+                },
+                "residual_review_pack": {
+                    "priority_score": 1.0 if old_activity != new_activity else 0.25,
+                    "source": "accepted_correction",
+                    "corrected_at": _normalize_ts_str(row.get("corrected_at")),
+                },
+            }
+        )
+    return out
+
+
 def get_sensor_context(elder_id: str, room: str, ts_start: str, ts_end: str) -> dict:
     """
     Extract aggregated sensor context (CO2, motion, etc.) from the adl_history sensor_features

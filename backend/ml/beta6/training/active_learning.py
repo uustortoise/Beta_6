@@ -25,6 +25,10 @@ class ActiveLearningPolicy:
     max_share_per_room: float = 0.35
     max_share_per_class: float = 0.35
     random_seed: int = 42
+    disagreement_bonus: float = 0.35
+    boundary_bonus: float = 0.25
+    hard_negative_bonus: float = 0.40
+    rare_context_bonus: float = 0.20
 
 
 def _as_mapping(value: Any) -> Mapping[str, Any]:
@@ -47,6 +51,10 @@ def load_active_learning_policy(path: str | Path | None) -> ActiveLearningPolicy
         max_share_per_room=min(max(float(section.get("max_share_per_room", 0.35)), 0.1), 1.0),
         max_share_per_class=min(max(float(section.get("max_share_per_class", 0.35)), 0.1), 1.0),
         random_seed=int(section.get("random_seed", 42)),
+        disagreement_bonus=max(float(section.get("disagreement_bonus", 0.35)), 0.0),
+        boundary_bonus=max(float(section.get("boundary_bonus", 0.25)), 0.0),
+        hard_negative_bonus=max(float(section.get("hard_negative_bonus", 0.40)), 0.0),
+        rare_context_bonus=max(float(section.get("rare_context_bonus", 0.20)), 0.0),
     )
 
 
@@ -61,6 +69,8 @@ def _empty_candidate_frame() -> pd.DataFrame:
             "baseline_label",
             "uncertainty_score",
             "disagreement_flag",
+            "triage_priority_score",
+            "training_signal_type",
         ]
     )
 
@@ -114,10 +124,69 @@ def _normalize_candidates(
         & (frame["predicted_label"] != "")
         & (frame["baseline_label"] != frame["predicted_label"])
     )
+    frame["boundary_score"] = pd.to_numeric(_series_or_default(frame, "boundary_score", 0.0), errors="coerce").fillna(0.0)
+    frame["rare_context_score"] = pd.to_numeric(_series_or_default(frame, "rare_context_score", 0.0), errors="coerce").fillna(0.0)
+    frame["hard_negative_flag"] = _series_or_default(frame, "hard_negative_flag", False).astype(bool)
     frame = frame[frame["room"] != ""]
     frame = frame[frame["activity"] != ""]
     frame = frame.reset_index(drop=True)
     return frame, None
+
+
+def build_correction_learning_payloads(
+    corrections: Sequence[Mapping[str, Any]] | pd.DataFrame,
+) -> list[Dict[str, Any]]:
+    if isinstance(corrections, pd.DataFrame):
+        frame = corrections.copy()
+    else:
+        frame = pd.DataFrame([dict(row) for row in corrections])
+    if frame.empty:
+        return []
+
+    payloads: list[Dict[str, Any]] = []
+    for _, row in frame.iterrows():
+        start = str(row.get("timestamp_start") or row.get("timestamp") or "").strip()
+        end = str(row.get("timestamp_end") or row.get("timestamp") or "").strip()
+        corrected_label = str(row.get("new_activity") or row.get("activity") or "").strip().lower()
+        previous_label = str(row.get("old_activity") or row.get("baseline_label") or "").strip().lower()
+        correction_id = str(row.get("correction_id") or row.get("candidate_id") or "").strip()
+        boundary_target = {
+            "onset_time": start,
+            "offset_time": end,
+            "corrected_label": corrected_label,
+        }
+        payloads.append(
+            {
+                "correction_id": correction_id,
+                "elder_id": str(row.get("elder_id") or "").strip() or None,
+                "room": str(row.get("room") or "").strip().lower(),
+                "corrected_event": {
+                    "start_time": start,
+                    "end_time": end,
+                    "label": corrected_label,
+                },
+                "boundary_target": boundary_target,
+                "hard_negative": {
+                    "source_label": previous_label,
+                    "target_label": corrected_label,
+                    "is_hard_negative": bool(previous_label and previous_label != corrected_label),
+                },
+                "residual_review_pack": {
+                    "priority_score": float(row.get("triage_priority_score") or 0.0),
+                    "reason": str(row.get("selection_reason") or "accepted_correction"),
+                },
+            }
+        )
+    return payloads
+
+
+def _compute_triage_priority(frame: pd.DataFrame, policy: ActiveLearningPolicy) -> pd.Series:
+    score = frame["uncertainty_score"].astype(float)
+    score = score + frame["disagreement_flag"].astype(float) * float(policy.disagreement_bonus)
+    score = score + frame["boundary_score"].astype(float) * float(policy.boundary_bonus)
+    score = score + frame["rare_context_score"].astype(float) * float(policy.rare_context_bonus)
+    score = score + frame["hard_negative_flag"].astype(float) * float(policy.hard_negative_bonus)
+    return score
 
 
 def _round_robin_take(groups: Sequence[pd.DataFrame], limit: int) -> pd.DataFrame:
@@ -298,6 +367,13 @@ def build_active_learning_queue(
             "stats": {"input_rows": 0, "queue_rows": 0},
         }
 
+    frame["triage_priority_score"] = _compute_triage_priority(frame, policy)
+    frame["training_signal_type"] = np.where(
+        frame["hard_negative_flag"],
+        "hard_negative",
+        np.where(frame["boundary_score"] > 0, "boundary_target", "corrected_event"),
+    )
+
     q = policy.queue_size
     n_uncertain = int(round(q * policy.uncertainty_fraction))
     n_disagreement = int(round(q * policy.disagreement_fraction))
@@ -325,7 +401,7 @@ def build_active_learning_queue(
         fill = remaining.head(q - len(combined)).assign(selection_reason="uncertainty_fill")
         combined = pd.concat([combined, fill], ignore_index=True)
 
-    combined = combined.sort_values(["uncertainty_score", "candidate_id"], ascending=[False, True])
+    combined = combined.sort_values(["triage_priority_score", "candidate_id"], ascending=[False, True])
     capped = _apply_domination_caps(
         combined,
         queue_size=q,
@@ -336,7 +412,7 @@ def build_active_learning_queue(
         refill_pool = frame[
             ~frame["candidate_id"].isin(capped["candidate_id"])
         ].copy()
-        refill_pool = refill_pool.sort_values(["uncertainty_score", "candidate_id"], ascending=[False, True])
+        refill_pool = refill_pool.sort_values(["triage_priority_score", "candidate_id"], ascending=[False, True])
         refill_pool = refill_pool.assign(selection_reason="cap_refill")
         capped = _refill_after_caps(
             capped,
@@ -353,6 +429,7 @@ def build_active_learning_queue(
         "status": "pass" if queue_rows else "fail",
         "version": ACTIVE_LEARNING_VERSION,
         "queue": queue_rows,
+        "training_ready_records": build_correction_learning_payloads(capped),
         "stats": {
             "input_rows": int(len(frame)),
             "queue_rows": int(len(queue_rows)),
@@ -369,5 +446,6 @@ __all__ = [
     "ACTIVE_LEARNING_VERSION",
     "ActiveLearningPolicy",
     "build_active_learning_queue",
+    "build_correction_learning_payloads",
     "load_active_learning_policy",
 ]

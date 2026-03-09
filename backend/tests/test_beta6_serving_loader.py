@@ -73,3 +73,37 @@ def test_stability_certification_resets_on_blocker(monkeypatch, tmp_path: Path):
     assert bad.consecutive_stable_days == 0
     assert "beta6_authority_gate_failed" in bad.blockers
     assert "beta6_fallback_active" in bad.blockers
+
+
+def test_serving_loader_uses_deterministic_fallback_resolution(tmp_path: Path):
+    registry = serving_loader.RegistryV2(root=tmp_path / "registry")
+    elder_id = "HK001"
+    room = "livingroom"
+
+    registry.promote_candidate(
+        elder_id=elder_id,
+        room=room,
+        run_id="run-1",
+        candidate_id="cand-v1",
+    )
+    registry.promote_candidate(
+        elder_id=elder_id,
+        room=room,
+        run_id="run-2",
+        candidate_id="cand-v2",
+    )
+    registry.activate_fallback_mode(
+        elder_id=elder_id,
+        room=room,
+        run_id="run-3",
+        trigger_reason_code="pipeline_reliability_breach",
+    )
+
+    pointer = serving_loader.resolve_serving_pointer_for_room(
+        registry_v2=registry,
+        elder_id=elder_id,
+        room=room,
+    )
+
+    assert pointer is not None
+    assert pointer["candidate_id"] == "cand-v1"

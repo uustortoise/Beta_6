@@ -22,6 +22,7 @@ from ml.policy_defaults import (
     get_minority_sampling_target_share_by_room,
     get_reproducibility_multi_seed_candidate_seeds_default,
     get_reproducibility_multi_seed_rooms_default,
+    get_room_diagnostic_profiles_default,
     get_training_factorized_primary_rooms_default,
     get_training_post_split_shuffle_rooms_default,
     get_training_two_stage_core_enabled_default,
@@ -694,6 +695,18 @@ class EventFirstPolicy:
     unknown_rate_room_cap: float = 0.20
 
 
+@dataclass(frozen=True)
+class RoomDiagnosticProfile:
+    name: str
+    room: str
+    replay_mode: str
+    description: str = ""
+    typed_policy: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 @dataclass
 class TrainingPolicy:
     clinical_priority: ClinicalPriorityPolicy = field(default_factory=ClinicalPriorityPolicy)
@@ -715,6 +728,27 @@ class TrainingPolicy:
     def get_profile_name(self) -> str:
         """Return the active training profile name."""
         return self.training_profile.profile
+
+
+def load_room_diagnostic_profiles(environ: Mapping[str, str] | None = None) -> dict[str, RoomDiagnosticProfile]:
+    _ = os.environ if environ is None else environ
+    raw_profiles = get_room_diagnostic_profiles_default()
+    profiles: dict[str, RoomDiagnosticProfile] = {}
+    for name, payload in raw_profiles.items():
+        if not isinstance(payload, Mapping):
+            continue
+        room = normalize_room_name(payload.get("room"))
+        if not room:
+            continue
+        typed_policy = payload.get("typed_policy", {})
+        profiles[str(name).strip().lower()] = RoomDiagnosticProfile(
+            name=str(name).strip().lower(),
+            room=room,
+            replay_mode=str(payload.get("replay_mode", "replay_only")).strip().lower() or "replay_only",
+            description=str(payload.get("description", "")).strip(),
+            typed_policy=dict(typed_policy) if isinstance(typed_policy, Mapping) else {},
+        )
+    return profiles
 
 
 def load_policy_from_env(environ: Mapping[str, str] | None = None) -> TrainingPolicy:

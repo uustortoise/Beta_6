@@ -1,8 +1,11 @@
-"""Window-level leakage helper utilities for Beta 6 evaluation."""
+"""Window-level leakage helper utilities and cache-key helpers for Beta 6 evaluation."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
+from pathlib import Path
 from typing import Iterable, Sequence
 
 
@@ -20,6 +23,53 @@ class Window:
 
 
 WindowLike = Window | tuple[str, float, float] | list[object]
+
+
+def compute_feature_sequence_cache_key(
+    *,
+    manifest_fingerprint: str,
+    policy_fingerprint: str,
+    extra: dict | None = None,
+) -> str:
+    payload = {
+        "manifest_fingerprint": str(manifest_fingerprint),
+        "policy_fingerprint": str(policy_fingerprint),
+        "extra": extra or {},
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def should_reuse_cached_tensors(
+    cache_metadata: dict | None,
+    *,
+    manifest_fingerprint: str,
+    policy_fingerprint: str,
+) -> bool:
+    if not isinstance(cache_metadata, dict):
+        return False
+    return (
+        str(cache_metadata.get("manifest_fingerprint") or "") == str(manifest_fingerprint)
+        and str(cache_metadata.get("policy_fingerprint") or "") == str(policy_fingerprint)
+    )
+
+
+def write_cache_metadata(
+    path: str | Path,
+    *,
+    manifest_fingerprint: str,
+    policy_fingerprint: str,
+    cache_key: str,
+) -> dict:
+    payload = {
+        "manifest_fingerprint": str(manifest_fingerprint),
+        "policy_fingerprint": str(policy_fingerprint),
+        "cache_key": str(cache_key),
+    }
+    target = Path(path).resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return payload
 
 
 def _coerce_window(value: WindowLike) -> Window:
@@ -108,7 +158,10 @@ def has_window_overlap(
 
 __all__ = [
     "Window",
+    "compute_feature_sequence_cache_key",
     "has_resident_leakage",
     "has_time_leakage",
     "has_window_overlap",
+    "should_reuse_cached_tensors",
+    "write_cache_metadata",
 ]

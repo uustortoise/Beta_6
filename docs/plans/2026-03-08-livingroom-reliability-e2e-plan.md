@@ -1,5 +1,7 @@
 # Livingroom Reliability End-to-End Implementation Plan
 
+Superseded for the active Beta 6.1 / Beta 6.2 execution baseline by [2026-03-09-beta61-beta62-reliable-activity-timeline-execution.md](/Users/dicksonng/DT/Development/Beta_6/docs/plans/2026-03-09-beta61-beta62-reliable-activity-timeline-execution.md).
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Fix Livingroom model selection reliability and add truthful Streamlit review/metric surfaces end-to-end.

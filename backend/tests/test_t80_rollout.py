@@ -963,3 +963,35 @@ class TestT80LadderAndAutoRollback(unittest.TestCase):
         self.assertIsNone(response["registry_action"][0]["fallback_state"])
         self.assertEqual(len(stub_override.calls), 1)
         self.assertEqual(self.manager.get_state().stage, RolloutStage.ROLLED_BACK)
+
+    def test_rollout_auto_rollback_does_not_crash_on_missing_materialized_pointer(self):
+        class _StubRegistry:
+            def rollback_and_activate_fallback(self, **kwargs):
+                raise ValueError("No materialized pointer available for HK001/livingroom")
+
+        class _StubOverrideManager:
+            def __init__(self):
+                self.calls = []
+
+            def activate_baseline_fallback(self, *, reason: str):
+                self.calls.append(reason)
+                return True, {"reason": reason, "profile": "production"}
+
+        stub_override = _StubOverrideManager()
+        response = self.manager.apply_auto_rollback_protection(
+            nightly_metrics=[
+                {"pipeline_success_rate": 0.95},
+                {"pipeline_success_rate": 0.96},
+            ],
+            elder_id="HK001",
+            room="livingroom",
+            run_id="run-missing-materialized",
+            registry_v2=_StubRegistry(),
+            override_manager=stub_override,
+        )
+
+        self.assertEqual(response["status"], "rollback_applied")
+        self.assertEqual(response["registry_action"][0]["room"], "livingroom")
+        self.assertIn("No materialized pointer available", response["registry_action"][0]["error"])
+        self.assertIsNone(response["registry_action"][0]["fallback_state"])
+        self.assertEqual(len(stub_override.calls), 1)

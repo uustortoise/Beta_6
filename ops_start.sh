@@ -72,6 +72,23 @@ if [ ! -f "$BACKEND_DIR/.env" ] && [ -f "$BACKEND_DIR/.env.example" ]; then
     echo "Created $BACKEND_DIR/.env from .env.example"
 fi
 
+if [ -f "$BACKEND_DIR/.env" ]; then
+    set -a
+    source "$BACKEND_DIR/.env"
+    set +a
+fi
+ENABLE_BETA6_AUTHORITY="${ENABLE_BETA6_AUTHORITY:-true}"
+if [ "$ENABLE_BETA6_AUTHORITY" = "true" ]; then
+    if [ -z "${BETA6_GATE_SIGNING_KEY:-}" ]; then
+        echo "ERROR: Beta 6 live authority requires explicit BETA6_GATE_SIGNING_KEY in backend/.env"
+        exit 1
+    fi
+    if [ -z "${RELEASE_GATE_EVIDENCE_PROFILE:-}" ]; then
+        echo "ERROR: Beta 6 live authority requires explicit RELEASE_GATE_EVIDENCE_PROFILE in backend/.env"
+        exit 1
+    fi
+fi
+
 echo "[3/6] Running preflight doctor..."
 "$PROJECT_ROOT/ops_doctor.sh" preflight
 
@@ -93,6 +110,7 @@ if [ "$SKIP_SMOKE" -eq 0 ]; then
     cd "$PROJECT_ROOT"
     SMOKE_TESTS=(
         "backend/tests/test_run_daily_analysis_beta6_authority.py"
+        "backend/tests/test_health_server.py"
         "backend/tests/test_t80_rollout.py"
         "backend/tests/test_prediction_beta6_runtime_hook_parity.py"
         "backend/tests/test_beta6_orchestrator.py"

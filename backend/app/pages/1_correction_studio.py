@@ -510,6 +510,13 @@ def render():
         st.warning("Please select a specific Resident Context from the sidebar.")
         return
 
+    review_scorecard = correction_service.get_manual_review_scorecard(elder_id, days=14, threshold=0.50)
+    s1, s2, s3 = st.columns(3)
+    s1.metric("Corrections (14d)", int(review_scorecard.get("correction_volume", 0) or 0))
+    s2.metric("Review Backlog", int(review_scorecard.get("review_backlog", 0) or 0))
+    review_rate = review_scorecard.get("manual_review_rate")
+    s3.metric("Manual Review Rate", "N/A" if review_rate is None else f"{float(review_rate):.1%}")
+
     if "correction_selected_date" not in st.session_state:
         st.session_state["correction_selected_date"] = datetime.date.today()
 

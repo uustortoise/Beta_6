@@ -8,9 +8,13 @@ import run_daily_analysis
 class _RegistryV2Stub:
     def __init__(self) -> None:
         self.events = []
+        self._states = {}
 
     def append_event(self, event) -> None:  # noqa: ANN001
         self.events.append(event)
+
+    def read_fallback_state(self, elder_id, room):  # noqa: ANN001
+        return self._states.get((elder_id, room))
 
 
 def test_beta6_authority_parity_mismatch_blocks_room(monkeypatch):
@@ -319,9 +323,10 @@ def test_shadow_compare_error_blocks_ladder_progression(monkeypatch):
     assert report["phase6_rollout_ladder"]["gate_summary"]["drift_alerts_within_budget"] is False
 
 
-def test_beta6_authority_live_run_uses_fallback_signing_key_when_env_missing(monkeypatch, tmp_path: Path):
+def test_beta6_authority_live_run_fails_closed_when_signing_key_missing(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("run_daily_analysis._is_beta6_authority_enabled", lambda: True)
     monkeypatch.delenv("BETA6_GATE_SIGNING_KEY", raising=False)
+    monkeypatch.setenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")
     monkeypatch.setattr(
         "run_daily_analysis._beta6_gate_artifact_output_dir",
         lambda elder_id, run_id, registry_v2: tmp_path,  # noqa: ARG005
@@ -336,19 +341,48 @@ def test_beta6_authority_live_run_uses_fallback_signing_key_when_env_missing(mon
         registry_v2=registry,
     )
 
-    assert gate_pass is True
-    assert report["pass"] is True
-    assert report["phase4_dynamic_gate"]["status"] == "ok"
-    eval_path = report["phase4_dynamic_gate"]["evaluation_report_path"]
-    assert isinstance(eval_path, str) and eval_path
-    assert Path(eval_path).exists()
-    assert report["phase4_dynamic_gate"]["evaluation_report_signature"].startswith("sha256:")
-    assert report["phase4_dynamic_gate"]["rejection_artifact_path"] is None
-    assert report["phase6_shadow_compare"]["status"] == "ok"
-    shadow_path = report["phase6_shadow_compare"]["summary"]["report_path"]
-    assert isinstance(shadow_path, str) and shadow_path
-    assert Path(shadow_path).exists()
-    assert report["phase6_shadow_compare"]["summary"]["signature"].startswith("sha256:")
+    assert gate_pass is False
+    assert report["pass"] is False
+    assert report["reason_code"] == "missing_signing_key"
+    assert report["details"]["authority_preflight_failed"] is True
+    assert report["phase0_authority_preflight"]["reason"] == "missing_signing_key"
+    assert report["phase4_dynamic_gate"]["status"] == "skipped"
+    assert report["phase4_dynamic_gate"]["evaluation_report_path"] is None
+    assert report["phase6_shadow_compare"]["status"] == "skipped"
+
+
+def test_live_authority_preflight_requires_explicit_evidence_profile(monkeypatch):
+    monkeypatch.setattr("run_daily_analysis._is_beta6_authority_enabled", lambda: True)
+    monkeypatch.setenv("BETA6_GATE_SIGNING_KEY", "test-live-key")
+    monkeypatch.delenv("RELEASE_GATE_EVIDENCE_PROFILE", raising=False)
+
+    ok, report = run_daily_analysis.validate_beta6_live_authority_preflight(
+        live_authority=True,
+        require_postgres=False,
+    )
+
+    assert ok is False
+    assert report["pass"] is False
+    assert report["reason"] == "missing_evidence_profile"
+    assert report["evidence_profile_configured"] is False
+
+
+def test_live_authority_preflight_reports_postgres_unavailable(monkeypatch):
+    monkeypatch.setattr("run_daily_analysis._is_beta6_authority_enabled", lambda: True)
+    monkeypatch.setenv("BETA6_GATE_SIGNING_KEY", "test-live-key")
+    monkeypatch.setenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")
+
+    ok, report = run_daily_analysis.validate_beta6_live_authority_preflight(
+        live_authority=True,
+        require_postgres=True,
+        postgres_checker=lambda: (False, "OperationalError: connection refused"),
+    )
+
+    assert ok is False
+    assert report["pass"] is False
+    assert report["reason"] == "postgres_unavailable"
+    assert report["postgres_reachable"] is False
+    assert "connection refused" in str(report["postgres_error"])
 
 
 def test_beta6_authority_live_run_persists_phase4_artifacts(monkeypatch, tmp_path: Path):
@@ -587,3 +621,33 @@ def test_publish_runtime_policy_artifact_emits_critical_shadow_drift_alert(monke
     assert summary["shadow_parity_status"] == "critical"
     alert_metrics = {str(alert.get("metric")) for alert in summary["shadow_parity_alerts"]}
     assert {"unknown_rate", "abstain_rate", "duration_mae_minutes", "fragmentation_rate"} <= alert_metrics
+
+
+def test_beta61_certification_entry_checklist_fails_on_incomplete_fallback_state(monkeypatch):
+    monkeypatch.setattr("run_daily_analysis._is_beta6_authority_enabled", lambda: True)
+    monkeypatch.setenv("BETA6_GATE_SIGNING_KEY", "secret")
+    monkeypatch.setenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")
+
+    registry = _RegistryV2Stub()
+    registry._states[("HK001", "Bedroom")] = {
+        "active": True,
+        "fallback_candidate_id": "",
+        "previous_pointer": None,
+    }
+
+    passed, report = run_daily_analysis.build_beta61_certification_entry_checklist(
+        live_authority=True,
+        registry_v2=registry,
+        elder_id="HK001",
+        beta6_fallback_summary={"activated": ["Bedroom"], "errors": []},
+        require_postgres=True,
+        postgres_checker=lambda: (True, None),
+    )
+
+    assert passed is False
+    assert report["pass"] is False
+    checks = {item["check"]: item for item in report["checks"]}
+    assert checks["explicit_signing_key"]["pass"] is True
+    assert checks["explicit_evidence_profile"]["pass"] is True
+    assert checks["postgres_reachable"]["pass"] is True
+    assert checks["rollback_fallback_state_complete"]["pass"] is False

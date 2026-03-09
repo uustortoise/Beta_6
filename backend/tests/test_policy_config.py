@@ -1,4 +1,4 @@
-from ml.policy_config import load_policy_from_env
+from ml.policy_config import load_policy_from_env, load_room_diagnostic_profiles
 
 
 def test_load_policy_defaults_match_legacy_knobs():
@@ -256,6 +256,16 @@ def test_release_gate_evidence_profile_respects_explicit_floor_overrides():
     assert policy.release_gate.evidence_profile == "pilot_stage_b"
     assert policy.release_gate.min_validation_class_support == 12
     assert policy.release_gate.min_recall_support == 17
+
+
+def test_policy_defaults_can_emit_named_room_diagnostic_profiles():
+    profiles = load_room_diagnostic_profiles()
+
+    assert "livingroom_fast_diagnosis" in profiles
+    profile = profiles["livingroom_fast_diagnosis"]
+    assert profile.room == "livingroom"
+    assert profile.replay_mode == "replay_only"
+    assert profile.typed_policy["unoccupied_downsample"]["stride"] == 12
 
 
 def test_pilot_profile_forces_neutral_clinical_priority_multipliers():

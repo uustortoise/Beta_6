@@ -9,3 +9,7 @@ active_learning:
   max_share_per_room: 0.35
   max_share_per_class: 0.35
   random_seed: 42
+  disagreement_bonus: 0.35
+  boundary_bonus: 0.25
+  hard_negative_bonus: 0.40
+  rare_context_bonus: 0.20

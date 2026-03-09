@@ -13,6 +13,11 @@ from ml.yaml_compat import load_yaml_file
 
 from ..data.data_manifest import load_feature_matrix, load_manifest
 from ..data.feature_fingerprint import hash_json_payload
+from ..data.feature_store import (
+    compute_feature_sequence_cache_key,
+    should_reuse_cached_tensors,
+    write_cache_metadata,
+)
 
 
 PRETRAIN_CONFIG_VERSION = "v1"
@@ -221,6 +226,13 @@ def run_self_supervised_pretraining(
     manifest = load_manifest(manifest_path)
     _assert_manifest_contract(manifest, manifest_path=manifest_path)
     config = load_pretrain_config(config_path)
+    manifest_fingerprint = str(_as_mapping(manifest.get("fingerprint")).get("value") or "")
+    policy_fingerprint = hash_json_payload({"pretrain": config.__dict__})
+    cache_key = compute_feature_sequence_cache_key(
+        manifest_fingerprint=manifest_fingerprint,
+        policy_fingerprint=policy_fingerprint,
+        extra={"max_files": max_files},
+    )
     matrix = load_corpus_matrix(
         manifest_path,
         max_files=max_files,
@@ -228,13 +240,33 @@ def run_self_supervised_pretraining(
     )
     payload = train_self_supervised_encoder(matrix, config=config)
     artifacts = save_pretrain_checkpoint(payload, output_dir=output_dir)
+    cache_metadata = write_cache_metadata(
+        Path(output_dir).resolve() / "tensor_cache_metadata.json",
+        manifest_fingerprint=manifest_fingerprint,
+        policy_fingerprint=policy_fingerprint,
+        cache_key=cache_key,
+    )
     return {
         "status": "pass",
         "manifest_path": str(Path(manifest_path).resolve()),
         "config": payload["config"],
         "metrics": payload["metrics"],
         "artifacts": artifacts,
+        "cache_metadata": cache_metadata,
     }
+
+
+def can_reuse_pretrain_cache(
+    cache_metadata: Mapping[str, Any] | None,
+    *,
+    manifest_fingerprint: str,
+    policy_fingerprint: str,
+) -> bool:
+    return should_reuse_cached_tensors(
+        dict(cache_metadata or {}),
+        manifest_fingerprint=manifest_fingerprint,
+        policy_fingerprint=policy_fingerprint,
+    )
 
 
 __all__ = [
@@ -246,5 +278,6 @@ __all__ = [
     "load_pretrain_config",
     "run_self_supervised_pretraining",
     "save_pretrain_checkpoint",
+    "can_reuse_pretrain_cache",
     "train_self_supervised_encoder",
 ]

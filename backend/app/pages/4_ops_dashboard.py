@@ -54,7 +54,7 @@ def render():
     is_ml_mode = "ML View" in view_mode
     
     st.markdown("---")
-    
+
     # 1. Daily Operations (Data Flow)
     st.subheader("Section A: Daily Operations Health")
     with st.spinner("Fetching ops..."):
@@ -73,6 +73,31 @@ def render():
         colA2.caption(f"Last timestamp: {pd.to_datetime(ops_sum.get('last_ingestion_time')).strftime('%Y-%m-%d %H:%M:%S')}")
     colA3.metric("Open Alerts", ops_sum.get("open_alerts", 0),
                  delta="Review" if ops_sum.get("open_alerts", 0) > 0 else "Clear", delta_color="inverse")
+
+    st.markdown("---")
+    st.subheader("Section A2: Timeline Reliability & Review Load")
+    with st.spinner("Fetching reliability scorecard..."):
+        reliability = ops_service.get_timeline_reliability_scorecard(elder_id)
+
+    r1, r2, r3, r4 = st.columns(4)
+    review_rate = reliability.get("manual_review_rate")
+    r1.metric("Corrections (Window)", int(reliability.get("correction_volume", 0) or 0))
+    r2.metric("Review Backlog", int(reliability.get("review_backlog", 0) or 0))
+    r3.metric("Manual Review Rate", "N/A" if review_rate is None else f"{float(review_rate):.1%}")
+    r4.metric("Authority State", str(reliability.get("authority_state") or "unknown").replace("_", " ").title())
+
+    rel1, rel2, rel3, rel4 = st.columns(4)
+    rel1.metric("Contradiction Rate", "N/A" if reliability.get("contradiction_rate") is None else f"{float(reliability.get('contradiction_rate')):.3f}")
+    rel2.metric("Fragmentation Rate", "N/A" if reliability.get("fragmentation_rate") is None else f"{float(reliability.get('fragmentation_rate')):.3f}")
+    rel3.metric("Unknown Rate", "N/A" if reliability.get("unknown_rate") is None else f"{float(reliability.get('unknown_rate')):.3f}")
+    rel4.metric("Abstain Rate", "N/A" if reliability.get("abstain_rate") is None else f"{float(reliability.get('abstain_rate')):.3f}")
+
+    active_system = reliability.get("active_system")
+    if active_system:
+        st.caption(f"Active system: {active_system}")
+    sensitivity_rows = reliability.get("room_policy_sensitivity", [])
+    if isinstance(sensitivity_rows, list) and sensitivity_rows:
+        st.dataframe(pd.DataFrame(sensitivity_rows), use_container_width=True, hide_index=True)
                  
     # 2. Sample Collection
     st.markdown("---")

@@ -78,6 +78,24 @@ reconcile_postgres_password() {
     return 1
 }
 
+require_beta6_live_authority_contracts() {
+    if [ "${ENABLE_BETA6_AUTHORITY:-true}" != "true" ]; then
+        return 0
+    fi
+    if [ "$MODE" != "prod" ]; then
+        return 0
+    fi
+    if [ -z "${BETA6_GATE_SIGNING_KEY:-}" ]; then
+        echo "❌ Production Beta 6 authority requires explicit BETA6_GATE_SIGNING_KEY."
+        return 1
+    fi
+    if [ -z "${RELEASE_GATE_EVIDENCE_PROFILE:-}" ]; then
+        echo "❌ Production Beta 6 authority requires explicit RELEASE_GATE_EVIDENCE_PROFILE."
+        return 1
+    fi
+    return 0
+}
+
 # Cleanup function
 cleanup() {
     echo ""
@@ -122,20 +140,24 @@ POSTGRES_USER="${POSTGRES_USER:-postgres}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-password}"
 POSTGRES_DB="${POSTGRES_DB:-elderlycare}"
 ENABLE_BETA6_AUTHORITY="${ENABLE_BETA6_AUTHORITY:-true}"
-RELEASE_GATE_EVIDENCE_PROFILE="${RELEASE_GATE_EVIDENCE_PROFILE:-production}"
+RELEASE_GATE_EVIDENCE_PROFILE="${RELEASE_GATE_EVIDENCE_PROFILE:-}"
+BETA6_GATE_SIGNING_KEY="${BETA6_GATE_SIGNING_KEY:-}"
 BETA6_PHASE4_RUNTIME_ENABLED="${BETA6_PHASE4_RUNTIME_ENABLED:-false}"
 ENABLE_BETA6_HMM_RUNTIME="${ENABLE_BETA6_HMM_RUNTIME:-false}"
 BETA6_RUNTIME_TARGET_COHORT="${BETA6_RUNTIME_TARGET_COHORT:-}"
 RETRAIN_INPUT_MODE="${RETRAIN_INPUT_MODE:-auto_aggregate}"
 RETRAIN_MANIFEST_PATH="${RETRAIN_MANIFEST_PATH:-}"
 export POSTGRES_HOST POSTGRES_PORT POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB
-export ENABLE_BETA6_AUTHORITY RELEASE_GATE_EVIDENCE_PROFILE
+export ENABLE_BETA6_AUTHORITY RELEASE_GATE_EVIDENCE_PROFILE BETA6_GATE_SIGNING_KEY
 export BETA6_PHASE4_RUNTIME_ENABLED ENABLE_BETA6_HMM_RUNTIME BETA6_RUNTIME_TARGET_COHORT
 export RETRAIN_INPUT_MODE RETRAIN_MANIFEST_PATH
 set_env_key "$BACKEND_DIR/.env" "ENABLE_BETA6_AUTHORITY" "$ENABLE_BETA6_AUTHORITY"
 set_env_key "$BACKEND_DIR/.env" "RELEASE_GATE_EVIDENCE_PROFILE" "$RELEASE_GATE_EVIDENCE_PROFILE"
 set_env_key "$BACKEND_DIR/.env" "RETRAIN_INPUT_MODE" "$RETRAIN_INPUT_MODE"
 set_env_key "$BACKEND_DIR/.env" "RETRAIN_MANIFEST_PATH" "$RETRAIN_MANIFEST_PATH"
+if ! require_beta6_live_authority_contracts; then
+    exit 1
+fi
 if [ "$RETRAIN_INPUT_MODE" = "manifest_only" ] && [ -n "$RETRAIN_MANIFEST_PATH" ] && [ ! -f "$RETRAIN_MANIFEST_PATH" ]; then
     echo "⚠️  RETRAIN_MANIFEST_PATH does not exist: $RETRAIN_MANIFEST_PATH"
     echo "   - Watcher will fallback to auto_aggregate only when incoming files are detected."
@@ -145,7 +167,8 @@ fi
 sync_web_env
 echo "   - Synchronized web-ui .env with backend PostgreSQL settings"
 echo "   - Beta 6 authority: $ENABLE_BETA6_AUTHORITY"
-echo "   - Evidence profile: $RELEASE_GATE_EVIDENCE_PROFILE"
+echo "   - Evidence profile: ${RELEASE_GATE_EVIDENCE_PROFILE:-<unset>}"
+echo "   - Signing key:      $( [ -n "${BETA6_GATE_SIGNING_KEY:-}" ] && echo "<configured>" || echo "<unset>" )"
 echo "   - Phase4 runtime:  $BETA6_PHASE4_RUNTIME_ENABLED"
 echo "   - HMM runtime:     $ENABLE_BETA6_HMM_RUNTIME"
 echo "   - Runtime cohort:  ${BETA6_RUNTIME_TARGET_COHORT:-<unset>}"

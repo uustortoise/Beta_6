@@ -23,8 +23,10 @@ from ml.home_empty_fusion import (
     HomeEmptyState,
     HouseholdGate,
     RoomState,
+    build_resident_home_context,
     fuse_home_empty_predictions,
 )
+from ml.beta6.sequence.transition_builder import build_allowed_transition_map
 
 
 class TestHomeEmptyConfig(unittest.TestCase):
@@ -423,6 +425,89 @@ class TestHomeEmptyFusion(unittest.TestCase):
         }
         preds = fusion.fuse(room_predictions, timestamps)
         self.assertEqual(preds[0].state, HomeEmptyState.UNCERTAIN)
+
+    def test_single_vs_multi_resident_context_is_typed_and_explicit(self):
+        single_context = build_resident_home_context(
+            {
+                "resident_home_context": {
+                    "household_type": "single",
+                    "helper_presence": "none",
+                    "layout": {"topology": "corridor"},
+                }
+            }
+        )
+        multi_context = build_resident_home_context(
+            {
+                "resident_home_context": {
+                    "household_type": "double",
+                    "helper_presence": "live_in",
+                    "layout": {"topology": "open_plan"},
+                }
+            }
+        )
+
+        assert single_context.household_type == "single_resident"
+        assert single_context.helper_presence == "none"
+        assert single_context.status == "ready"
+        assert multi_context.household_type == "multi_resident"
+        assert multi_context.helper_presence == "live_in"
+        assert multi_context.status == "ready"
+        assert "multi_resident" in multi_context.cohort_key
+
+    def test_layout_context_reaches_transition_builder_without_env_reads(self):
+        allowed = build_allowed_transition_map(
+            ["bedroom", "bathroom", "kitchen"],
+            resident_home_context={
+                "status": "ready",
+                "cohort_key": "single_resident:none:corridor",
+                "layout": {
+                    "topology": "corridor",
+                    "adjacency": {
+                        "bedroom": ["bathroom"],
+                        "bathroom": ["bedroom"],
+                        "kitchen": [],
+                    },
+                },
+            },
+        )
+
+        assert allowed[("bedroom", "bathroom")] is True
+        assert allowed[("bedroom", "kitchen")] is False
+        assert allowed[("kitchen", "bedroom")] is False
+
+    def test_missing_required_context_is_reported_clearly(self):
+        fusion = HomeEmptyFusion(HomeEmptyConfig(min_rooms_for_consensus=1))
+        base_time = datetime(2026, 2, 1, 10, 0, 0)
+        predictions = fusion.fuse(
+            {
+                "bedroom": pd.DataFrame(
+                    {
+                        "timestamp": [base_time],
+                        "occupancy_prob": [0.1],
+                        "predicted_label": ["unoccupied"],
+                    }
+                )
+            },
+            [base_time],
+            resident_home_context={"resident_home_context": {"household_type": "single"}},
+        )
+
+        assert predictions[0].context_contract_status == "missing_required_context"
+        assert "helper_presence" in predictions[0].context_missing_fields
+        assert predictions[0].state == HomeEmptyState.UNCERTAIN
+
+    def test_household_helper_context_changes_decoder_constraints_offline_only(self):
+        context = build_resident_home_context(
+            {
+                "resident_home_context": {
+                    "household_type": "multi_resident",
+                    "helper_presence": "live_in",
+                    "layout": {"topology": "corridor"},
+                }
+            }
+        )
+
+        assert context.requires_conservative_empty_gate is True
 
 
 class TestHouseholdGate(unittest.TestCase):

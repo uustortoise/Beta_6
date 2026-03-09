@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from ml.timeline_metrics import (
     TimelineMetrics,
+    compute_event_level_quality,
     compute_fragmentation_rate,
     compute_timeline_metrics,
     match_episodes,
@@ -55,6 +56,14 @@ class TestTimelineMetrics(unittest.TestCase):
         self.assertEqual(d['segment_start_mae_minutes'], 5.0)
         self.assertEqual(d['fragmentation_rate'], 0.2)
         self.assertEqual(d['num_pred_episodes'], 10)
+
+    def test_timeline_metrics_include_event_level_quality_fields(self):
+        metrics = TimelineMetrics(event_iou=0.75, onset_tolerance_rate=0.8, offset_tolerance_rate=0.9)
+        payload = metrics.to_dict()
+
+        self.assertEqual(payload["event_iou"], 0.75)
+        self.assertEqual(payload["onset_tolerance_rate"], 0.8)
+        self.assertEqual(payload["offset_tolerance_rate"], 0.9)
 
 
 class TestComputeFragmentationRate(unittest.TestCase):
@@ -189,6 +198,26 @@ class TestMatchEpisodes(unittest.TestCase):
         matches = match_episodes(pred, gt)
         
         self.assertEqual(len(matches), 2)
+
+    def test_compute_event_level_quality(self):
+        pred = [
+            {'start_time': datetime(2026, 2, 1, 10, 0, 0), 'end_time': datetime(2026, 2, 1, 10, 30, 0), 'label': 'sleeping'},
+        ]
+        gt = [
+            {'start_time': datetime(2026, 2, 1, 10, 1, 0), 'end_time': datetime(2026, 2, 1, 10, 31, 0), 'label': 'sleeping'},
+        ]
+        matches = [(0, 0, 1800.0)]
+
+        event_iou, onset_rate, offset_rate = compute_event_level_quality(
+            pred,
+            gt,
+            matches,
+            tolerance_minutes=5.0,
+        )
+
+        self.assertGreater(event_iou, 0.9)
+        self.assertEqual(onset_rate, 1.0)
+        self.assertEqual(offset_rate, 1.0)
 
 
 class TestComputeBoundaryMae(unittest.TestCase):

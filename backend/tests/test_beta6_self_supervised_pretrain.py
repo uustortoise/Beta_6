@@ -5,7 +5,9 @@ import numpy as np
 import pytest
 
 from ml.beta6.data_manifest import CorpusManifestPolicy, build_pretrain_corpus_manifest
+from ml.beta6.feature_store import compute_feature_sequence_cache_key, should_reuse_cached_tensors
 from ml.beta6.self_supervised_pretrain import (
+    can_reuse_pretrain_cache,
     encode_with_checkpoint,
     load_pretrain_checkpoint,
     run_self_supervised_pretraining,
@@ -104,3 +106,41 @@ def test_pretrain_fails_closed_on_empty_manifest_records(tmp_path: Path):
             config_path=None,
             output_dir=tmp_path / "out",
         )
+
+
+def test_feature_sequence_cache_respects_manifest_and_policy_fingerprint():
+    cache_key_a = compute_feature_sequence_cache_key(
+        manifest_fingerprint="m1",
+        policy_fingerprint="p1",
+        extra={"max_files": 4},
+    )
+    cache_key_b = compute_feature_sequence_cache_key(
+        manifest_fingerprint="m1",
+        policy_fingerprint="p1",
+        extra={"max_files": 4},
+    )
+    cache_key_c = compute_feature_sequence_cache_key(
+        manifest_fingerprint="m2",
+        policy_fingerprint="p1",
+        extra={"max_files": 4},
+    )
+
+    assert cache_key_a == cache_key_b
+    assert cache_key_a != cache_key_c
+
+
+def test_tensor_reuse_is_disabled_when_inputs_change():
+    cache_metadata = {
+        "manifest_fingerprint": "m1",
+        "policy_fingerprint": "p1",
+    }
+    assert should_reuse_cached_tensors(
+        cache_metadata,
+        manifest_fingerprint="m1",
+        policy_fingerprint="p1",
+    ) is True
+    assert can_reuse_pretrain_cache(
+        cache_metadata,
+        manifest_fingerprint="m2",
+        policy_fingerprint="p1",
+    ) is False

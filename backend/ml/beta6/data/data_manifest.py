@@ -78,6 +78,128 @@ def load_manifest(path: str | Path) -> Dict[str, Any]:
     return payload
 
 
+def _load_sidecar_metadata(path: Path) -> Dict[str, Any]:
+    sidecars = [
+        path.with_suffix(path.suffix + ".meta.json"),
+        path.with_suffix(".meta.json"),
+    ]
+    for sidecar in sidecars:
+        if not sidecar.exists():
+            continue
+        try:
+            payload = json.loads(sidecar.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+def _infer_views(path: Path, metadata: Mapping[str, Any]) -> list[str]:
+    explicit = metadata.get("views")
+    if isinstance(explicit, list):
+        values = [str(item).strip().lower() for item in explicit if str(item).strip()]
+        return sorted(set(values))
+
+    token = path.stem.lower()
+    views = ["unlabeled_pretrain"]
+    if "shadow" in token:
+        views.append("shadow_cohort")
+    if any(marker in token for marker in ("golden", "labeled", "labelled", "trusted")):
+        views.append("labeled_high_trust_finetune_eval")
+    return sorted(set(views))
+
+
+def _infer_resident_id(path: Path, metadata: Mapping[str, Any]) -> str | None:
+    explicit = str(metadata.get("resident_id") or "").strip()
+    if explicit:
+        return explicit
+    parent = str(path.parent.name).strip()
+    return parent or None
+
+
+def _normalize_context_completeness(metadata: Mapping[str, Any]) -> Dict[str, Any]:
+    context = metadata.get("resident_home_context")
+    if not isinstance(context, Mapping):
+        context = {}
+    status = str(context.get("status") or metadata.get("context_status") or "missing_required_context").strip()
+    missing_fields = context.get("missing_fields") or metadata.get("context_missing_fields") or []
+    if not isinstance(missing_fields, list):
+        missing_fields = [str(missing_fields)]
+    return {
+        "status": status,
+        "missing_fields": [str(item) for item in missing_fields if str(item).strip()],
+    }
+
+
+def _normalize_label_quality(metadata: Mapping[str, Any], *, views: Sequence[str]) -> Dict[str, Any]:
+    raw_quality = metadata.get("label_quality")
+    if isinstance(raw_quality, Mapping):
+        trust_tier = str(raw_quality.get("trust_tier") or raw_quality.get("status") or "unknown").strip().lower()
+        reviewed_fraction = _safe_float(raw_quality.get("reviewed_fraction"), default=0.0)
+        source = str(raw_quality.get("source") or "sidecar").strip()
+    else:
+        trust_tier = "high" if "labeled_high_trust_finetune_eval" in views else "unknown"
+        reviewed_fraction = 1.0 if trust_tier == "high" else 0.0
+        source = "inferred"
+    return {
+        "source": source,
+        "trust_tier": trust_tier,
+        "reviewed_fraction": float(max(min(reviewed_fraction, 1.0), 0.0)),
+    }
+
+
+def _summarize_corpus_views(entries: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for view_name in ("shadow_cohort", "unlabeled_pretrain", "labeled_high_trust_finetune_eval"):
+        selected = [entry for entry in entries if view_name in (entry.get("views") or [])]
+        resident_ids = {
+            str(entry.get("resident_id") or "").strip()
+            for entry in selected
+            if str(entry.get("resident_id") or "").strip()
+        }
+        days_covered = [int(entry.get("days_covered") or 0) for entry in selected]
+        out[view_name] = {
+            "entry_count": len(selected),
+            "resident_count": len(resident_ids),
+            "resident_ids": sorted(resident_ids),
+            "min_days_covered": min(days_covered) if days_covered else 0,
+            "max_days_covered": max(days_covered) if days_covered else 0,
+        }
+    return out
+
+
+def evaluate_beta62_corpus_contract(
+    manifest: Mapping[str, Any],
+    *,
+    required_residents: int = 20,
+    required_days: int = 14,
+) -> Dict[str, Any]:
+    corpus_views = manifest.get("corpus_views", {}) if isinstance(manifest.get("corpus_views"), Mapping) else {}
+    shadow = corpus_views.get("shadow_cohort", {}) if isinstance(corpus_views.get("shadow_cohort"), Mapping) else {}
+    labeled = (
+        corpus_views.get("labeled_high_trust_finetune_eval", {})
+        if isinstance(corpus_views.get("labeled_high_trust_finetune_eval"), Mapping)
+        else {}
+    )
+    context_summary = manifest.get("context_summary", {}) if isinstance(manifest.get("context_summary"), Mapping) else {}
+    stats = manifest.get("stats", {}) if isinstance(manifest.get("stats"), Mapping) else {}
+    reason_codes: list[str] = []
+    if int(shadow.get("resident_count", 0) or 0) < int(required_residents):
+        reason_codes.append("shadow_resident_coverage_below_contract")
+    if int(shadow.get("min_days_covered", 0) or 0) < int(required_days):
+        reason_codes.append("shadow_days_coverage_below_contract")
+    if int(labeled.get("min_days_covered", 0) or 0) < int(required_days):
+        reason_codes.append("labeled_days_coverage_below_contract")
+    if int(context_summary.get("ready_entries", 0) or 0) < int(stats.get("records_kept", 0) or 0):
+        reason_codes.append("resident_home_context_incomplete")
+    return {
+        "pass": not reason_codes,
+        "required_residents": int(required_residents),
+        "required_days": int(required_days),
+        "reason_codes": reason_codes,
+    }
+
+
 def _frame_to_matrix(frame: pd.DataFrame) -> np.ndarray:
     numeric = frame.apply(pd.to_numeric, errors="coerce")
     matrix = numeric.to_numpy(dtype=np.float32)
@@ -170,6 +292,10 @@ def build_pretrain_corpus_manifest(
         row_count = int(matrix.shape[0])
         feature_count = int(matrix.shape[1])
         missing_ratio = _missing_ratio(matrix)
+        metadata = _load_sidecar_metadata(candidate)
+        views = _infer_views(candidate, metadata)
+        context_completeness = _normalize_context_completeness(metadata)
+        label_quality = _normalize_label_quality(metadata, views=views)
 
         if row_count < int(policy.min_rows):
             violations.append(
@@ -212,6 +338,12 @@ def build_pretrain_corpus_manifest(
                 "row_count": row_count,
                 "feature_count": feature_count,
                 "missing_ratio": float(round(missing_ratio, 8)),
+                "resident_id": _infer_resident_id(candidate, metadata),
+                "days_covered": _safe_int(metadata.get("days_covered"), default=0),
+                "views": views,
+                "resident_home_context": metadata.get("resident_home_context", {}),
+                "context_completeness": context_completeness,
+                "label_quality": label_quality,
             }
         )
 
@@ -231,12 +363,28 @@ def build_pretrain_corpus_manifest(
             "row_count": entry["row_count"],
             "feature_count": entry["feature_count"],
             "missing_ratio": entry["missing_ratio"],
+            "resident_id": entry.get("resident_id"),
+            "days_covered": entry.get("days_covered"),
+            "views": entry.get("views", []),
+            "context_status": (entry.get("context_completeness") or {}).get("status"),
+            "label_trust_tier": (entry.get("label_quality") or {}).get("trust_tier"),
         }
         for entry in sorted(entries, key=lambda item: (item["content_hash"], item["path"]))
     ]
 
     fingerprint_value = hash_json_payload({"entries": normalized_entries})
     p0_violations = len(violations)
+    corpus_views = _summarize_corpus_views(entries)
+    ready_entries = sum(
+        1
+        for entry in entries
+        if str((entry.get("context_completeness") or {}).get("status") or "") == "ready"
+    )
+    high_trust_entries = sum(
+        1
+        for entry in entries
+        if str((entry.get("label_quality") or {}).get("trust_tier") or "") == "high"
+    )
 
     return {
         "manifest_version": MANIFEST_VERSION,
@@ -251,6 +399,15 @@ def build_pretrain_corpus_manifest(
         "entries": entries,
         "duplicates": duplicates,
         "violations": violations,
+        "corpus_views": corpus_views,
+        "context_summary": {
+            "ready_entries": int(ready_entries),
+            "incomplete_entries": int(max(len(entries) - ready_entries, 0)),
+        },
+        "label_quality_summary": {
+            "high_trust_entries": int(high_trust_entries),
+            "unknown_trust_entries": int(max(len(entries) - high_trust_entries, 0)),
+        },
         "stats": {
             "files_scanned": int(files_scanned),
             "records_kept": int(len(entries)),
@@ -268,6 +425,7 @@ __all__ = [
     "MANIFEST_VERSION",
     "CorpusManifestPolicy",
     "build_pretrain_corpus_manifest",
+    "evaluate_beta62_corpus_contract",
     "load_feature_matrix",
     "load_manifest",
 ]

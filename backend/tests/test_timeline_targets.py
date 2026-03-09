@@ -16,8 +16,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from ml.timeline_targets import (
     BoundaryTargets,
     EpisodeAttributeTargets,
+    EventNativeTargets,
     build_boundary_targets,
     build_boundary_targets_from_episodes,
+    build_event_native_targets,
     build_episode_attribute_targets,
     build_multi_room_targets,
     targets_to_dataframe,
@@ -268,6 +270,21 @@ class TestEpisodeAttributeTargets(unittest.TestCase):
         self.assertIn('episode_starts', d)
         self.assertIn('episode_ends', d)
         self.assertIn('episode_labels', d)
+
+
+class TestEventNativeTargets(unittest.TestCase):
+    def test_timeline_targets_generate_event_native_supervision(self):
+        base_time = datetime(2026, 2, 1, 10, 0, 0)
+        timestamps = np.array([base_time + timedelta(seconds=i * 10) for i in range(5)])
+        labels = np.array(['unoccupied', 'sleeping', 'sleeping', 'cooking', 'unoccupied'])
+
+        targets = build_event_native_targets(timestamps, labels, window_duration_seconds=10.0)
+
+        self.assertIsInstance(targets, EventNativeTargets)
+        self.assertEqual(int(targets.onset_flags[1]), 1)
+        self.assertEqual(int(targets.offset_flags[2]), 1)
+        self.assertEqual(int(targets.continuity_flags[2]), 1)
+        self.assertGreater(float(targets.duration_minutes[2]), 0.0)
 
 
 class TestValidateNoTemporalLeakage(unittest.TestCase):

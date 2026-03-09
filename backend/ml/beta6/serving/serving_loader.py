@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
 from ml.policy_presets import load_rollout_ladder_policy
+from ml.beta6.registry.registry_v2 import RegistryV2
 from ml.t80_rollout_manager import RolloutStage, T80RolloutManager
 
 
@@ -129,6 +130,42 @@ def _resolve_stability_config() -> StabilityCertificationConfig:
 def _hash_report_payload(payload: Mapping[str, Any]) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def resolve_serving_pointer_for_room(
+    *,
+    registry_v2: RegistryV2,
+    elder_id: str,
+    room: str,
+) -> Optional[Dict[str, Any]]:
+    """
+    Resolve the serving pointer deterministically when fallback mode is active.
+
+    Order:
+    1. Active fallback target referenced by fallback state.
+    2. Current champion pointer when fallback is inactive.
+    3. Previous known-good pointer from registry history when fallback is active
+       but the active materialized pointer is missing.
+    """
+    fallback_state = registry_v2.read_fallback_state(elder_id, room)
+    if isinstance(fallback_state, Mapping) and bool(fallback_state.get("active", False)):
+        candidate_id = str(fallback_state.get("fallback_candidate_id") or "").strip() or None
+        resolved = registry_v2.resolve_fallback_target(
+            elder_id=elder_id,
+            room=room,
+            fallback_candidate_id=candidate_id,
+        )
+        if isinstance(resolved, Mapping):
+            return dict(resolved)
+        previous_pointer = fallback_state.get("previous_pointer")
+        if isinstance(previous_pointer, Mapping):
+            return dict(previous_pointer)
+        return None
+
+    current = registry_v2.read_champion_pointer(elder_id, room)
+    if isinstance(current, Mapping):
+        return dict(current)
+    return None
 
 
 def run_daily_stability_certification(

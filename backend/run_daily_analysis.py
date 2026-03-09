@@ -270,9 +270,11 @@ def _resolve_retrain_input_mode(default_mode: str = "auto_aggregate") -> str:
     return default_mode
 
 
-def _resolve_release_gate_evidence_profile(default_profile: str = "production") -> str:
-    raw = str(os.getenv("RELEASE_GATE_EVIDENCE_PROFILE", default_profile)).strip().lower()
-    return raw or default_profile
+def _resolve_release_gate_evidence_profile(default_profile: str | None = "production") -> str:
+    raw = str(os.getenv("RELEASE_GATE_EVIDENCE_PROFILE", "")).strip().lower()
+    if raw:
+        return raw
+    return str(default_profile or "").strip().lower()
 
 
 def _enforce_retrain_mode_for_evidence_profile(retrain_mode: str) -> None:
@@ -357,19 +359,221 @@ def _resolve_training_files_for_run(elder_id: str, incoming_files: list[Path]) -
 
 def _ensure_beta6_authority_evidence_profile_default() -> None:
     """
-    Ensure pilot evidence defaults are applied in Beta 6 authority mode when
-    RELEASE_GATE_EVIDENCE_PROFILE is not explicitly configured.
+    Legacy compatibility hook.
+
+    Beta 6.1 live authority now requires an explicit evidence profile instead of
+    silently defaulting one into the environment.
     """
-    if not _is_beta6_authority_enabled():
-        return
-    raw = str(os.getenv("RELEASE_GATE_EVIDENCE_PROFILE", "")).strip().lower()
-    if raw:
-        return
-    os.environ["RELEASE_GATE_EVIDENCE_PROFILE"] = "pilot_stage_a"
-    logger.warning(
-        "BETA6 authority is enabled but RELEASE_GATE_EVIDENCE_PROFILE is unset; "
-        "defaulting to pilot_stage_a for timeline-window evidence floors."
+    return
+
+
+def _has_explicit_env_value(name: str) -> bool:
+    raw = os.getenv(name)
+    return raw is not None and bool(str(raw).strip())
+
+
+def _check_beta6_authority_postgres_reachability() -> tuple[bool, str | None]:
+    try:
+        try:
+            from backend.db.legacy_adapter import LegacyDatabaseAdapter
+        except ImportError:
+            from db.legacy_adapter import LegacyDatabaseAdapter
+
+        with LegacyDatabaseAdapter().get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            fetchone = getattr(cursor, "fetchone", None)
+            if callable(fetchone):
+                fetchone()
+        return True, None
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def validate_beta6_live_authority_preflight(
+    *,
+    live_authority: bool,
+    require_postgres: bool = False,
+    postgres_checker=None,
+) -> tuple[bool, dict]:
+    """
+    Shared fail-closed contract for Beta 6.1 live authority mode.
+
+    This is intentionally reused by watcher/runtime flows and readiness checks so
+    live authority never relies on implicit env defaults.
+    """
+    authority_enabled = _is_beta6_authority_enabled()
+    report: dict = {
+        "pass": True,
+        "reason": "ok",
+        "authority_enabled": bool(authority_enabled),
+        "live_authority": bool(live_authority),
+        "require_postgres": bool(require_postgres),
+        "checks": [],
+        "signing_key_configured": False,
+        "evidence_profile_configured": False,
+        "evidence_profile": None,
+        "postgres_reachable": None,
+        "postgres_error": None,
+    }
+
+    def _push(name: str, ok: bool, details: dict | None = None) -> None:
+        entry = {"check": str(name), "pass": bool(ok)}
+        if details:
+            entry["details"] = dict(details)
+        report["checks"].append(entry)
+
+    if not authority_enabled:
+        report["reason"] = "disabled"
+        _push("authority_enabled", True, {"value": False})
+        return True, report
+
+    _push("authority_enabled", True, {"value": True})
+
+    if not live_authority:
+        report["reason"] = "not_live_authority"
+        _push("live_authority", True, {"value": False})
+        return True, report
+
+    _push("live_authority", True, {"value": True})
+
+    signing_key_configured = _has_explicit_env_value("BETA6_GATE_SIGNING_KEY")
+    report["signing_key_configured"] = bool(signing_key_configured)
+    _push("explicit_signing_key", signing_key_configured, {"env": "BETA6_GATE_SIGNING_KEY"})
+    if not signing_key_configured:
+        report["pass"] = False
+        report["reason"] = "missing_signing_key"
+        return False, report
+
+    evidence_profile = str(os.getenv("RELEASE_GATE_EVIDENCE_PROFILE", "")).strip().lower()
+    evidence_profile_configured = bool(evidence_profile)
+    report["evidence_profile_configured"] = evidence_profile_configured
+    report["evidence_profile"] = evidence_profile or None
+    _push(
+        "explicit_evidence_profile",
+        evidence_profile_configured,
+        {"env": "RELEASE_GATE_EVIDENCE_PROFILE", "value": evidence_profile or None},
     )
+    if not evidence_profile_configured:
+        report["pass"] = False
+        report["reason"] = "missing_evidence_profile"
+        return False, report
+
+    if require_postgres:
+        checker = postgres_checker or _check_beta6_authority_postgres_reachability
+        result = checker()
+        if isinstance(result, tuple):
+            postgres_reachable = bool(result[0])
+            postgres_error = str(result[1]) if len(result) > 1 and result[1] else None
+        else:
+            postgres_reachable = bool(result)
+            postgres_error = None if postgres_reachable else "PostgreSQL unreachable"
+        report["postgres_reachable"] = bool(postgres_reachable)
+        report["postgres_error"] = postgres_error
+        _push(
+            "postgres_reachable",
+            postgres_reachable,
+            {"error": postgres_error} if postgres_error else None,
+        )
+        if not postgres_reachable:
+            report["pass"] = False
+            report["reason"] = "postgres_unavailable"
+            return False, report
+
+    return True, report
+
+
+def build_beta61_certification_entry_checklist(
+    *,
+    live_authority: bool,
+    registry_v2: RegistryV2 | None = None,
+    elder_id: str | None = None,
+    beta6_fallback_summary: dict | None = None,
+    require_postgres: bool = True,
+    postgres_checker=None,
+) -> tuple[bool, dict]:
+    """
+    Real-environment Beta 6.1 entry checklist.
+
+    This explicitly blocks certification claims when authority contracts are not
+    complete, even if the rest of the nightly run succeeded.
+    """
+    authority_ok, authority_report = validate_beta6_live_authority_preflight(
+        live_authority=live_authority,
+        require_postgres=require_postgres,
+        postgres_checker=postgres_checker,
+    )
+
+    summary = beta6_fallback_summary if isinstance(beta6_fallback_summary, dict) else {}
+    activated = summary.get("activated") if isinstance(summary.get("activated"), list) else []
+    fallback_errors = summary.get("errors") if isinstance(summary.get("errors"), list) else []
+    fallback_states: list[dict] = []
+    fallback_complete = True
+
+    if registry_v2 is not None and elder_id and activated:
+        for room in activated:
+            room_name = str(room or "").strip()
+            if not room_name:
+                fallback_complete = False
+                fallback_states.append({"room": room, "status": "invalid_room"})
+                continue
+            try:
+                state = registry_v2.read_fallback_state(elder_id, room_name)
+            except Exception as exc:
+                fallback_complete = False
+                fallback_states.append(
+                    {"room": room_name, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
+                )
+                continue
+            state = state if isinstance(state, dict) else {}
+            state_ok = bool(state.get("active", False)) and (
+                bool(str(state.get("fallback_candidate_id") or "").strip())
+                or isinstance(state.get("previous_pointer"), dict)
+            )
+            if not state_ok:
+                fallback_complete = False
+            fallback_states.append(
+                {
+                    "room": room_name,
+                    "status": "ok" if state_ok else "incomplete",
+                    "active": bool(state.get("active", False)),
+                    "fallback_candidate_id": state.get("fallback_candidate_id"),
+                    "has_previous_pointer": isinstance(state.get("previous_pointer"), dict),
+                }
+            )
+
+    checks = [
+        {
+            "check": "explicit_signing_key",
+            "pass": bool(authority_report.get("signing_key_configured")),
+        },
+        {
+            "check": "explicit_evidence_profile",
+            "pass": bool(authority_report.get("evidence_profile_configured")),
+            "details": {"evidence_profile": authority_report.get("evidence_profile")},
+        },
+        {
+            "check": "postgres_reachable",
+            "pass": bool(authority_report.get("postgres_reachable")) if require_postgres else True,
+            "details": {"error": authority_report.get("postgres_error")},
+        },
+        {
+            "check": "rollback_fallback_state_complete",
+            "pass": bool(fallback_complete and not fallback_errors),
+            "details": {
+                "activated_rooms": list(activated),
+                "errors": list(fallback_errors),
+                "states": fallback_states,
+            },
+        },
+    ]
+    passed = bool(authority_ok) and all(bool(item.get("pass")) for item in checks)
+    return passed, {
+        "pass": passed,
+        "reason": "ok" if passed else "certification_entry_blocked",
+        "authority_preflight": authority_report,
+        "checks": checks,
+    }
 
 
 def _validate_beta6_training_preflight(elder_id: str, aggregate_files: list[Path]) -> tuple[bool, dict]:
@@ -1309,17 +1513,20 @@ def _build_beta6_room_gate_report(metric: dict) -> dict:
     return report
 
 
-def _beta6_gate_signing_key() -> str:
+def _beta6_gate_signing_key(*, require_explicit: bool = False) -> str:
     """
     Resolve signing key for Beta 6 gate artifacts.
 
-    Defaults to a deterministic Beta 6 fallback key when env is absent so local,
-    test, and Beta 6 authority runs keep emitting signed artifacts consistently.
-    Strict explicit-secret enforcement is deferred to Beta 6.2.
+    Defaults to a deterministic Beta 6 fallback key when env is absent for
+    non-live runs so local tests stay deterministic.
     """
     raw = os.getenv("BETA6_GATE_SIGNING_KEY")
     if raw and str(raw).strip():
         return str(raw).strip()
+    if require_explicit:
+        raise RuntimeError(
+            "BETA6_GATE_SIGNING_KEY is required for live Beta 6 authority signing (registry_v2 present)"
+        )
     return "beta6-local-dev-signing-key"
 
 
@@ -1695,6 +1902,44 @@ def _apply_beta6_gate_authority(
     if not _is_beta6_authority_enabled():
         return True, {"pass": True, "reason": "disabled"}
 
+    authority_preflight_ok, authority_preflight_report = validate_beta6_live_authority_preflight(
+        live_authority=registry_v2 is not None,
+        require_postgres=False,
+    )
+    if not authority_preflight_ok:
+        preflight_reason = str(authority_preflight_report.get("reason") or "authority_preflight_failed")
+        preflight_error = f"Beta 6 live authority preflight failed: {preflight_reason}"
+        return False, {
+            "pass": False,
+            "reason_code": preflight_reason,
+            "details": {
+                "authority_preflight_failed": True,
+                "authority_preflight_reason": preflight_reason,
+            },
+            "phase0_authority_preflight": dict(authority_preflight_report),
+            "phase4_dynamic_gate": {
+                "status": "skipped",
+                "error": preflight_error,
+                "evaluation_report_signature": "",
+                "rejection_artifact_signature": "",
+                "evaluation_report_path": None,
+                "rejection_artifact_path": None,
+            },
+            "phase6_shadow_compare": {
+                "status": "skipped",
+                "error": preflight_error,
+                "summary": {},
+            },
+            "phase6_rollout_ladder": {
+                "status": "skipped",
+                "reason": preflight_reason,
+            },
+            "phase6_auto_rollback": {
+                "status": "skipped",
+                "reason": preflight_reason,
+            },
+        }
+
     engine = GateEngine()
     orchestrator = Beta6Orchestrator(require_intake_artifact=False)
     room_decisions = []
@@ -1830,7 +2075,7 @@ def _apply_beta6_gate_authority(
             room_reports=room_reports,
             run_id=run_id,
             elder_id=elder_id,
-            signing_key=_beta6_gate_signing_key(),
+            signing_key=_beta6_gate_signing_key(require_explicit=registry_v2 is not None),
             output_dir=artifact_output_dir,
         )
     except Exception as exc:
@@ -1907,7 +2152,7 @@ def _apply_beta6_gate_authority(
             room_rows=shadow_compare_rows,
             run_id=run_id,
             elder_id=elder_id,
-            signing_key=_beta6_gate_signing_key(),
+            signing_key=_beta6_gate_signing_key(require_explicit=registry_v2 is not None),
             output_path=shadow_compare_output_path,
             unexplained_divergence_rate_max=unexplained_divergence_rate_max,
             metadata={
@@ -2982,11 +3227,24 @@ def train_files(file_paths: list[Path]):
         beta6_run_id = _build_beta6_run_id(elder_id)
         registry_v2 = _init_beta6_registry_v2(registry)
         beta6_authority_enabled = _is_beta6_authority_enabled()
+        authority_preflight_report: dict = {"pass": True, "reason": "disabled"}
         runtime_activation_preflight_report: dict = {"pass": True, "reason": "disabled"}
-        if beta6_authority_enabled:
-            _ensure_beta6_authority_evidence_profile_default()
         policy = load_policy_from_env()
         if beta6_authority_enabled:
+            authority_preflight_ok, authority_preflight_report = validate_beta6_live_authority_preflight(
+                live_authority=registry_v2 is not None,
+                require_postgres=True,
+            )
+            if not authority_preflight_ok:
+                logger.error(
+                    "Beta 6 live authority preflight failed for %s (reason=%s): %s",
+                    elder_id,
+                    authority_preflight_report.get("reason"),
+                    authority_preflight_report,
+                )
+                for file_path in file_paths:
+                    archive_file(file_path, ARCHIVE_DATA_DIR)
+                return
             preflight_ok, preflight_report = _validate_beta6_training_preflight(
                 elder_id=elder_id,
                 aggregate_files=aggregate_files,
@@ -3081,6 +3339,7 @@ def train_files(file_paths: list[Path]):
         beta6_fallback_summary: dict = {"activated": [], "cleared": [], "errors": []}
         beta6_phase4_runtime_policy: dict = {"status": "disabled", "reason": "no_metrics"}
         phase6_stability_report: dict = {"status": "disabled", "reason": "no_metrics"}
+        beta61_certification_entry: dict = {"pass": False, "reason": "no_metrics", "checks": []}
 
         if metrics:
             decision_trace_gate_pass, decision_trace_gate_report = _validate_decision_trace_artifacts(metrics)
@@ -3238,6 +3497,13 @@ def train_files(file_paths: list[Path]):
                 run_id=beta6_run_id,
                 registry_v2=registry_v2,
             )
+            _, beta61_certification_entry = build_beta61_certification_entry_checklist(
+                live_authority=_is_beta6_authority_enabled(),
+                registry_v2=registry_v2,
+                elder_id=elder_id,
+                beta6_fallback_summary=beta6_fallback_summary,
+                require_postgres=True,
+            )
             try:
                 beta6_phase4_runtime_policy = _publish_beta6_phase4_runtime_policy(
                     metrics=metrics,
@@ -3349,7 +3615,9 @@ def train_files(file_paths: list[Path]):
                 phase6_stability = run_daily_stability_certification(
                     elder_id=elder_id,
                     run_id=beta6_run_id,
-                    beta6_gate_pass=beta6_gate_pass,
+                    beta6_gate_pass=bool(
+                        beta6_gate_pass and bool(beta61_certification_entry.get("pass", False))
+                    ),
                     beta6_gate_report=beta6_gate_report,
                     beta6_fallback_summary=beta6_fallback_summary,
                     pipeline_success_rate=pipeline_success_proxy,
@@ -3357,6 +3625,7 @@ def train_files(file_paths: list[Path]):
                     artifact_path=stability_artifact_path,
                 )
                 phase6_stability_report = phase6_stability.to_dict()
+                phase6_stability_report["certification_entry"] = dict(beta61_certification_entry)
             except Exception as exc:
                 phase6_stability_report = {
                     "status": "error",
@@ -3438,7 +3707,9 @@ def train_files(file_paths: list[Path]):
                         "beta6_run_id": beta6_run_id,
                         "beta6_gate": beta6_gate_report,
                         "beta6_fallback": beta6_fallback_summary,
+                        "beta61_certification_entry": beta61_certification_entry,
                         "beta6_phase4_runtime_policy": beta6_phase4_runtime_policy,
+                        "beta6_live_authority_preflight": authority_preflight_report,
                         "beta6_runtime_activation_preflight": runtime_activation_preflight_report,
                         "phase6_stability": phase6_stability_report,
                         "walk_forward_rolled_back_rooms": wf_rolled_back_rooms,

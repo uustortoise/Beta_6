@@ -20,6 +20,11 @@ try:
         TransformerTimelineHeads,
         create_timeline_heads,
     )
+    from ml.beta6.training.beta6_trainer import (
+        DEFAULT_DEMOGRAPHIC_CONTEXT_FIELDS,
+        build_beta62_context_features,
+        build_timeline_native_training_flags,
+    )
     TF_AVAILABLE = True
 except ImportError:
     TF_AVAILABLE = False
@@ -107,7 +112,10 @@ class TestTransformerTimelineHeads(unittest.TestCase):
         
         self.assertIn("boundary_end_logits", outputs)
         self.assertEqual(outputs["boundary_end_logits"].shape, (self.batch_size, self.seq_len, 1))
-        
+        self.assertIn("onset_logits", outputs)
+        self.assertIn("offset_logits", outputs)
+        self.assertIn("continuity_logits", outputs)
+
         self.assertIn("daily_duration_pred", outputs)
         self.assertEqual(outputs["daily_duration_pred"].shape, (self.batch_size, 1))
         
@@ -160,6 +168,7 @@ class TestTransformerTimelineHeads(unittest.TestCase):
             'occupancy_labels': tf.constant(np.random.randint(0, 2, (self.batch_size, self.seq_len))),
             'boundary_start_labels': tf.constant(np.random.randint(0, 2, (self.batch_size, self.seq_len))),
             'boundary_end_labels': tf.constant(np.random.randint(0, 2, (self.batch_size, self.seq_len))),
+            'continuity_labels': tf.constant(np.random.randint(0, 2, (self.batch_size, self.seq_len))),
         }
         
         losses = model.compute_loss(outputs, targets)
@@ -169,6 +178,7 @@ class TestTransformerTimelineHeads(unittest.TestCase):
         self.assertIn('occupancy', losses)
         self.assertIn('boundary_start', losses)
         self.assertIn('boundary_end', losses)
+        self.assertIn('continuity', losses)
         self.assertIn('total', losses)
         
         # Check total is sum of components
@@ -176,7 +186,8 @@ class TestTransformerTimelineHeads(unittest.TestCase):
             config.w_activity * losses['activity'] +
             config.w_occupancy * losses['occupancy'] +
             config.w_boundary_start * losses['boundary_start'] +
-            config.w_boundary_end * losses['boundary_end']
+            config.w_boundary_end * losses['boundary_end'] +
+            config.w_continuity * losses['continuity']
         )
         self.assertAlmostEqual(losses['total'].numpy(), expected_total.numpy(), places=5)
     
@@ -244,6 +255,32 @@ class TestFactoryFunction(unittest.TestCase):
         
         self.assertTrue(model.config.enable_daily_duration)
         self.assertTrue(model.config.enable_daily_count)
+
+    def test_layout_topology_context_reaches_beta62_model_path(self):
+        flags = build_timeline_native_training_flags()
+        context_features = build_beta62_context_features(
+            {
+                "household_type": "single_resident",
+                "helper_presence": "none",
+                "layout": {"topology": "corridor", "adjacency": {"bedroom": ["bathroom"]}},
+            }
+        )
+
+        self.assertTrue(flags["enable_onset_head"])
+        self.assertEqual(context_features["layout_topology"], "corridor")
+        self.assertEqual(context_features["adjacency_degree"], 1)
+
+    def test_demographic_context_is_not_default_training_input(self):
+        context_features = build_beta62_context_features(
+            {
+                "household_type": "multi_resident",
+                "helper_presence": "live_in",
+                "layout": {"topology": "open_plan"},
+            }
+        )
+
+        self.assertEqual(DEFAULT_DEMOGRAPHIC_CONTEXT_FIELDS, ())
+        self.assertEqual(context_features["demographic_fields"], [])
 
 
 @unittest.skipUnless(TF_AVAILABLE, "TensorFlow not available")

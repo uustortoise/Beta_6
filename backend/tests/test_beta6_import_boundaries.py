@@ -1,5 +1,6 @@
 import ast
 from pathlib import Path
+import importlib
 
 
 BETA6_ROOT = Path(__file__).resolve().parent.parent / "ml" / "beta6"
@@ -49,3 +50,28 @@ def test_beta6_import_boundaries_block_legacy_direct_imports():
             violations.append(f"{rel}: {module_name}")
 
     assert not violations, "Forbidden legacy imports found in ml.beta6:\\n" + "\\n".join(violations)
+
+
+def test_beta62_training_namespace_has_single_authoritative_entrypoint():
+    shim = importlib.import_module("ml.beta6.beta6_trainer")
+    impl = importlib.import_module("ml.beta6.training.beta6_trainer")
+
+    assert getattr(shim, "BETA62_AUTHORITATIVE_MODULE") == "ml.beta6.training.beta6_trainer"
+    assert getattr(shim, "BETA62_SHIM_DEPRECATED") is True
+    assert getattr(impl, "BETA62_AUTHORITATIVE_MODULE") == "ml.beta6.training.beta6_trainer"
+    assert getattr(impl, "BETA62_MODULE_SURFACE") == "training"
+
+
+def test_duplicate_registry_and_gate_paths_are_explicit_shims_or_blocked():
+    registry_shim = importlib.import_module("ml.beta6.registry_v2")
+    registry_impl = importlib.import_module("ml.beta6.registry.registry_v2")
+    gates_shim = importlib.import_module("ml.beta6.timeline_hard_gates")
+    gates_impl = importlib.import_module("ml.beta6.gates.timeline_hard_gates")
+
+    assert getattr(registry_shim, "BETA62_SHIM_TARGET") == "ml.beta6.registry.registry_v2"
+    assert getattr(registry_shim, "BETA62_SHIM_DEPRECATED") is True
+    assert getattr(registry_impl, "BETA62_AUTHORITATIVE_MODULE") == "ml.beta6.registry.registry_v2"
+
+    assert getattr(gates_shim, "BETA62_SHIM_TARGET") == "ml.beta6.gates.timeline_hard_gates"
+    assert getattr(gates_shim, "BETA62_SHIM_DEPRECATED") is True
+    assert getattr(gates_impl, "BETA62_AUTHORITATIVE_MODULE") == "ml.beta6.gates.timeline_hard_gates"

@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
+from processors.profile_processor import normalize_resident_home_context
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,43 @@ class EntrancePenaltyStatus(Enum):
     NO_PENALTY = "no_penalty"
     RECENT_ENTRANCE = "recent_entrance"
     PENALTY_ACTIVE = "penalty_active"
+
+
+@dataclass(frozen=True)
+class ResidentHomeContext:
+    """Typed resident/home context used by household routing and reporting."""
+
+    household_type: Optional[str] = None
+    helper_presence: Optional[str] = None
+    layout_topology: Optional[str] = None
+    adjacency: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    cohort_key: str = "unknown_household:unknown_helper:unknown_topology"
+    status: str = "missing_required_context"
+    missing_fields: Tuple[str, ...] = ()
+
+    @property
+    def requires_conservative_empty_gate(self) -> bool:
+        return self.household_type == "multi_resident" or self.helper_presence in {"scheduled", "live_in"}
+
+
+def build_resident_home_context(payload: Optional[Dict[str, Any]]) -> ResidentHomeContext:
+    normalized = normalize_resident_home_context(payload or {})
+    layout = normalized.get("layout", {}) if isinstance(normalized.get("layout"), dict) else {}
+    adjacency_payload = layout.get("adjacency", {}) if isinstance(layout, dict) else {}
+    adjacency: Dict[str, Tuple[str, ...]] = {}
+    if isinstance(adjacency_payload, dict):
+        for room, neighbors in adjacency_payload.items():
+            if isinstance(neighbors, list):
+                adjacency[str(room)] = tuple(str(item) for item in neighbors)
+    return ResidentHomeContext(
+        household_type=normalized.get("household_type"),
+        helper_presence=normalized.get("helper_presence"),
+        layout_topology=layout.get("topology") if isinstance(layout, dict) else None,
+        adjacency=adjacency,
+        cohort_key=str(normalized.get("cohort_key") or "unknown_household:unknown_helper:unknown_topology"),
+        status=str(normalized.get("status") or "missing_required_context"),
+        missing_fields=tuple(str(item) for item in normalized.get("missing_fields") or []),
+    )
 
 
 @dataclass
@@ -107,6 +145,9 @@ class HomeEmptyPrediction:
     # Entrance penalty info
     entrance_penalty_status: EntrancePenaltyStatus = EntrancePenaltyStatus.NO_PENALTY
     seconds_since_entrance: Optional[float] = None
+    context_contract_status: str = "not_provided"
+    context_cohort: Optional[str] = None
+    context_missing_fields: Tuple[str, ...] = ()
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -120,6 +161,9 @@ class HomeEmptyPrediction:
             "total_room_count": self.total_room_count,
             "entrance_penalty_status": self.entrance_penalty_status.value,
             "seconds_since_entrance": self.seconds_since_entrance,
+            "context_contract_status": self.context_contract_status,
+            "context_cohort": self.context_cohort,
+            "context_missing_fields": list(self.context_missing_fields),
         }
 
 
@@ -164,6 +208,7 @@ class HomeEmptyFusion:
         self,
         room_predictions: Dict[str, pd.DataFrame],
         timestamps: List[datetime],
+        resident_home_context: Optional[ResidentHomeContext | Dict[str, Any]] = None,
     ) -> List[HomeEmptyPrediction]:
         """
         Fuse multi-room predictions into home-empty predictions.
@@ -176,9 +221,20 @@ class HomeEmptyFusion:
             List of HomeEmptyPrediction objects
         """
         predictions = []
+        context = (
+            resident_home_context
+            if isinstance(resident_home_context, ResidentHomeContext)
+            else build_resident_home_context(resident_home_context)
+            if resident_home_context is not None
+            else None
+        )
         
         for ts in timestamps:
-            prediction = self._fuse_single_timestamp(room_predictions, ts)
+            prediction = self._fuse_single_timestamp(
+                room_predictions,
+                ts,
+                resident_home_context=context,
+            )
             predictions.append(prediction)
         
         # Apply temporal smoothing
@@ -190,9 +246,14 @@ class HomeEmptyFusion:
         self,
         room_predictions: Dict[str, pd.DataFrame],
         timestamps: List[datetime],
+        resident_home_context: Optional[ResidentHomeContext | Dict[str, Any]] = None,
     ) -> pd.DataFrame:
         """Fuse predictions to DataFrame format."""
-        predictions = self.fuse(room_predictions, timestamps)
+        predictions = self.fuse(
+            room_predictions,
+            timestamps,
+            resident_home_context=resident_home_context,
+        )
         
         if not predictions:
             return pd.DataFrame()
@@ -254,6 +315,7 @@ class HomeEmptyFusion:
         self,
         room_predictions: Dict[str, pd.DataFrame],
         timestamp: datetime,
+        resident_home_context: Optional[ResidentHomeContext] = None,
     ) -> HomeEmptyPrediction:
         """Fuse predictions for a single timestamp."""
         room_states = []
@@ -303,7 +365,11 @@ class HomeEmptyFusion:
         
         # Determine home state
         state, confidence = self._determine_home_state(
-            occupied_count, unoccupied_count, unknown_count, total_rooms
+            occupied_count,
+            unoccupied_count,
+            unknown_count,
+            total_rooms,
+            resident_home_context=resident_home_context,
         )
         
         # Update entrance tracking
@@ -328,6 +394,13 @@ class HomeEmptyFusion:
             total_room_count=total_rooms,
             entrance_penalty_status=penalty_status,
             seconds_since_entrance=seconds_since,
+            context_contract_status=(
+                resident_home_context.status if resident_home_context is not None else "not_provided"
+            ),
+            context_cohort=resident_home_context.cohort_key if resident_home_context is not None else None,
+            context_missing_fields=(
+                resident_home_context.missing_fields if resident_home_context is not None else ()
+            ),
         )
     
     def _find_nearest_prediction(
@@ -377,6 +450,7 @@ class HomeEmptyFusion:
         unoccupied_count: int,
         unknown_count: int,
         total_rooms: int,
+        resident_home_context: Optional[ResidentHomeContext] = None,
     ) -> Tuple[HomeEmptyState, float]:
         """
         Determine home state based on room consensus.
@@ -400,10 +474,15 @@ class HomeEmptyFusion:
         occupied_ratio = occupied_count / total_rooms
         empty_ratio = unoccupied_count / total_rooms
         threshold = float(self.config.room_consensus_threshold)
+        if resident_home_context is not None and resident_home_context.requires_conservative_empty_gate:
+            threshold = max(threshold, 1.0)
 
         # Safety-first: any occupied evidence keeps household occupied.
         if occupied_count > 0:
             return HomeEmptyState.OCCUPIED, occupied_ratio
+
+        if resident_home_context is not None and resident_home_context.status != "ready":
+            return HomeEmptyState.UNCERTAIN, max(occupied_ratio, empty_ratio)
 
         # Empty only when enough room consensus exists.
         if empty_ratio >= threshold:
@@ -630,6 +709,7 @@ def fuse_home_empty_predictions(
     room_predictions: Dict[str, pd.DataFrame],
     timestamps: Optional[List[datetime]] = None,
     config: Optional[HomeEmptyConfig] = None,
+    resident_home_context: Optional[ResidentHomeContext | Dict[str, Any]] = None,
 ) -> pd.DataFrame:
     """
     Convenience function to fuse home-empty predictions.
@@ -653,4 +733,8 @@ def fuse_home_empty_predictions(
                 all_timestamps.update(pd.to_datetime(pred_df["timestamp"]).tolist())
         timestamps = sorted(all_timestamps)
     
-    return fusion.fuse_to_dataframe(room_predictions, timestamps)
+    return fusion.fuse_to_dataframe(
+        room_predictions,
+        timestamps,
+        resident_home_context=resident_home_context,
+    )

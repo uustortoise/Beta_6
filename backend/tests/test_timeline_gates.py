@@ -19,6 +19,8 @@ from ml.timeline_gates import (
     create_default_timeline_checker,
 )
 from ml.timeline_metrics import TimelineMetrics
+from ml.beta6.gates.timeline_hard_gates import evaluate_timeline_hard_gates
+from ml.beta6.serving.capability_profiles import CapabilityProfile
 
 
 class TestTimelineGateThresholds(unittest.TestCase):
@@ -262,6 +264,28 @@ class TestTimelineGateChecker(unittest.TestCase):
         
         self.assertFalse(is_promotable)
         self.assertGreater(len(reasons), 0)
+
+    def test_beta6_timeline_hard_gate_uses_event_iou_when_present(self):
+        result = evaluate_timeline_hard_gates(
+            {
+                "timeline_metrics": {
+                    "duration_mae_minutes": 5.0,
+                    "fragmentation_rate": 0.1,
+                    "event_iou": 0.8,
+                }
+            },
+            CapabilityProfile(
+                profile_id="test_profile",
+                room_type="generic",
+                min_expected_signal_auc=0.5,
+                min_f1=0.5,
+                max_timeline_mae_minutes=15,
+                max_fragmentation_rate=0.3,
+            ),
+        )
+
+        self.assertTrue(result.passed)
+        self.assertEqual(result.details["event_iou"], 0.8)
     
     def test_is_promotable_unknown_breach(self):
         """Test promotable check with unknown rate breach."""

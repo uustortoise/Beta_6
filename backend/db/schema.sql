@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS elders (
     date_of_birth DATE,      -- Matched to SQLite
     gender TEXT,             -- Matched to SQLite
     blood_type TEXT,         -- Matched to SQLite
-    profile_data JSONB,
+    profile_data JSONB,      -- Includes Beta 6.1 typed resident_home_context contract
     created_at TIMESTAMP DEFAULT NOW(),
     last_updated TIMESTAMP -- Matched to SQLite
 );

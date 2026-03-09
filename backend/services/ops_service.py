@@ -12,6 +12,7 @@ import pandas as pd
 from config import get_release_gates_config, get_room_config
 from elderlycare_v1_16.config.settings import ARCHIVE_DATA_DIR
 from ml.release_gates import resolve_scheduled_threshold
+from services.correction_service import get_manual_review_scorecard
 from utils.room_utils import normalize_room_name
 
 # Ensure backend and project root are in sys.path for health_server's backend.* imports
@@ -644,6 +645,68 @@ def get_model_status(elder_id: str) -> dict:
     except Exception as e:
         logger.error(f"Failed to fetch model status for {elder_id}: {e}")
         return {"status": {"overall": "error", "reason": str(e)}}
+
+
+def get_timeline_reliability_scorecard(
+    elder_id: str,
+    *,
+    lookback_runs: int = 20,
+    review_days: int = 14,
+    review_threshold: float = 0.50,
+) -> dict:
+    """
+    Product-facing reliability + correction-load scorecard for ops and review UI.
+    """
+    if not elder_id or elder_id == "All":
+        return {
+            "elder_id": elder_id,
+            "correction_volume": 0,
+            "review_backlog": 0,
+            "manual_review_rate": None,
+            "contradiction_rate": None,
+            "fragmentation_rate": None,
+            "unknown_rate": None,
+            "abstain_rate": None,
+            "active_system": None,
+            "authority_state": "unavailable",
+            "room_policy_sensitivity": [],
+        }
+
+    review = get_manual_review_scorecard(
+        elder_id,
+        days=int(review_days),
+        threshold=float(review_threshold),
+    )
+    try:
+        snapshot, _status_code = build_ml_snapshot_report(
+            elder_id=elder_id,
+            room="",
+            lookback_runs=max(1, int(lookback_runs)),
+            include_raw=False,
+        )
+    except Exception as exc:
+        logger.error("Failed to fetch timeline reliability snapshot for %s: %s", elder_id, exc)
+        snapshot = {}
+
+    reliability = snapshot.get("timeline_reliability", {}) if isinstance(snapshot, dict) else {}
+    if not isinstance(reliability, dict):
+        reliability = {}
+
+    return {
+        "elder_id": elder_id,
+        "correction_volume": int(review.get("correction_volume", 0) or 0),
+        "review_backlog": int(review.get("review_backlog", 0) or 0),
+        "manual_review_rate": review.get("manual_review_rate"),
+        "review_window_days": int(review.get("review_window_days", review_days) or review_days),
+        "latest_correction_time": review.get("latest_correction_time"),
+        "contradiction_rate": reliability.get("contradiction_rate"),
+        "fragmentation_rate": reliability.get("fragmentation_rate"),
+        "unknown_rate": reliability.get("unknown_rate"),
+        "abstain_rate": reliability.get("abstain_rate"),
+        "active_system": reliability.get("active_system"),
+        "authority_state": reliability.get("authority_state", "unavailable"),
+        "room_policy_sensitivity": reliability.get("room_policy_sensitivity", []),
+    }
 
 
 def get_sample_collection_status(elder_id: str) -> dict:

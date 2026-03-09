@@ -139,6 +139,36 @@ def test_activate_fallback_mode_switches_pointer_and_logs_event(tmp_path: Path):
     assert events[-1]["payload"]["switched_pointer"] is True
 
 
+def test_registry_resolves_fallback_from_previous_known_good_pointer(tmp_path: Path):
+    registry = RegistryV2(root=tmp_path)
+    elder_id = "HK001"
+    room = "livingroom"
+
+    registry.promote_candidate(
+        elder_id=elder_id,
+        room=room,
+        run_id="run-1",
+        candidate_id="cand-v1",
+    )
+    registry.promote_candidate(
+        elder_id=elder_id,
+        room=room,
+        run_id="run-2",
+        candidate_id="cand-v2",
+    )
+
+    state = registry.activate_fallback_mode(
+        elder_id=elder_id,
+        room=room,
+        run_id="run-3",
+        trigger_reason_code=ReasonCode.FAIL_GATE_POLICY.value,
+    )
+
+    assert state["active"] is True
+    assert state["fallback_candidate_id"] == "cand-v1"
+    assert registry.read_champion_pointer(elder_id, room)["candidate_id"] == "cand-v1"
+
+
 def test_activate_fallback_mode_without_target_raises_and_logs_reason(tmp_path: Path):
     registry = RegistryV2(root=tmp_path)
     elder_id = "HK001"
@@ -302,5 +332,5 @@ def test_rollback_and_activate_fallback_handles_missing_rollback_target(tmp_path
 
     assert result["rollback_applied"] is False
     assert "No rollback target available" in str(result["rollback_error"])
-    assert result["fallback_state"]["active"] is True
-    assert result["fallback_state"]["fallback_candidate_id"] == "cand-v1"
+    assert result["fallback_state"] is None
+    assert "No fallback target available" in str(result["error"])

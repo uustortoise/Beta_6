@@ -28,6 +28,56 @@ import services.correction_service as correction_service
 from app._sidebar import render_sidebar
 from config import get_room_config
 
+
+CORRECTION_SELECTED_DATE_KEY = "correction_selected_date"
+CORRECTION_PENDING_DATE_KEY = "correction_pending_selected_date"
+
+
+def _coerce_widget_date(value) -> datetime.date | None:
+    if value is None:
+        return None
+    if isinstance(value, pd.Timestamp):
+        if pd.isna(value):
+            return None
+        return value.date()
+    if isinstance(value, datetime.datetime):
+        return value.date()
+    if isinstance(value, datetime.date):
+        return value
+    coerced = pd.to_datetime(value, errors="coerce")
+    if pd.isna(coerced):
+        return None
+    return coerced.date()
+
+
+def _apply_pending_widget_date(
+    state,
+    *,
+    widget_key: str,
+    pending_key: str,
+    default_date: datetime.date | None = None,
+) -> datetime.date:
+    effective_default = default_date or datetime.date.today()
+    pending_date = _coerce_widget_date(state.pop(pending_key, None))
+    if pending_date is not None:
+        state[widget_key] = pending_date
+        return pending_date
+
+    current_value = _coerce_widget_date(state.get(widget_key))
+    if current_value is None:
+        state[widget_key] = effective_default
+        return effective_default
+
+    state[widget_key] = current_value
+    return current_value
+
+
+def _queue_widget_date_update(state, *, pending_key: str, next_date) -> None:
+    queued_date = _coerce_widget_date(next_date)
+    if queued_date is not None:
+        state[pending_key] = queued_date
+
+
 def _normalize_selected_rows(selected_rows):
     if selected_rows is None:
         return []
@@ -510,8 +560,11 @@ def render():
         st.warning("Please select a specific Resident Context from the sidebar.")
         return
 
-    if "correction_selected_date" not in st.session_state:
-        st.session_state["correction_selected_date"] = datetime.date.today()
+    _apply_pending_widget_date(
+        st.session_state,
+        widget_key=CORRECTION_SELECTED_DATE_KEY,
+        pending_key=CORRECTION_PENDING_DATE_KEY,
+    )
 
     # 1. Filters
     col1, col2, col3 = st.columns(3)
@@ -521,7 +574,7 @@ def render():
         selected_room = st.selectbox("Room", rooms)
         
     with col2:
-        selected_date = st.date_input("Date", key="correction_selected_date")
+        selected_date = st.date_input("Date", key=CORRECTION_SELECTED_DATE_KEY)
         
     with col3:
         confidence_threshold = st.slider("Confidence Threshold", min_value=0.1, max_value=0.99, value=0.60, step=0.05)
@@ -577,7 +630,11 @@ def render():
                     f"Load Nearest Date ({nearest_day})",
                     key=f"corr_nearest_{elder_id}_{selected_room}_{selected_date.isoformat()}",
                 ):
-                    st.session_state["correction_selected_date"] = nearest_day
+                    _queue_widget_date_update(
+                        st.session_state,
+                        pending_key=CORRECTION_PENDING_DATE_KEY,
+                        next_date=nearest_day,
+                    )
                     st.rerun()
             else:
                 nearest_any = correction_service.find_nearest_activity_date(
@@ -595,7 +652,11 @@ def render():
                         f"Load Nearest Resident Date ({nearest_day})",
                         key=f"corr_nearest_any_{elder_id}_{selected_room}_{selected_date.isoformat()}",
                     ):
-                        st.session_state["correction_selected_date"] = nearest_day
+                        _queue_widget_date_update(
+                            st.session_state,
+                            pending_key=CORRECTION_PENDING_DATE_KEY,
+                            next_date=nearest_day,
+                        )
                         st.rerun()
                 else:
                     st.warning(

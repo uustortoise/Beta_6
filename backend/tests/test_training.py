@@ -3168,6 +3168,92 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertEqual(len(targets), 0)
         self.assertEqual(debug["reason"], "missing_label_encoder")
 
+    def test_leakage_free_wrapper_preserves_authoritative_statistical_gate(self):
+        def _scaled_frame(labels):
+            n = len(labels)
+            return pd.DataFrame(
+                {
+                    "timestamp": pd.date_range("2026-01-01", periods=n, freq="10s"),
+                    "s1": np.zeros(n, dtype=np.float32),
+                    "s2": np.zeros(n, dtype=np.float32),
+                    "s3": np.zeros(n, dtype=np.float32),
+                    "activity_encoded": np.asarray(labels, dtype=np.int32),
+                }
+            )
+
+        raw_df = pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2026-01-01", periods=12, freq="10s"),
+                "s1": np.zeros(12, dtype=np.float32),
+                "s2": np.zeros(12, dtype=np.float32),
+                "s3": np.zeros(12, dtype=np.float32),
+                "activity": ["sleep"] * 12,
+            }
+        )
+
+        prep_result = {
+            "train_scaled": _scaled_frame([0, 1, 2] * 20),
+            "val_scaled": _scaled_frame(([0] * 40) + ([1] * 40) + ([2] * 40)),
+            "calib_scaled": _scaled_frame(([0] * 2) + ([1] * 35) + ([2] * 40)),
+            "split_metadata": {
+                "total_samples": 197,
+                "train_samples": 60,
+                "val_samples": 120,
+                "calib_samples": 77,
+            },
+            "scaler_metadata": {"fit_sample_count": 60},
+        }
+        authoritative_gate = {
+            "passes": True,
+            "promotable": True,
+            "reasons": [],
+            "warnings": [],
+            "metrics": {
+                "total_calibration_samples": 2847,
+                "total_validation_samples": 2847,
+                "class_support": {"0": 257, "1": 937, "2": 1653},
+            },
+            "blocking": False,
+            "blocking_reasons": [],
+            "non_blocking_reasons": [],
+            "reason_codes": [],
+            "evaluation_status": "pass",
+            "gate_name": "statistical_validity",
+            "room": "Bedroom",
+        }
+        authoritative_metrics = {
+            "room": "Bedroom",
+            "gate_pass": True,
+            "gate_reasons": [],
+            "statistical_validity_gate": authoritative_gate,
+        }
+
+        with patch(
+            "ml.train_split_scaling_pipeline.is_train_split_scaling_enabled",
+            return_value=True,
+        ), patch(
+            "ml.train_split_scaling_pipeline.prepare_training_data_with_train_split_scaling",
+            return_value=prep_result,
+        ), patch(
+            "ml.train_split_scaling_pipeline.validate_no_leakage",
+            return_value=(True, []),
+        ), patch.object(
+            self.pipeline,
+            "train_room",
+            return_value=dict(authoritative_metrics),
+        ):
+            metrics = self.pipeline.train_room_with_leakage_free_scaling(
+                room_name="Bedroom",
+                raw_df=raw_df,
+                seq_length=5,
+                elder_id="HK0011_jessica",
+            )
+
+        self.assertTrue(metrics["gate_pass"])
+        self.assertEqual(metrics["gate_reasons"], [])
+        self.assertEqual(metrics["statistical_validity_gate"], authoritative_gate)
+        self.assertEqual(metrics["train_split_scaling"]["split_metadata"]["calib_samples"], 77)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -2378,6 +2378,50 @@ class TrainingPipeline:
 
         return _finalize()
 
+    @staticmethod
+    def _extract_statistical_validity_gate_payload(
+        gate_stack: List[Any],
+        *,
+        room_name: str,
+    ) -> Optional[Dict[str, Any]]:
+        for gate in gate_stack or []:
+            if getattr(gate, "gate_name", None) != "StatisticalValidityGate":
+                continue
+            details = dict(getattr(gate, "details", {}) or {})
+            blocking_reasons = [
+                str(reason)
+                for reason in (details.get("blocking_reasons") or [])
+                if str(reason).strip()
+            ]
+            non_blocking_reasons = [
+                str(reason)
+                for reason in (details.get("non_blocking_reasons") or [])
+                if str(reason).strip()
+            ]
+            if not blocking_reasons and getattr(gate, "reason", None) and not bool(getattr(gate, "passes", False)):
+                blocking_reasons = [str(gate.reason)]
+            reasons = list(dict.fromkeys(blocking_reasons + non_blocking_reasons))
+            return {
+                "passes": bool(getattr(gate, "passes", False)),
+                "promotable": len(blocking_reasons) == 0,
+                "reasons": reasons,
+                "warnings": list(non_blocking_reasons),
+                "metrics": copy.deepcopy(details.get("metrics", {}) or {}),
+                "blocking": len(blocking_reasons) > 0,
+                "blocking_reasons": list(blocking_reasons),
+                "non_blocking_reasons": list(non_blocking_reasons),
+                "reason_codes": list(details.get("reason_codes", []) or []),
+                "evaluation_status": str(
+                    details.get(
+                        "evaluation_status",
+                        "pass" if bool(getattr(gate, "passes", False)) else "fail",
+                    )
+                ),
+                "gate_name": "statistical_validity",
+                "room": str(room_name),
+            }
+        return None
+
     def _derive_lane_b_event_metrics(
         self,
         room_name: str,
@@ -5628,10 +5672,6 @@ class TrainingPipeline:
             validate_no_leakage,
             is_train_split_scaling_enabled,
         )
-        from ml.statistical_validity_gate import (
-            evaluate_promotion_with_statistical_validity,
-            create_statistical_validity_gate_from_policy,
-        )
         
         if not is_train_split_scaling_enabled():
             raise ModelTrainError(
@@ -5695,35 +5735,6 @@ class TrainingPipeline:
         
         # Add leakage-free metadata
         metrics['train_split_scaling'] = processed_df.attrs['train_split_scaling']
-        
-        # Item 6: Statistical Validity Gate
-        # Evaluate on calibration data
-        if calib_scaled is not None and 'activity_encoded' in calib_scaled.columns:
-            y_calib = calib_scaled['activity_encoded'].values
-            y_val = val_scaled['activity_encoded'].values if val_scaled is not None else None
-            
-            calib_metrics = {
-                'is_fallback': metrics.get('metric_source') == 'train_fallback_small_dataset',
-                'metric_source': metrics.get('metric_source', 'unknown'),
-            }
-            
-            promotable, sv_reasons, sv_result = evaluate_promotion_with_statistical_validity(
-                calibration_metrics=calib_metrics,
-                y_calib=y_calib,
-                y_val=y_val,
-                room_name=room_name,
-                policy=active_policy,
-            )
-            
-            metrics['statistical_validity_gate'] = sv_result
-            
-            # If statistical validity fails, override gate_pass
-            if not promotable and metrics.get('gate_pass', False):
-                logger.warning(
-                    f"[{room_name}] Overriding gate_pass due to statistical validity failure"
-                )
-                metrics['gate_pass'] = False
-                metrics['gate_reasons'] = metrics.get('gate_reasons', []) + sv_reasons
         
         return metrics
 
@@ -7017,6 +7028,12 @@ class TrainingPipeline:
                 ),
                 validation_class_support=validation_class_support,
             )
+            statistical_validity_gate = self._extract_statistical_validity_gate_payload(
+                post_training_result.gate_stack,
+                room_name=room_name,
+            )
+            if statistical_validity_gate is not None:
+                metrics["statistical_validity_gate"] = statistical_validity_gate
             
             # Merge post-training gate results with metrics
             metrics['gate_stack'] = [g.to_dict() for g in post_training_result.gate_stack]

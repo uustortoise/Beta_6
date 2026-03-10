@@ -559,13 +559,126 @@ Updated deployment recommendation:
 - keep `HK0011_jessica_candidate_nodownsample_20260310T132301Z` as the benchmark-leading candidate only if an explicit Bedroom `v37` exception is acceptable
 - do not spend more time on Bedroom/LivingRoom modeling before deciding between those two deployment postures
 
+## Execution Update: Support-Gate Reconciliation And Replay
+
+Executed candidate namespace:
+
+- `backend/models/HK0011_jessica_candidate_supportfix_20260310T2312Z`
+
+Primary code change:
+
+- `backend/ml/training.py`
+- `backend/tests/test_training.py`
+
+### Root cause of the Bedroom support blocker
+
+The earlier `Bedroom_v37` support failure was not a real sequence-level evidence problem.
+
+What was wrong:
+
+- the leakage-free wrapper path in `train_room_with_leakage_free_scaling()` re-ran statistical-validity checks on row-level calibration/validation splits
+- that wrapper-level check saw only `2` minority-class rows in the calibration slice and overwrote the authoritative post-training gate result
+- the inner `train_room()` path had already evaluated the real post-training gate using sequence-level support and the saved decision trace showed a passing support picture
+
+Mismatch that exposed the bug:
+
+- wrapper-side `train_metrics.json` reported `Insufficient minority class support: class 0 has 2 < 30 samples`
+- the saved `Bedroom_v37_decision_trace.json` already recorded validation / holdout class support:
+  - `0=257`
+  - `1=937`
+  - `2=1653`
+
+Fix:
+
+- remove the duplicate wrapper-side statistical-validity override
+- persist the authoritative statistical-validity gate payload from `post_training_result.gate_stack`
+- cover the regression with `test_leakage_free_wrapper_preserves_authoritative_statistical_gate`
+
+### Bedroom rerun after the fix
+
+Primary artifacts:
+
+- `backend/models/HK0011_jessica_candidate_supportfix_20260310T2312Z/Bedroom_v38_decision_trace.json`
+- `tmp/jessica_17dec_eval_candidate_supportfix_20260310T2312Z/train_metrics.json`
+
+Execution details:
+
+- cloned the earlier benchmark-leading namespace `HK0011_jessica_candidate_nodownsample_20260310T132301Z`
+- reran `Bedroom` only on the corrected Dec 4-10 plus Dec 17 workbook pack
+- promoted `Bedroom_v38` inside the cloned namespace
+
+Authoritative Bedroom result:
+
+- `gate_pass=true`
+- `statistical_validity_gate.passes=true`
+- `statistical_validity_gate.promotable=true`
+- `statistical_validity_gate.metrics.class_support`:
+  - `0=257`
+  - `1=937`
+  - `2=1653`
+- holdout / validation minority support `257`
+- holdout macro-F1 `0.6257`
+- watch only:
+  - `class_prior_drift_sampled_watch:bedroom:0:0.146>0.100`
+
+Interpretation:
+
+- Bedroom no longer needs a policy exception to clear support gating
+- the original blocker was evidence propagation drift between two training paths, not missing Bedroom support in the corrected workbook pack
+
+### Mixed benchmark replay after Bedroom promotion
+
+Primary artifact:
+
+- `tmp/jessica_17dec_eval_candidate_supportfix_20260310T2312Z/final/comparison/summary.json`
+
+Replay benchmark source:
+
+- corrected `/Users/dickson/DT/DT_development/Development/New training files/Jessica (sleep and out fixed)/HK0011_jessica_train_17dec2025.xlsx`
+
+Final Dec 17 benchmark impact:
+
+- overall final accuracy `0.8048`
+- overall final macro-F1 `0.4486`
+- Bedroom final macro-F1 `0.3511`
+- LivingRoom final macro-F1 `0.4340`
+
+Comparison:
+
+- matches the earlier benchmark-leading `HK0011_jessica_candidate_nodownsample_20260310T132301Z` replay exactly on the Dec 17 benchmark
+- beats the safe fallback candidate `HK0011_jessica_candidate_safev36_20260310T141724Z` by preserving the improved Bedroom model:
+  - overall final macro-F1 `0.3974 -> 0.4486`
+  - Bedroom final macro-F1 `0.2723 -> 0.3511`
+  - LivingRoom remains `0.4340`
+
+Fresh-load sanity:
+
+- `UnifiedPipeline` / `load_models_for_elder()` loaded all five rooms from the support-fix namespace
+- current versions:
+  - `Bathroom_v35`
+  - `Bedroom_v38`
+  - `Entrance_v26`
+  - `Kitchen_v27`
+  - `LivingRoom_v40`
+- `platform.two_stage_core_models` contained:
+  - `Bathroom`
+  - `Bedroom`
+  - `LivingRoom`
+
+Updated deployment recommendation:
+
+- treat `HK0011_jessica_candidate_supportfix_20260310T2312Z` as the new promotion-grade candidate in this branch
+- keep `HK0011_jessica_candidate_safev36_20260310T141724Z` only as the fail-closed fallback if the older Bedroom `v36` posture is still preferred for operational reasons
+- retire the previous claim that Bedroom still needs additional support evidence before promotion; that blocker was resolved by fixing the training-path metric source
+
 ## Cross-Room Conclusion
 
 The remaining work should split cleanly:
 
 - Bedroom:
   - the all-`sleep` retrain collapse is fixed by restoring the older weighting policy and Bedroom shuffle behavior
-  - the remaining blocker is now promotion/statistical-validity support, not collapse or threshold geometry
+  - the apparent support blocker was a leakage-free wrapper bug and is now resolved in code
+  - the current promotion-grade Bedroom artifact is `Bedroom_v38` in `HK0011_jessica_candidate_supportfix_20260310T2312Z`
 
 - LivingRoom:
   - the all-`unoccupied` retrain collapse is fixed, and the no-downsample rerun now beats deployed `v30` on the Dec 17 benchmark
@@ -584,11 +697,14 @@ Do not reopen the confidence-runtime architecture thread unless new evidence sho
 - `backend/models/HK0011_jessica_candidate_fallback_20260310T083856Z/LivingRoom_v29_decision_trace.json`
 - `backend/models/HK0011_jessica_candidate_fallback_20260310T083856Z/LivingRoom_v30_decision_trace.json`
 - `backend/models/HK0011_jessica_candidate_nodownsample_20260310T132301Z/LivingRoom_v40_decision_trace.json`
+- `backend/models/HK0011_jessica_candidate_supportfix_20260310T2312Z/Bedroom_v38_decision_trace.json`
 - `backend/models/HK0011_jessica_candidate_safev36_20260310T141724Z/Bedroom_versions.json`
 - `tmp/jessica_17dec_eval_candidate_blr_20260310T072625Z/fallback_recalibration_bedroom.json`
 - `tmp/jessica_17dec_eval_candidate_blr_20260310T072625Z/fallback_recalibration_livingroom.json`
 - `tmp/jessica_17dec_eval_candidate_mixed_20260310T090755Z/final_v3/comparison/summary.json`
 - `tmp/jessica_17dec_eval_candidate_nodownsample_20260310T132301Z/train_metrics.json`
 - `tmp/jessica_17dec_eval_candidate_nodownsample_20260310T132301Z/final/comparison/summary.json`
+- `tmp/jessica_17dec_eval_candidate_supportfix_20260310T2312Z/train_metrics.json`
+- `tmp/jessica_17dec_eval_candidate_supportfix_20260310T2312Z/final/comparison/summary.json`
 - `tmp/jessica_17dec_eval_candidate_safev36_20260310T141724Z/final/comparison/summary.json`
 - `tmp/jessica_17dec_eval_candidate_safev36_20260310T141724Z/load_sanity.json`

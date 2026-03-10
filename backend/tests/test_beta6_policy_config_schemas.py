@@ -199,6 +199,23 @@ def test_beta6_policy_defaults_yaml_includes_two_stage_core_training_contract():
         assert key in two_stage, f"missing training.two_stage_core.{key}"
 
 
+def test_beta6_policy_defaults_yaml_includes_activity_confidence_calibration_contract():
+    path = CONFIG_DIR / "beta6_policy_defaults.yaml"
+    payload = _load_yaml(path)
+    _assert_version_v1(payload, path)
+
+    calibration = payload.get("calibration")
+    assert isinstance(calibration, dict), "calibration section must be a mapping"
+    for key in (
+        "activity_confidence_min_samples",
+        "activity_confidence_threshold_floor",
+        "activity_confidence_threshold_cap",
+        "threshold_stability_window",
+        "threshold_stability_max_near_share",
+    ):
+        assert key in calibration, f"missing calibration.{key}"
+
+
 def test_beta6_canary_gate_yaml_schema():
     path = CONFIG_DIR / "beta6_canary_gate.yaml"
     payload = _load_yaml(path)
@@ -320,3 +337,53 @@ def test_beta6_policy_defaults_yaml_includes_livingroom_room_label_clinical_prio
     ), "clinical_priority.multipliers_by_room_label must be a mapping"
     assert room_label_overrides.get("livingroom.livingroom_normal_use") == 1.0
     assert room_label_overrides.get("livingroom.unoccupied") == 1.0
+    assert room_label_overrides.get("bedroom.bedroom_normal_use") == 1.0
+    assert room_label_overrides.get("bedroom.unoccupied") == 1.0
+
+
+def test_beta6_policy_defaults_yaml_includes_livingroom_prior_drift_guardrails():
+    path = CONFIG_DIR / "beta6_policy_defaults.yaml"
+    payload = _load_yaml(path)
+    _assert_version_v1(payload, path)
+
+    unoccupied = payload.get("unoccupied_downsample")
+    assert isinstance(unoccupied, dict), "unoccupied_downsample section must be a mapping"
+    downsample_drift = unoccupied.get("max_post_downsample_prior_drift_by_room")
+    assert isinstance(
+        downsample_drift,
+        dict,
+    ), "unoccupied_downsample.max_post_downsample_prior_drift_by_room must be a mapping"
+    assert downsample_drift.get("livingroom") == 0.10
+    guard_rooms = unoccupied.get("prior_drift_guard_rooms")
+    assert isinstance(guard_rooms, list), "unoccupied_downsample.prior_drift_guard_rooms must be a sequence"
+    assert "livingroom" in guard_rooms
+
+    minority = payload.get("minority_sampling")
+    assert isinstance(minority, dict), "minority_sampling section must be a mapping"
+    sampling_drift = minority.get("max_post_sampling_prior_drift_by_room")
+    assert isinstance(
+        sampling_drift,
+        dict,
+    ), "minority_sampling.max_post_sampling_prior_drift_by_room must be a mapping"
+    assert sampling_drift.get("livingroom") == 0.10
+    sampling_guard_rooms = minority.get("prior_drift_guard_rooms")
+    assert isinstance(
+        sampling_guard_rooms,
+        list,
+    ), "minority_sampling.prior_drift_guard_rooms must be a sequence"
+    assert "livingroom" in sampling_guard_rooms
+
+
+def test_beta6_policy_defaults_yaml_disables_livingroom_unoccupied_downsample_via_stride():
+    path = CONFIG_DIR / "beta6_policy_defaults.yaml"
+    payload = _load_yaml(path)
+    _assert_version_v1(payload, path)
+
+    unoccupied = payload.get("unoccupied_downsample")
+    assert isinstance(unoccupied, dict), "unoccupied_downsample section must be a mapping"
+    stride_by_room = unoccupied.get("stride_by_room")
+    assert isinstance(
+        stride_by_room,
+        dict,
+    ), "unoccupied_downsample.stride_by_room must be a mapping"
+    assert stride_by_room.get("livingroom") == 1

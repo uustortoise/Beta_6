@@ -270,6 +270,128 @@ class TestPredictionPipeline(unittest.TestCase):
     @patch.dict(
         'os.environ',
         {
+            'ENABLE_TWO_STAGE_CORE_RUNTIME': 'true',
+            'TWO_STAGE_CORE_RUNTIME_ROOMS': 'room1',
+            'TWO_STAGE_CORE_STRICT_ROUTING': 'true',
+        },
+        clear=False,
+    )
+    @patch('ml.prediction.normalize_room_name', side_effect=lambda x: x)
+    @patch('ml.prediction.calculate_sequence_length')
+    def test_run_prediction_two_stage_strict_routing_blocks_excluded_argmax(self, mock_calc_seq, mock_norm):
+        mock_calc_seq.return_value = 5
+        self.mock_platform.label_encoders['room1'].classes_ = np.array(
+            ['unoccupied', 'sleep', 'bedroom_normal_use']
+        )
+        self.mock_platform.label_encoders['room1'].inverse_transform.side_effect = (
+            lambda arr: np.array(
+                [
+                    'unoccupied' if int(v) == 0 else 'sleep' if int(v) == 1 else 'bedroom_normal_use'
+                    for v in arr
+                ]
+            )
+        )
+        self.mock_platform.class_thresholds = {'room1': {'0': 0.0, '1': 0.0, '2': 0.0}}
+        self.mock_platform.room_models['room1'].predict.return_value = np.array([[0.99, 0.005, 0.005]] * 6)
+
+        stage_a_model = MagicMock()
+        stage_a_model.predict.return_value = np.array([[0.48, 0.52]] * 6)
+        stage_b_model = MagicMock()
+        stage_b_model.predict.return_value = np.array([[0.50, 0.50]] * 6)
+        self.mock_platform.two_stage_core_models = {
+            'room1': {
+                'stage_a_model': stage_a_model,
+                'stage_b_model': stage_b_model,
+                'num_classes': 3,
+                'excluded_class_ids': [0],
+                'occupied_class_ids': [1, 2],
+                'primary_occupied_class_id': 1,
+                'stage_a_occupied_threshold': 0.5,
+            }
+        }
+        self.mock_platform.create_sequences.return_value = np.zeros((6, 5, 2))
+        sensor_data = {
+            'room1': pd.DataFrame({
+                'timestamp': pd.date_range('2023-01-01', periods=10, freq='10s'),
+                's1': np.random.randn(10),
+                's2': np.random.randn(10),
+            })
+        }
+        self.mock_platform.preprocess_with_resampling.return_value = sensor_data['room1']
+
+        predictions = self.pipeline.run_prediction(sensor_data=sensor_data, loaded_rooms=['room1'], seq_length=5)
+        pred_df = predictions['room1']
+
+        self.assertEqual(len(pred_df), 6)
+        self.assertTrue((pred_df['predicted_activity'] != 'unoccupied').all())
+        stage_a_model.predict.assert_called_once()
+        stage_b_model.predict.assert_called_once()
+        self.mock_platform.room_models['room1'].predict.assert_not_called()
+
+    @patch.dict(
+        'os.environ',
+        {
+            'ENABLE_TWO_STAGE_CORE_RUNTIME': 'true',
+            'TWO_STAGE_CORE_RUNTIME_ROOMS': 'room1',
+            'TWO_STAGE_CORE_STRICT_ROUTING': 'false',
+        },
+        clear=False,
+    )
+    @patch('ml.prediction.normalize_room_name', side_effect=lambda x: x)
+    @patch('ml.prediction.calculate_sequence_length')
+    def test_run_prediction_two_stage_soft_routing_can_pick_excluded(self, mock_calc_seq, mock_norm):
+        mock_calc_seq.return_value = 5
+        self.mock_platform.label_encoders['room1'].classes_ = np.array(
+            ['unoccupied', 'sleep', 'bedroom_normal_use']
+        )
+        self.mock_platform.label_encoders['room1'].inverse_transform.side_effect = (
+            lambda arr: np.array(
+                [
+                    'unoccupied' if int(v) == 0 else 'sleep' if int(v) == 1 else 'bedroom_normal_use'
+                    for v in arr
+                ]
+            )
+        )
+        self.mock_platform.class_thresholds = {'room1': {'0': 0.0, '1': 0.0, '2': 0.0}}
+        self.mock_platform.room_models['room1'].predict.return_value = np.array([[0.99, 0.005, 0.005]] * 6)
+
+        stage_a_model = MagicMock()
+        stage_a_model.predict.return_value = np.array([[0.48, 0.52]] * 6)
+        stage_b_model = MagicMock()
+        stage_b_model.predict.return_value = np.array([[0.50, 0.50]] * 6)
+        self.mock_platform.two_stage_core_models = {
+            'room1': {
+                'stage_a_model': stage_a_model,
+                'stage_b_model': stage_b_model,
+                'num_classes': 3,
+                'excluded_class_ids': [0],
+                'occupied_class_ids': [1, 2],
+                'primary_occupied_class_id': 1,
+                'stage_a_occupied_threshold': 0.5,
+            }
+        }
+        self.mock_platform.create_sequences.return_value = np.zeros((6, 5, 2))
+        sensor_data = {
+            'room1': pd.DataFrame({
+                'timestamp': pd.date_range('2023-01-01', periods=10, freq='10s'),
+                's1': np.random.randn(10),
+                's2': np.random.randn(10),
+            })
+        }
+        self.mock_platform.preprocess_with_resampling.return_value = sensor_data['room1']
+
+        predictions = self.pipeline.run_prediction(sensor_data=sensor_data, loaded_rooms=['room1'], seq_length=5)
+        pred_df = predictions['room1']
+
+        self.assertEqual(len(pred_df), 6)
+        self.assertTrue((pred_df['predicted_activity'] == 'unoccupied').all())
+        stage_a_model.predict.assert_called_once()
+        stage_b_model.predict.assert_called_once()
+        self.mock_platform.room_models['room1'].predict.assert_not_called()
+
+    @patch.dict(
+        'os.environ',
+        {
             'RUNTIME_UNKNOWN_ENABLED': 'true',
             'RUNTIME_UNKNOWN_ROOMS': 'room1',
             'RUNTIME_UNKNOWN_NIGHT_ONLY': 'true',
@@ -391,6 +513,114 @@ class TestPredictionPipeline(unittest.TestCase):
         self.assertEqual(pred_df.iloc[2]['predicted_activity'], 'unknown')
         self.assertEqual(pred_df.iloc[3]['predicted_activity'], 'low_confidence')
         self.assertEqual(int(pred_df['is_beta6_abstain'].sum()), 3)
+
+    @patch.dict(
+        'os.environ',
+        {
+            'ENABLE_BETA6_UNKNOWN_ABSTAIN_RUNTIME': 'true',
+            'BETA6_PHASE4_RUNTIME_ENABLED': 'true',
+            'RUNTIME_UNKNOWN_ROOMS': 'other_room',
+        },
+        clear=False,
+    )
+    @patch('ml.prediction.normalize_room_name', side_effect=lambda x: x)
+    @patch('ml.prediction.calculate_sequence_length')
+    @patch('ml.prediction.score_activity_confidence')
+    def test_run_prediction_uses_activity_acceptance_score_for_threshold_and_unknown_runtime(
+        self, mock_score_activity_confidence, mock_calc_seq, mock_norm
+    ):
+        mock_calc_seq.return_value = 5
+        self.mock_platform.class_thresholds = {'room1': {'0': 0.80, '1': 0.80}}
+        self.mock_platform.activity_confidence_artifacts = {
+            'room1': {
+                'schema_version': 'activity_acceptance_score_v1',
+                'labels': ['walking', 'sitting'],
+            }
+        }
+        probs = np.array([[0.52, 0.48]] * 6, dtype=float)
+        self.mock_platform.room_models['room1'].predict.return_value = probs
+        self.mock_platform.label_encoders['room1'].inverse_transform.return_value = ['walking'] * 6
+        self.mock_platform.create_sequences.return_value = np.zeros((6, 5, 2))
+        mock_score_activity_confidence.return_value = {
+            'scores': np.array([0.82] * 6, dtype=float),
+            'confidence_source': 'activity_acceptance_score_v1',
+            'top1_probabilities': np.array([0.52] * 6, dtype=float),
+            'top2_probabilities': np.array([0.48] * 6, dtype=float),
+            'margins': np.array([0.04] * 6, dtype=float),
+            'entropy': np.array([0.69] * 6, dtype=float),
+            'predicted_indices': np.zeros(6, dtype=int),
+        }
+
+        sensor_data = {
+            'room1': pd.DataFrame({
+                'timestamp': pd.date_range('2023-01-01', periods=10, freq='10s'),
+                's1': np.random.randn(10),
+                's2': np.random.randn(10)
+            })
+        }
+        self.mock_platform.preprocess_with_resampling.return_value = sensor_data['room1']
+
+        predictions = self.pipeline.run_prediction(sensor_data=sensor_data, loaded_rooms=['room1'], seq_length=5)
+        pred_df = predictions['room1']
+
+        self.assertNotIn('low_confidence', set(pred_df['predicted_activity'].tolist()))
+        self.assertEqual(pred_df.iloc[0]['activity_confidence_source'], 'activity_acceptance_score_v1')
+        self.assertAlmostEqual(float(pred_df.iloc[0]['confidence']), 0.82, places=6)
+        self.assertAlmostEqual(float(pred_df.iloc[0]['predicted_top1_prob_raw']), 0.52, places=6)
+
+    @patch.dict(
+        'os.environ',
+        {
+            'ENABLE_BETA6_UNKNOWN_ABSTAIN_RUNTIME': 'true',
+            'BETA6_PHASE4_RUNTIME_ENABLED': 'true',
+            'RUNTIME_UNKNOWN_ROOMS': 'other_room',
+        },
+        clear=False,
+    )
+    @patch('ml.prediction.normalize_room_name', side_effect=lambda x: x)
+    @patch('ml.prediction.calculate_sequence_length')
+    @patch('ml.prediction.score_activity_confidence')
+    def test_run_prediction_does_not_reapply_global_confidence_floor_after_class_threshold_pass(
+        self, mock_score_activity_confidence, mock_calc_seq, mock_norm
+    ):
+        mock_calc_seq.return_value = 5
+        self.mock_platform.class_thresholds = {'room1': {'0': 0.23449343475148696, '1': 0.80}}
+        self.mock_platform.activity_confidence_artifacts = {
+            'room1': {
+                'schema_version': 'activity_acceptance_score_v1',
+                'labels': ['walking', 'sitting'],
+            }
+        }
+        probs = np.array([[0.52, 0.48]] * 6, dtype=float)
+        self.mock_platform.room_models['room1'].predict.return_value = probs
+        self.mock_platform.label_encoders['room1'].inverse_transform.return_value = ['walking'] * 6
+        self.mock_platform.create_sequences.return_value = np.zeros((6, 5, 2))
+        mock_score_activity_confidence.return_value = {
+            'scores': np.array([0.235882] * 6, dtype=float),
+            'confidence_source': 'activity_acceptance_score_v1',
+            'top1_probabilities': np.array([0.52] * 6, dtype=float),
+            'top2_probabilities': np.array([0.48] * 6, dtype=float),
+            'margins': np.array([0.04] * 6, dtype=float),
+            'entropy': np.array([0.69] * 6, dtype=float),
+            'predicted_indices': np.zeros(6, dtype=int),
+        }
+
+        sensor_data = {
+            'room1': pd.DataFrame({
+                'timestamp': pd.date_range('2023-01-01', periods=10, freq='10s'),
+                's1': np.random.randn(10),
+                's2': np.random.randn(10)
+            })
+        }
+        self.mock_platform.preprocess_with_resampling.return_value = sensor_data['room1']
+
+        predictions = self.pipeline.run_prediction(sensor_data=sensor_data, loaded_rooms=['room1'], seq_length=5)
+        pred_df = predictions['room1']
+
+        self.assertNotIn('low_confidence', set(pred_df['predicted_activity'].tolist()))
+        self.assertTrue((pred_df['is_low_confidence'] == False).all())
+        self.assertAlmostEqual(float(pred_df.iloc[0]['low_confidence_threshold']), 0.23449343475148696, places=6)
+        self.assertAlmostEqual(float(pred_df.iloc[0]['confidence']), 0.235882, places=6)
 
     @patch.dict('os.environ', {'ENABLE_BETA6_HMM_RUNTIME': 'true'}, clear=False)
     @patch('ml.prediction.normalize_room_name', side_effect=lambda x: x)

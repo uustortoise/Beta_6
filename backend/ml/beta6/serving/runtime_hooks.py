@@ -84,6 +84,9 @@ def apply_beta6_unknown_abstain_runtime(
     final_labels: np.ndarray,
     low_conf_flags: list[bool],
     low_conf_hints: list[Optional[str]],
+    confidence_scores: Optional[np.ndarray] = None,
+    confidence_source: Optional[str] = None,
+    apply_entropy_gate: bool = True,
     load_unknown_policy_fn: Callable[[str | None], Any] | None = None,
     infer_with_unknown_path_fn: Callable[..., dict[str, Any]] | None = None,
 ) -> tuple[np.ndarray, Optional[list[Optional[str]]], Optional[list[bool]], list[bool], list[Optional[str]]]:
@@ -122,6 +125,11 @@ def apply_beta6_unknown_abstain_runtime(
             labels=[str(lbl).strip().lower() for lbl in label_classes],
             policy=policy,
             outside_sensed_space_scores=None,
+            confidence_scores=confidence_scores,
+            confidence_source=confidence_source,
+            preexisting_low_conf_flags=list(low_conf_flags),
+            apply_confidence_gate=False,
+            apply_entropy_gate=apply_entropy_gate,
         )
     except Exception as exc:
         raise PredictionError(

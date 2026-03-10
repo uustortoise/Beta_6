@@ -8,8 +8,13 @@ from typing import Any, Mapping
 
 from elderlycare_v1_16.preprocessing.gap_policy import resolve_max_ffill_gap_seconds
 from ml.policy_defaults import (
+    get_calibration_activity_confidence_min_samples_default,
+    get_calibration_activity_confidence_threshold_cap_default,
+    get_calibration_activity_confidence_threshold_floor_default,
     get_calibration_precision_targets_by_label,
     get_calibration_recall_floors_by_label,
+    get_calibration_threshold_stability_max_near_share_default,
+    get_calibration_threshold_stability_window_default,
     get_clinical_priority_multipliers_by_label,
     get_clinical_priority_multipliers_by_room_label,
     get_data_viability_max_unresolved_drop_ratio_by_room,
@@ -446,6 +451,11 @@ class CalibrationPolicy:
     min_samples: int = 80
     separate_calibration_min_holdout: int = 160
     min_support_per_class: int = 30
+    activity_confidence_min_samples: int = get_calibration_activity_confidence_min_samples_default()
+    activity_confidence_threshold_floor: float = get_calibration_activity_confidence_threshold_floor_default()
+    activity_confidence_threshold_cap: float = get_calibration_activity_confidence_threshold_cap_default()
+    threshold_stability_window: float = get_calibration_threshold_stability_window_default()
+    threshold_stability_max_near_share: float = get_calibration_threshold_stability_max_near_share_default()
     threshold_floor: float = 0.35
     threshold_cap: float = 0.80
     default_precision_target: float = 0.70
@@ -881,6 +891,25 @@ def load_policy_from_env(environ: Mapping[str, str] | None = None) -> TrainingPo
     calib.threshold_cap = _read_float_env(env, "THRESHOLD_CAP", calib.threshold_cap, minimum=0.0, maximum=1.0)
     if calib.threshold_floor > calib.threshold_cap:
         calib.threshold_floor, calib.threshold_cap = calib.threshold_cap, calib.threshold_floor
+    calib.activity_confidence_threshold_floor = _read_float_env(
+        env,
+        "ACTIVITY_CONFIDENCE_THRESHOLD_FLOOR",
+        calib.activity_confidence_threshold_floor,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    calib.activity_confidence_threshold_cap = _read_float_env(
+        env,
+        "ACTIVITY_CONFIDENCE_THRESHOLD_CAP",
+        calib.activity_confidence_threshold_cap,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    if calib.activity_confidence_threshold_floor > calib.activity_confidence_threshold_cap:
+        calib.activity_confidence_threshold_floor, calib.activity_confidence_threshold_cap = (
+            calib.activity_confidence_threshold_cap,
+            calib.activity_confidence_threshold_floor,
+        )
 
     calib.default_precision_target = _read_float_env(
         env,

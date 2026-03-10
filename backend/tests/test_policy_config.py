@@ -7,12 +7,22 @@ def test_load_policy_defaults_match_legacy_knobs():
     assert policy.unoccupied_downsample.stride == 10
     livingroom_downsample = policy.unoccupied_downsample.resolve("LivingRoom")
     assert livingroom_downsample["min_share"] == 0.30
-    assert livingroom_downsample["stride"] == 4
+    assert livingroom_downsample["stride"] == 1
+    assert livingroom_downsample["prior_drift_guard_enabled"] is True
+    assert livingroom_downsample["max_post_downsample_prior_drift"] == 0.10
     assert policy.minority_sampling.enabled is True
     assert policy.minority_sampling.target_share == 0.14
+    livingroom_minority = policy.minority_sampling.resolve("LivingRoom")
+    assert livingroom_minority["prior_drift_guard_enabled"] is True
+    assert livingroom_minority["max_post_sampling_prior_drift"] == 0.10
     assert policy.calibration.threshold_floor == 0.35
     assert policy.calibration.threshold_cap == 0.80
+    assert policy.calibration.activity_confidence_threshold_floor == 0.0
+    assert policy.calibration.activity_confidence_threshold_cap == 1.0
     assert policy.clinical_priority.multipliers["sleep"] == 1.6
+    assert policy.clinical_priority.get_room_label_multiplier("Bedroom", "bedroom_normal_use") == 1.0
+    assert policy.clinical_priority.get_room_label_multiplier("Bedroom", "unoccupied") == 1.0
+    assert policy.clinical_priority.get_room_label_multiplier("Bedroom", "sleep") == 1.6
     assert policy.resampling.max_ffill_gap_seconds == 60.0
     assert policy.release_gate.min_training_days == 2.0
     assert policy.release_gate.min_observed_days == 2
@@ -72,7 +82,16 @@ def test_load_policy_defaults_include_livingroom_downsample_override():
     policy = load_policy_from_env({})
     livingroom_cfg = policy.unoccupied_downsample.resolve("LivingRoom")
     assert livingroom_cfg["min_share"] == 0.30
-    assert livingroom_cfg["stride"] == 4
+    assert livingroom_cfg["stride"] == 1
+
+
+def test_load_policy_defaults_disable_livingroom_unoccupied_downsample_via_stride():
+    policy = load_policy_from_env({})
+    livingroom_cfg = policy.unoccupied_downsample.resolve("LivingRoom")
+
+    assert livingroom_cfg["stride"] == 1
+    assert livingroom_cfg["prior_drift_guard_enabled"] is True
+    assert livingroom_cfg["max_post_downsample_prior_drift"] == 0.10
 
 
 def test_empty_room_override_env_disables_default_room_map():
@@ -152,6 +171,8 @@ def test_label_map_env_parsing_for_calibration_and_clinical_priority():
         "RECALL_FLOOR_BY_LABEL": '{"sleep":0.25}',
         "THRESHOLD_FLOOR": "0.2",
         "THRESHOLD_CAP": "0.9",
+        "ACTIVITY_CONFIDENCE_THRESHOLD_FLOOR": "0.05",
+        "ACTIVITY_CONFIDENCE_THRESHOLD_CAP": "0.4",
     }
     policy = load_policy_from_env(env)
 
@@ -162,6 +183,8 @@ def test_label_map_env_parsing_for_calibration_and_clinical_priority():
     assert policy.calibration.get_recall_floor("sleep") == 0.25
     assert policy.calibration.threshold_floor == 0.2
     assert policy.calibration.threshold_cap == 0.9
+    assert policy.calibration.activity_confidence_threshold_floor == 0.05
+    assert policy.calibration.activity_confidence_threshold_cap == 0.4
 
 
 def test_room_label_clinical_priority_overrides_global_multiplier():
@@ -188,6 +211,8 @@ def test_production_defaults_neutralize_livingroom_room_label_clinical_priority(
         policy.clinical_priority.get_room_label_multiplier("LivingRoom", "livingroom_normal_use") == 1.0
     )
     assert policy.clinical_priority.get_room_label_multiplier("LivingRoom", "unoccupied") == 1.0
+    assert policy.clinical_priority.get_room_label_multiplier("Bedroom", "bedroom_normal_use") == 1.0
+    assert policy.clinical_priority.get_room_label_multiplier("Bedroom", "unoccupied") == 1.0
     assert policy.clinical_priority.get_room_label_multiplier("Kitchen", "kitchen_normal_use") == 1.2
     assert policy.clinical_priority.get_room_label_multiplier("Kitchen", "unoccupied") == 0.75
 

@@ -610,6 +610,296 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertEqual(metrics["model_identity"]["family"], "per_resident_full_model")
         self.assertIsNone(metrics["model_identity"]["backbone_id"])
 
+    @patch('ml.training.score_activity_confidence')
+    @patch('ml.training.fit_activity_confidence_calibrator')
+    def test_calibrate_class_thresholds_records_activity_confidence_artifact_for_timeline_room(
+        self,
+        mock_fit_activity_confidence_calibrator,
+        mock_score_activity_confidence,
+    ):
+        self.mock_platform.label_encoders["Bedroom"] = MagicMock()
+        self.mock_platform.label_encoders["Bedroom"].classes_ = np.array(["sleep", "bedroom_normal_use"], dtype=object)
+        model = MagicMock()
+        model.predict.return_value = np.array(
+            [
+                [0.56, 0.44],
+                [0.57, 0.43],
+                [0.82, 0.18],
+                [0.20, 0.80],
+            ],
+            dtype=np.float64,
+        )
+        model._timeline_multitask_enabled = False
+
+        mock_fit_activity_confidence_calibrator.return_value = {
+            "schema_version": "activity_acceptance_score_v1",
+            "labels": ["sleep", "bedroom_normal_use"],
+            "coefficients": [1.0] * 6,
+            "intercept": 0.0,
+        }
+        mock_score_activity_confidence.return_value = {
+            "scores": np.array([0.79, 0.78, 0.91, 0.88], dtype=np.float64),
+            "confidence_source": "activity_acceptance_score_v1",
+            "predicted_indices": np.array([0, 0, 0, 1], dtype=np.int64),
+            "top1_probabilities": np.array([0.56, 0.57, 0.82, 0.80], dtype=np.float64),
+            "top2_probabilities": np.array([0.44, 0.43, 0.18, 0.20], dtype=np.float64),
+            "margins": np.array([0.12, 0.14, 0.64, 0.60], dtype=np.float64),
+            "entropy": np.array([0.68, 0.67, 0.31, 0.32], dtype=np.float64),
+        }
+
+        with patch.object(self.pipeline, "_is_timeline_multitask_enabled", return_value=True), patch.object(
+            self.pipeline,
+            "_timeline_native_rooms",
+            return_value={"bedroom", "livingroom"},
+        ):
+            thresholds = self.pipeline._calibrate_class_thresholds(
+                model=model,
+                X_calib=np.zeros((4, 2), dtype=np.float64),
+                y_calib=np.array([0, 0, 0, 1], dtype=np.int64),
+                room_name="Bedroom",
+            )
+
+        self.assertIn(0, thresholds)
+        self.assertEqual(
+            self.pipeline._last_activity_confidence_artifact["schema_version"],
+            "activity_acceptance_score_v1",
+        )
+        mock_fit_activity_confidence_calibrator.assert_called_once()
+        mock_score_activity_confidence.assert_called_once()
+
+    @patch('ml.training.score_activity_confidence')
+    @patch('ml.training.fit_activity_confidence_calibrator')
+    def test_calibrate_class_thresholds_records_activity_confidence_artifact_without_timeline_multitask(
+        self,
+        mock_fit_activity_confidence_calibrator,
+        mock_score_activity_confidence,
+    ):
+        model = MagicMock()
+        model.predict.return_value = np.array(
+            [
+                [0.52, 0.48],
+                [0.53, 0.47],
+                [0.88, 0.12],
+                [0.18, 0.82],
+            ],
+            dtype=np.float64,
+        )
+        model._timeline_multitask_enabled = False
+
+        mock_fit_activity_confidence_calibrator.return_value = {
+            "schema_version": "activity_acceptance_score_v1",
+            "labels": ["walking", "sitting"],
+            "coefficients": [1.0] * 6,
+            "intercept": 0.0,
+        }
+        mock_score_activity_confidence.return_value = {
+            "scores": np.array([0.79, 0.80, 0.95, 0.93], dtype=np.float64),
+            "confidence_source": "activity_acceptance_score_v1",
+            "predicted_indices": np.array([0, 0, 0, 1], dtype=np.int64),
+            "top1_probabilities": np.array([0.52, 0.53, 0.88, 0.82], dtype=np.float64),
+            "top2_probabilities": np.array([0.48, 0.47, 0.12, 0.18], dtype=np.float64),
+            "margins": np.array([0.04, 0.06, 0.76, 0.64], dtype=np.float64),
+            "entropy": np.array([0.69, 0.68, 0.21, 0.23], dtype=np.float64),
+        }
+
+        thresholds = self.pipeline._calibrate_class_thresholds(
+            model=model,
+            X_calib=np.zeros((4, 2), dtype=np.float64),
+            y_calib=np.array([0, 0, 0, 1], dtype=np.int64),
+            room_name="room1",
+        )
+
+        self.assertIn(0, thresholds)
+        self.assertEqual(
+            self.pipeline._last_activity_confidence_artifact["schema_version"],
+            "activity_acceptance_score_v1",
+        )
+        mock_fit_activity_confidence_calibrator.assert_called_once()
+        mock_score_activity_confidence.assert_called_once()
+
+    @patch('ml.training.choose_activity_confidence_threshold')
+    @patch('ml.training.score_activity_confidence')
+    @patch('ml.training.fit_activity_confidence_calibrator')
+    def test_calibrate_class_thresholds_uses_activity_confidence_threshold_bounds(
+        self,
+        mock_fit_activity_confidence_calibrator,
+        mock_score_activity_confidence,
+        mock_choose_activity_confidence_threshold,
+    ):
+        policy = load_policy_from_env(
+            {
+                "CALIBRATION_MIN_SUPPORT_PER_CLASS": "1",
+                "ACTIVITY_CONFIDENCE_THRESHOLD_FLOOR": "0.05",
+                "ACTIVITY_CONFIDENCE_THRESHOLD_CAP": "0.30",
+            }
+        )
+        self.pipeline = TrainingPipeline(self.mock_platform, self.mock_registry, policy=policy)
+
+        model = MagicMock()
+        model.predict.return_value = np.array(
+            [
+                [0.52, 0.48],
+                [0.53, 0.47],
+                [0.18, 0.82],
+                [0.19, 0.81],
+            ],
+            dtype=np.float64,
+        )
+        model._timeline_multitask_enabled = False
+
+        mock_fit_activity_confidence_calibrator.return_value = {
+            "schema_version": "activity_acceptance_score_v1",
+            "labels": ["walking", "sitting"],
+            "coefficients": [1.0] * 6,
+            "intercept": 0.0,
+        }
+        mock_score_activity_confidence.return_value = {
+            "scores": np.array([0.22, 0.24, 0.78, 0.81], dtype=np.float64),
+            "confidence_source": "activity_acceptance_score_v1",
+            "predicted_indices": np.array([0, 0, 1, 1], dtype=np.int64),
+            "top1_probabilities": np.array([0.52, 0.53, 0.82, 0.81], dtype=np.float64),
+            "top2_probabilities": np.array([0.48, 0.47, 0.18, 0.19], dtype=np.float64),
+            "margins": np.array([0.04, 0.06, 0.64, 0.62], dtype=np.float64),
+            "entropy": np.array([0.69, 0.68, 0.24, 0.25], dtype=np.float64),
+        }
+        mock_choose_activity_confidence_threshold.side_effect = [
+            {
+                "threshold": 0.24,
+                "status": "fallback_best_f1_stability_fallback",
+                "near_threshold_share": 0.12,
+                "selected_precision": 0.74,
+                "selected_recall": 0.71,
+            },
+            {
+                "threshold": 0.28,
+                "status": "target_met",
+                "near_threshold_share": 0.05,
+                "selected_precision": 0.86,
+                "selected_recall": 0.80,
+            },
+        ]
+
+        thresholds = self.pipeline._calibrate_class_thresholds(
+            model=model,
+            X_calib=np.zeros((4, 2), dtype=np.float64),
+            y_calib=np.array([0, 0, 1, 1], dtype=np.int64),
+            room_name="room1",
+        )
+
+        self.assertEqual(thresholds[0], 0.24)
+        self.assertEqual(thresholds[1], 0.28)
+        first_call = mock_choose_activity_confidence_threshold.call_args_list[0].kwargs
+        self.assertAlmostEqual(first_call["threshold_floor"], 0.05, places=6)
+        self.assertAlmostEqual(first_call["threshold_cap"], 0.30, places=6)
+
+    def test_recalibrate_promoted_room_artifacts_promotes_new_version_from_existing_champion(self):
+        room_name = "LivingRoom"
+        champion_model = MagicMock()
+        champion_scaler = MagicMock()
+        champion_encoder = MagicMock()
+        champion_encoder.classes_ = np.array(["livingroom_normal_use", "unoccupied"], dtype=object)
+        self.mock_platform.room_models[room_name] = champion_model
+        self.mock_platform.scalers[room_name] = champion_scaler
+        self.mock_platform.label_encoders[room_name] = champion_encoder
+        self.mock_platform.activity_confidence_artifacts = {}
+        self.mock_platform.two_stage_core_models = {}
+
+        self.mock_registry.get_current_version.return_value = 3
+        self.mock_registry.get_current_version_metadata.return_value = {
+            "version": 3,
+            "accuracy": 0.88,
+            "samples": 1234,
+            "model_identity": {"family": "per_resident_full_model"},
+        }
+        self.mock_registry._load_two_stage_core_bundle.return_value = None
+        self.mock_registry.save_model_artifacts.return_value = 4
+
+        raw_df = pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2025-12-04", periods=4, freq="10s"),
+                "s1": [0.1, 0.2, 0.3, 0.4],
+                "s2": [1.0, 1.1, 1.2, 1.3],
+                "s3": [2.0, 2.1, 2.2, 2.3],
+                "activity": [
+                    "livingroom_normal_use",
+                    "unoccupied",
+                    "unoccupied",
+                    "livingroom_normal_use",
+                ],
+            }
+        )
+        prepared = {
+            "validation_data": (
+                np.zeros((2, 5, 3), dtype=np.float32),
+                np.array([0, 1], dtype=np.int32),
+            ),
+            "calibration_data": (
+                np.zeros((2, 5, 3), dtype=np.float32),
+                np.array([0, 1], dtype=np.int32),
+            ),
+            "split_support": {"found": True},
+            "calibration_split_support": {"found": True},
+            "critical_labels": ["livingroom_normal_use"],
+            "total_sequences": 2,
+        }
+
+        def _mock_calibrate(*args, **kwargs):
+            self.pipeline._last_activity_confidence_artifact = {
+                "schema_version": "activity_acceptance_score_v1",
+                "labels": ["livingroom_normal_use", "unoccupied"],
+            }
+            self.pipeline._last_calibration_debug = [
+                {
+                    "label": "unoccupied",
+                    "threshold": 0.46,
+                    "confidence_source": "activity_acceptance_score_v1",
+                }
+            ]
+            return {0: 0.46, 1: 0.61}
+
+        with patch.object(
+            self.pipeline,
+            "_prepare_recalibration_sequences",
+            return_value=prepared,
+        ), patch.object(
+            self.pipeline,
+            "_calibrate_class_thresholds",
+            side_effect=_mock_calibrate,
+        ), patch.object(
+            self.pipeline,
+            "_write_decision_trace",
+            return_value={"versioned": "/tmp/trace-v4.json", "latest": "/tmp/trace.json"},
+        ):
+            metrics = self.pipeline.recalibrate_promoted_room_artifacts(
+                elder_id="elder1",
+                room_name=room_name,
+                raw_df=raw_df,
+                seq_length=5,
+            )
+
+        args, kwargs = self.mock_registry.save_model_artifacts.call_args
+        self.assertIs(args[2], champion_model)
+        self.assertIs(args[3], champion_scaler)
+        self.assertIs(args[4], champion_encoder)
+        self.assertEqual(kwargs["activity_confidence_artifact"]["schema_version"], "activity_acceptance_score_v1")
+        self.assertEqual(kwargs["class_thresholds"], {0: 0.46, 1: 0.61})
+        self.assertTrue(kwargs["promote_to_latest"])
+        self.assertEqual(kwargs["parent_version_id"], 3)
+        self.assertEqual(kwargs["accuracy"], 0.88)
+        self.assertEqual(kwargs["samples"], 1234)
+
+        self.assertEqual(metrics["saved_version"], 4)
+        self.assertTrue(metrics["promoted_to_latest"])
+        self.assertEqual(metrics["recalibration_of_version"], 3)
+        self.assertEqual(
+            self.mock_platform.class_thresholds[room_name],
+            {"0": 0.46, "1": 0.61},
+        )
+        self.assertEqual(
+            self.mock_platform.activity_confidence_artifacts[room_name]["schema_version"],
+            "activity_acceptance_score_v1",
+        )
+
     @patch('ml.training.TrainingPipeline.augment_training_data')
     @patch('ml.training.build_transformer_model')
     @patch('ml.training.get_room_config')
@@ -2266,6 +2556,60 @@ class TestTrainingPipeline(unittest.TestCase):
 
         self.assertEqual(spawn.call_count, 2)
         unexpected_retrain.train_room.assert_not_called()
+        self.assertEqual(result["saved_version"], 102)
+        self.assertEqual(result["seed_panel_debug"]["selected_seed"], 13)
+
+    def test_train_room_with_multi_seed_panel_defers_cleanup_until_selected_candidate(self):
+        self.pipeline._active_policy = MagicMock(
+            return_value=SimpleNamespace(
+                reproducibility=SimpleNamespace(
+                    multi_seed_candidate_seeds=[11, 13],
+                    random_seed=11,
+                )
+            )
+        )
+        first_candidate = MagicMock()
+        first_candidate.train_room.return_value = {
+            "macro_f1": 0.20,
+            "gate_pass": False,
+            "gate_reasons": ["room_threshold_failed:livingroom"],
+            "predicted_class_distribution": {
+                "livingroom_normal_use": 95,
+                "unoccupied": 5,
+            },
+            "saved_version": 101,
+        }
+        selected_candidate = MagicMock()
+        selected_candidate.train_room.return_value = {
+            "macro_f1": 0.48,
+            "gate_pass": True,
+            "gate_reasons": [],
+            "predicted_class_distribution": {
+                "livingroom_normal_use": 55,
+                "unoccupied": 45,
+            },
+            "saved_version": 102,
+        }
+
+        with patch.object(
+            self.pipeline,
+            "_spawn_candidate_pipeline",
+            side_effect=[first_candidate, selected_candidate],
+        ):
+            result = self.pipeline._train_room_with_multi_seed_panel(
+                room_name="LivingRoom",
+                processed_df=pd.DataFrame(),
+                seq_length=5,
+                elder_id="elder-1",
+                defer_promotion=True,
+            )
+
+        self.mock_registry.rollback_to_version.assert_not_called()
+        self.mock_registry._cleanup_old_versions.assert_called_once_with(
+            "elder-1",
+            "LivingRoom",
+            preserve_versions=[102],
+        )
         self.assertEqual(result["saved_version"], 102)
         self.assertEqual(result["seed_panel_debug"]["selected_seed"], 13)
 

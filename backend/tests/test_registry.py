@@ -138,6 +138,52 @@ class TestModelRegistry(unittest.TestCase):
         info = self.registry._load_version_info(self.elder_id, self.room_name)
         self.assertEqual(info['versions'][0]['parent_version_id'], 4)
 
+    def test_save_and_load_activity_confidence_artifact(self):
+        mock_model = MagicMock()
+        mock_model.save.side_effect = lambda path: Path(path).write_text("dummy-model")
+        mock_scaler = {"scale": 1}
+        encoder = _DummyEncoder(np.array(["walking", "sitting"], dtype=object))
+        artifact = {
+            "schema_version": "activity_acceptance_score_v1",
+            "labels": ["walking", "sitting"],
+            "feature_names": ["top1", "top2", "margin", "entropy", "predicted_class:walking", "predicted_class:sitting"],
+            "coefficients": [1.0, -1.0, 0.5, -0.3, 0.2, -0.2],
+            "intercept": 0.0,
+        }
+
+        version = self.registry.save_model_artifacts(
+            self.elder_id,
+            self.room_name,
+            mock_model,
+            mock_scaler,
+            encoder,
+            activity_confidence_artifact=artifact,
+        )
+
+        self.assertEqual(version, 1)
+        models_dir = self.registry.get_models_dir(self.elder_id)
+        versioned = models_dir / f"{self.room_name}_v1_activity_confidence_calibrator.json"
+        latest = models_dir / f"{self.room_name}_activity_confidence_calibrator.json"
+        self.assertTrue(versioned.exists())
+        self.assertTrue(latest.exists())
+        self.assertEqual(json.loads(versioned.read_text())["schema_version"], "activity_acceptance_score_v1")
+
+        platform = MagicMock()
+        platform.room_models = {}
+        platform.scalers = {}
+        platform.label_encoders = {}
+        platform.class_thresholds = {}
+        platform.sensor_columns = ["s1", "s2"]
+
+        with patch.object(self.registry, "load_room_model", return_value=MagicMock()):
+            loaded = self.registry.load_models_for_elder(self.elder_id, platform)
+
+        self.assertIn(self.room_name, loaded)
+        self.assertEqual(
+            platform.activity_confidence_artifacts[self.room_name]["schema_version"],
+            "activity_acceptance_score_v1",
+        )
+
     def test_rollback_to_version(self):
         """Test rolling back to a previous version."""
         # Create dummy version info
@@ -300,6 +346,32 @@ class TestModelRegistry(unittest.TestCase):
         self.registry._cleanup_old_versions(self.elder_id, self.room_name)
         updated = self.registry._load_version_info(self.elder_id, self.room_name)
         self.assertEqual(updated["current_version"], 0)
+
+    def test_cleanup_preserves_explicit_candidate_version_even_if_old(self):
+        self.registry.MAX_VERSIONS_PER_ROOM = 3
+        info = {
+            "versions": [
+                {"version": 1}, {"version": 2}, {"version": 3},
+                {"version": 4}, {"version": 5}, {"version": 6},
+            ],
+            "current_version": 0,
+        }
+        self.registry._save_version_info(self.elder_id, self.room_name, info)
+        models_dir = self.registry.get_models_dir(self.elder_id)
+        for ver in range(1, 7):
+            (models_dir / f"{self.room_name}_v{ver}_model.keras").touch()
+
+        self.registry._cleanup_old_versions(
+            self.elder_id,
+            self.room_name,
+            preserve_versions=[2],
+        )
+        updated = self.registry._load_version_info(self.elder_id, self.room_name)
+        retained = {v["version"] for v in updated["versions"]}
+
+        self.assertEqual(retained, {2, 5, 6})
+        self.assertTrue((models_dir / f"{self.room_name}_v2_model.keras").exists())
+        self.assertFalse((models_dir / f"{self.room_name}_v4_model.keras").exists())
 
     def test_save_model_artifacts_shared_adapter_writes_adapter_payload(self):
         model = _DummyModel(
@@ -718,6 +790,153 @@ class TestModelRegistry(unittest.TestCase):
         self.assertNotIn(missing_alias_room, platform.scalers)
         self.assertNotIn(missing_alias_room, platform.label_encoders)
 
+    @patch("config.get_room_config")
+    def test_load_models_for_elder_repairs_and_loads_two_stage_latest_aliases(self, mock_get_room_config):
+        mock_cfg = MagicMock()
+        mock_cfg.calculate_seq_length.return_value = 5
+        mock_get_room_config.return_value = mock_cfg
+
+        models_dir = self.registry.get_models_dir(self.elder_id)
+        room = "Bathroom"
+        (models_dir / f"{room}_versions.json").write_text(
+            json.dumps(
+                {
+                    "versions": [{"version": 1, "promoted": True}],
+                    "current_version": 1,
+                }
+            )
+        )
+
+        (models_dir / f"{room}_v1_model.keras").write_text("model-v1")
+        joblib.dump({"scale": 1}, models_dir / f"{room}_v1_scaler.pkl")
+        joblib.dump(
+            _DummyEncoder(["bathroom_normal_use", "shower", "unoccupied"]),
+            models_dir / f"{room}_v1_label_encoder.pkl",
+        )
+        shutil.copy2(models_dir / f"{room}_v1_model.keras", models_dir / f"{room}_model.keras")
+        shutil.copy2(models_dir / f"{room}_v1_scaler.pkl", models_dir / f"{room}_scaler.pkl")
+        shutil.copy2(models_dir / f"{room}_v1_label_encoder.pkl", models_dir / f"{room}_label_encoder.pkl")
+
+        (models_dir / f"{room}_v1_two_stage_stage_a_model.keras").write_text("stage-a-v1")
+        (models_dir / f"{room}_v1_two_stage_stage_b_model.keras").write_text("stage-b-v1")
+        (models_dir / f"{room}_v1_two_stage_meta.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "beta6.two_stage_core.v1",
+                    "saved_version": 1,
+                    "runtime_enabled": True,
+                    "stage_b_enabled": True,
+                    "stage_a_occupied_threshold": 0.4,
+                    "num_classes": 3,
+                    "excluded_class_ids": [2],
+                    "occupied_class_ids": [0, 1],
+                    "primary_occupied_class_id": 0,
+                }
+            )
+        )
+
+        platform = MagicMock()
+        platform.room_models = {}
+        platform.scalers = {}
+        platform.label_encoders = {}
+        platform.class_thresholds = {}
+        platform.two_stage_core_models = {}
+        platform.sensor_columns = ["s1", "s2", "s3"]
+
+        with patch.object(
+            self.registry,
+            "load_room_model",
+            side_effect=lambda path, room_name, compile_model=True: f"loaded:{Path(path).name}",
+        ) as mock_load_room:
+            with patch.object(self.registry, "_try_load_shared_adapter_room_model", return_value=None):
+                loaded = self.registry.load_models_for_elder(self.elder_id, platform)
+
+        self.assertIn(room, loaded)
+        self.assertIn(room, platform.two_stage_core_models)
+        bundle = platform.two_stage_core_models[room]
+        self.assertEqual(bundle["saved_version"], 1)
+        self.assertEqual(bundle["excluded_class_ids"], [2])
+        self.assertEqual(bundle["occupied_class_ids"], [0, 1])
+        self.assertTrue((models_dir / f"{room}_two_stage_meta.json").exists())
+        self.assertTrue((models_dir / f"{room}_two_stage_stage_a_model.keras").exists())
+        self.assertTrue((models_dir / f"{room}_two_stage_stage_b_model.keras").exists())
+        self.assertGreaterEqual(mock_load_room.call_count, 3)
+
+    @patch("config.get_room_config")
+    def test_load_models_for_elder_ignores_two_stage_aliases_during_room_discovery(self, mock_get_room_config):
+        mock_cfg = MagicMock()
+        mock_cfg.calculate_seq_length.return_value = 5
+        mock_get_room_config.return_value = mock_cfg
+
+        models_dir = self.registry.get_models_dir(self.elder_id)
+        room = "Bathroom"
+        (models_dir / f"{room}_versions.json").write_text(
+            json.dumps(
+                {
+                    "versions": [{"version": 1, "promoted": True}],
+                    "current_version": 1,
+                }
+            )
+        )
+
+        (models_dir / f"{room}_v1_model.keras").write_text("model-v1")
+        joblib.dump({"scale": 1}, models_dir / f"{room}_v1_scaler.pkl")
+        joblib.dump(
+            _DummyEncoder(["bathroom_normal_use", "shower", "unoccupied"]),
+            models_dir / f"{room}_v1_label_encoder.pkl",
+        )
+        shutil.copy2(models_dir / f"{room}_v1_model.keras", models_dir / f"{room}_model.keras")
+        shutil.copy2(models_dir / f"{room}_v1_scaler.pkl", models_dir / f"{room}_scaler.pkl")
+        shutil.copy2(models_dir / f"{room}_v1_label_encoder.pkl", models_dir / f"{room}_label_encoder.pkl")
+
+        (models_dir / f"{room}_v1_two_stage_stage_a_model.keras").write_text("stage-a-v1")
+        (models_dir / f"{room}_v1_two_stage_stage_b_model.keras").write_text("stage-b-v1")
+        (models_dir / f"{room}_v1_two_stage_meta.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "beta6.two_stage_core.v1",
+                    "saved_version": 1,
+                    "runtime_enabled": True,
+                    "stage_b_enabled": True,
+                    "stage_a_occupied_threshold": 0.4,
+                    "num_classes": 3,
+                    "excluded_class_ids": [2],
+                    "occupied_class_ids": [0, 1],
+                    "primary_occupied_class_id": 0,
+                }
+            )
+        )
+
+        def _make_platform():
+            platform = MagicMock()
+            platform.room_models = {}
+            platform.scalers = {}
+            platform.label_encoders = {}
+            platform.class_thresholds = {}
+            platform.two_stage_core_models = {}
+            platform.sensor_columns = ["s1", "s2", "s3"]
+            return platform
+
+        with patch.object(
+            self.registry,
+            "load_room_model",
+            side_effect=lambda path, room_name, compile_model=True: f"loaded:{Path(path).name}",
+        ):
+            with patch.object(self.registry, "_try_load_shared_adapter_room_model", return_value=None):
+                first_platform = _make_platform()
+                first_loaded = self.registry.load_models_for_elder(self.elder_id, first_platform)
+                self.assertIn(room, first_loaded)
+                self.assertIn(room, first_platform.two_stage_core_models)
+
+                second_platform = _make_platform()
+                second_loaded = self.registry.load_models_for_elder(self.elder_id, second_platform)
+
+        self.assertEqual(second_loaded, [room])
+        self.assertIn(room, second_platform.two_stage_core_models)
+        self.assertTrue((models_dir / f"{room}_two_stage_meta.json").exists())
+        self.assertTrue((models_dir / f"{room}_two_stage_stage_a_model.keras").exists())
+        self.assertTrue((models_dir / f"{room}_two_stage_stage_b_model.keras").exists())
+
     def test_validate_and_repair_room_registry_state(self):
         """Test the audit and repair logic for registry consistency."""
         models_dir = self.registry.get_models_dir(self.elder_id)
@@ -857,6 +1076,58 @@ class TestModelRegistry(unittest.TestCase):
             report = self.registry.validate_and_repair_room_registry_state(self.elder_id, self.room_name)
 
         self.assertTrue(report["valid"])
+        self.assertEqual(sync_mock.call_count, 0)
+
+    def test_validate_and_repair_skips_sync_for_semantically_equal_two_stage_meta(self):
+        """
+        Two-stage metadata formatting differences alone should not trigger alias resync.
+        """
+        models_dir = self.registry.get_models_dir(self.elder_id)
+        room = "Bathroom"
+        info = {
+            "versions": [{"version": 1, "promoted": True}],
+            "current_version": 1,
+        }
+        (models_dir / f"{room}_versions.json").write_text(json.dumps(info))
+
+        for suffix, content in [
+            ("_model.keras", "model-v1"),
+            ("_scaler.pkl", "scaler-v1"),
+            ("_label_encoder.pkl", "encoder-v1"),
+        ]:
+            (models_dir / f"{room}_v1{suffix}").write_text(content)
+            (models_dir / f"{room}{suffix}").write_text(content)
+
+        payload = {
+            "schema_version": "beta6.two_stage_core.v1",
+            "saved_version": 1,
+            "runtime_enabled": True,
+            "stage_b_enabled": True,
+            "stage_a_occupied_threshold": 0.4,
+            "num_classes": 3,
+            "excluded_class_ids": [2],
+            "occupied_class_ids": [0, 1],
+            "primary_occupied_class_id": 0,
+        }
+        (models_dir / f"{room}_v1_two_stage_meta.json").write_text(json.dumps(payload, indent=2))
+        (models_dir / f"{room}_two_stage_meta.json").write_text(json.dumps(payload, separators=(",", ":")))
+        for suffix, content in [
+            ("_two_stage_stage_a_model.keras", "stage-a-v1"),
+            ("_two_stage_stage_b_model.keras", "stage-b-v1"),
+        ]:
+            (models_dir / f"{room}_v1{suffix}").write_text(content)
+            (models_dir / f"{room}{suffix}").write_text(content)
+
+        with patch.object(
+            self.registry,
+            "_ensure_latest_aliases_match_current",
+            wraps=self.registry._ensure_latest_aliases_match_current,
+        ) as sync_mock:
+            report = self.registry.validate_and_repair_room_registry_state(self.elder_id, room)
+
+        self.assertTrue(report["valid"])
+        self.assertFalse(report["repaired"])
+        self.assertNotIn("Alias mismatch detected", str(report["issues"]))
         self.assertEqual(sync_mock.call_count, 0)
 
 

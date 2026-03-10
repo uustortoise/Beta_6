@@ -40,6 +40,13 @@ def _get_str_list(*path: str) -> list[str]:
     return [str(item).strip().lower() for item in node if str(item).strip()]
 
 
+def _get_scalar(default: Any, *path: str) -> Any:
+    node: Any = _load_config()
+    for token in path:
+        node = _as_mapping(node).get(token)
+    return default if node is None else node
+
+
 def get_clinical_priority_multipliers_by_label() -> dict[str, float]:
     return {
         str(k).strip().lower(): float(v)
@@ -70,6 +77,26 @@ def get_calibration_recall_floors_by_label() -> dict[str, float]:
         for k, v in _get_map("calibration", "recall_floors_by_label").items()
         if str(k).strip()
     }
+
+
+def get_calibration_activity_confidence_min_samples_default() -> int:
+    return int(_get_scalar(80, "calibration", "activity_confidence_min_samples"))
+
+
+def get_calibration_activity_confidence_threshold_floor_default() -> float:
+    return float(_get_scalar(0.0, "calibration", "activity_confidence_threshold_floor"))
+
+
+def get_calibration_activity_confidence_threshold_cap_default() -> float:
+    return float(_get_scalar(1.0, "calibration", "activity_confidence_threshold_cap"))
+
+
+def get_calibration_threshold_stability_window_default() -> float:
+    return float(_get_scalar(0.03, "calibration", "threshold_stability_window"))
+
+
+def get_calibration_threshold_stability_max_near_share_default() -> float:
+    return float(_get_scalar(0.20, "calibration", "threshold_stability_max_near_share"))
 
 
 def get_unoccupied_downsample_min_share_by_room() -> dict[str, float]:

@@ -121,6 +121,21 @@ class ModelRegistry:
                 os.unlink(tmp_name)
 
     @staticmethod
+    def _artifacts_match(src: Path, dst: Path) -> bool:
+        """
+        Compare artifacts by content.
+
+        JSON aliases can be semantically identical while differing in whitespace or
+        key ordering, so compare parsed payloads before falling back to raw bytes.
+        """
+        if src.suffix == ".json" and dst.suffix == ".json":
+            try:
+                return json.loads(src.read_text()) == json.loads(dst.read_text())
+            except Exception:
+                pass
+        return filecmp.cmp(src, dst, shallow=False)
+
+    @staticmethod
     def _reconcile_promotion_state(info: Dict[str, Any]) -> Dict[str, Any]:
         """
         Keep `current_version` and per-version `promoted` flags consistent.
@@ -221,8 +236,13 @@ class ModelRegistry:
                 return version_meta
         return None
     
-    def _cleanup_old_versions(self, elder_id: str, room_name: str):
-        """Remove old versions beyond MAX_VERSIONS_PER_ROOM."""
+    def _cleanup_old_versions(
+        self,
+        elder_id: str,
+        room_name: str,
+        preserve_versions: Optional[List[int]] = None,
+    ):
+        """Remove old versions beyond MAX_VERSIONS_PER_ROOM while pinning explicit versions."""
         if self.MAX_VERSIONS_PER_ROOM <= 0:
             return  # Unlimited
             
@@ -230,6 +250,11 @@ class ModelRegistry:
         raw_versions = info.get("versions", [])
         versions = sorted(raw_versions, key=lambda v: int(v.get("version", 0)), reverse=True)
         current_version = int(info.get("current_version", 0) or 0)
+        pinned_ids = {
+            int(version)
+            for version in (preserve_versions or [])
+            if int(version) > 0
+        }
         
         if len(versions) <= self.MAX_VERSIONS_PER_ROOM:
             # Heal stale current_version metadata if it points to a missing version entry.
@@ -241,28 +266,38 @@ class ModelRegistry:
         keep_versions = versions[:self.MAX_VERSIONS_PER_ROOM]
         keep_ids = {int(v.get("version", 0)) for v in keep_versions}
 
-        # Always retain current champion metadata/artifacts if it exists in history.
-        if current_version > 0 and current_version not in keep_ids:
-            current_entry = next(
-                (v for v in versions if int(v.get("version", 0)) == current_version),
+        # Always retain the current champion plus any explicitly preserved candidate version.
+        if current_version > 0:
+            pinned_ids.add(current_version)
+
+        for pinned_version in sorted(pinned_ids, reverse=True):
+            if pinned_version in keep_ids:
+                continue
+            pinned_entry = next(
+                (v for v in versions if int(v.get("version", 0)) == pinned_version),
                 None,
             )
-            if current_entry is not None:
-                # Replace oldest retained non-current entry.
-                replace_idx = None
-                for idx in range(len(keep_versions) - 1, -1, -1):
-                    if int(keep_versions[idx].get("version", 0)) != current_version:
-                        replace_idx = idx
-                        break
-                if replace_idx is None:
-                    replace_idx = len(keep_versions) - 1
-                keep_versions[replace_idx] = current_entry
-                keep_versions = sorted(
-                    {int(v.get("version", 0)): v for v in keep_versions}.values(),
-                    key=lambda v: int(v.get("version", 0)),
-                    reverse=True,
-                )
-                keep_ids = {int(v.get("version", 0)) for v in keep_versions}
+            if pinned_entry is None:
+                continue
+
+            replace_idx = None
+            for idx in range(len(keep_versions) - 1, -1, -1):
+                retained_version = int(keep_versions[idx].get("version", 0))
+                if retained_version not in pinned_ids:
+                    replace_idx = idx
+                    break
+
+            if replace_idx is None:
+                keep_versions.append(pinned_entry)
+            else:
+                keep_versions[replace_idx] = pinned_entry
+
+            keep_versions = sorted(
+                {int(v.get("version", 0)): v for v in keep_versions}.values(),
+                key=lambda v: int(v.get("version", 0)),
+                reverse=True,
+            )
+            keep_ids = {int(v.get("version", 0)) for v in keep_versions}
 
         versions_to_remove = [v for v in versions if int(v.get("version", 0)) not in keep_ids]
 
@@ -277,6 +312,10 @@ class ModelRegistry:
                 "_label_encoder.pkl",
                 "_thresholds.json",
                 "_adapter_weights.pkl",
+                "_activity_confidence_calibrator.json",
+                "_two_stage_meta.json",
+                "_two_stage_stage_a_model.keras",
+                "_two_stage_stage_b_model.keras",
             ]:
                 path = models_dir / f"{room_name}_v{ver}{suffix}"
                 if path.exists():
@@ -353,7 +392,11 @@ class ModelRegistry:
             else:
                 # Verify aliases are bit-consistent with current champion artifacts.
                 mandatory = ["_model.keras", "_scaler.pkl", "_label_encoder.pkl"]
-                optional = ["_thresholds.json", "_adapter_weights.pkl"]
+                optional = [
+                    "_thresholds.json",
+                    "_adapter_weights.pkl",
+                    "_activity_confidence_calibrator.json",
+                ]
                 missing_versioned_mandatory: list[str] = []
                 needs_sync = False
 
@@ -375,7 +418,7 @@ class ModelRegistry:
                         needs_sync = True
                         continue
                     try:
-                        if not filecmp.cmp(src, dst, shallow=False):
+                        if not self._artifacts_match(src, dst):
                             needs_sync = True
                     except OSError:
                         needs_sync = True
@@ -388,13 +431,80 @@ class ModelRegistry:
                             needs_sync = True
                             continue
                         try:
-                            if not filecmp.cmp(src, dst, shallow=False):
+                            if not self._artifacts_match(src, dst):
                                 needs_sync = True
                         except OSError:
                             needs_sync = True
                     elif dst.exists():
                         # stale optional alias should be removed on sync
                         needs_sync = True
+
+                two_stage_meta_src = models_dir / f"{room_name}_v{int(current)}_two_stage_meta.json"
+                two_stage_meta_dst = models_dir / f"{room_name}_two_stage_meta.json"
+                two_stage_stage_a_src = models_dir / f"{room_name}_v{int(current)}_two_stage_stage_a_model.keras"
+                two_stage_stage_a_dst = models_dir / f"{room_name}_two_stage_stage_a_model.keras"
+                two_stage_stage_b_src = models_dir / f"{room_name}_v{int(current)}_two_stage_stage_b_model.keras"
+                two_stage_stage_b_dst = models_dir / f"{room_name}_two_stage_stage_b_model.keras"
+
+                if two_stage_meta_src.exists():
+                    try:
+                        two_stage_payload = json.loads(two_stage_meta_src.read_text())
+                    except Exception as e:
+                        report["issues"].append(
+                            f"Invalid two-stage metadata for current_version {current}: {two_stage_meta_src.name}: {e}"
+                        )
+                        report["valid"] = False
+                    else:
+                        schema_ok = str(two_stage_payload.get("schema_version", "")).strip() == "beta6.two_stage_core.v1"
+                        runtime_enabled = bool(two_stage_payload.get("runtime_enabled", True))
+                        stage_b_enabled = bool(two_stage_payload.get("stage_b_enabled", False))
+
+                        if not schema_ok:
+                            report["issues"].append(
+                                f"Invalid two-stage schema for current_version {current}: {two_stage_meta_src.name}"
+                            )
+                            report["valid"] = False
+                        elif runtime_enabled:
+                            missing_two_stage: list[str] = []
+                            if not two_stage_stage_a_src.exists():
+                                missing_two_stage.append(two_stage_stage_a_src.name)
+                            if stage_b_enabled and not two_stage_stage_b_src.exists():
+                                missing_two_stage.append(two_stage_stage_b_src.name)
+
+                            if missing_two_stage:
+                                report["issues"].append(
+                                    f"Missing mandatory two-stage artifacts for current_version {current}: {missing_two_stage}"
+                                )
+                                report["valid"] = False
+                            else:
+                                two_stage_checks = (
+                                    (two_stage_meta_src, two_stage_meta_dst),
+                                    (two_stage_stage_a_src, two_stage_stage_a_dst),
+                                )
+                                for src, dst in two_stage_checks:
+                                    if not dst.exists():
+                                        needs_sync = True
+                                        continue
+                                    try:
+                                        if not self._artifacts_match(src, dst):
+                                            needs_sync = True
+                                    except OSError:
+                                        needs_sync = True
+                                if stage_b_enabled:
+                                    if not two_stage_stage_b_dst.exists():
+                                        needs_sync = True
+                                    else:
+                                        try:
+                                            if not self._artifacts_match(two_stage_stage_b_src, two_stage_stage_b_dst):
+                                                needs_sync = True
+                                        except OSError:
+                                            needs_sync = True
+                                elif two_stage_stage_b_dst.exists():
+                                    needs_sync = True
+                        elif any(path.exists() for path in (two_stage_meta_dst, two_stage_stage_a_dst, two_stage_stage_b_dst)):
+                            needs_sync = True
+                elif any(path.exists() for path in (two_stage_meta_dst, two_stage_stage_a_dst, two_stage_stage_b_dst)):
+                    needs_sync = True
 
                 if missing_versioned_mandatory:
                     report["issues"].append(
@@ -453,7 +563,11 @@ class ModelRegistry:
         """
         models_dir = self.get_models_dir(elder_id)
         mandatory = ["_model.keras", "_scaler.pkl", "_label_encoder.pkl"]
-        optional = ["_thresholds.json", "_adapter_weights.pkl"]
+        optional = [
+            "_thresholds.json",
+            "_adapter_weights.pkl",
+            "_activity_confidence_calibrator.json",
+        ]
 
         for suffix in mandatory:
             src = models_dir / f"{room_name}_v{int(version)}{suffix}"
@@ -474,6 +588,62 @@ class ModelRegistry:
             elif suffix in optional and dst.exists():
                 # If source optional is missing but destination exists, it's stale/wrong. Remove it.
                 dst.unlink()
+
+        two_stage_meta_src = models_dir / f"{room_name}_v{int(version)}_two_stage_meta.json"
+        two_stage_stage_a_src = models_dir / f"{room_name}_v{int(version)}_two_stage_stage_a_model.keras"
+        two_stage_stage_b_src = models_dir / f"{room_name}_v{int(version)}_two_stage_stage_b_model.keras"
+        two_stage_meta_dst = models_dir / f"{room_name}_two_stage_meta.json"
+        two_stage_stage_a_dst = models_dir / f"{room_name}_two_stage_stage_a_model.keras"
+        two_stage_stage_b_dst = models_dir / f"{room_name}_two_stage_stage_b_model.keras"
+
+        def _clear_two_stage_latest_aliases() -> None:
+            for path in (two_stage_meta_dst, two_stage_stage_a_dst, two_stage_stage_b_dst):
+                if path.exists():
+                    path.unlink()
+
+        if not two_stage_meta_src.exists():
+            _clear_two_stage_latest_aliases()
+            return
+
+        try:
+            two_stage_payload = json.loads(two_stage_meta_src.read_text())
+        except Exception as exc:
+            if require_mandatory:
+                raise FileNotFoundError(
+                    f"Invalid two-stage metadata for {room_name} v{int(version)}: {two_stage_meta_src.name}: {exc}"
+                ) from exc
+            _clear_two_stage_latest_aliases()
+            return
+
+        schema_ok = str(two_stage_payload.get("schema_version", "")).strip() == "beta6.two_stage_core.v1"
+        runtime_enabled = bool(two_stage_payload.get("runtime_enabled", True))
+        if not schema_ok or not runtime_enabled:
+            _clear_two_stage_latest_aliases()
+            return
+
+        if not two_stage_stage_a_src.exists():
+            if require_mandatory:
+                raise FileNotFoundError(
+                    f"Missing mandatory two-stage artifact for {room_name} v{int(version)}: {two_stage_stage_a_src.name}"
+                )
+            _clear_two_stage_latest_aliases()
+            return
+
+        shutil.copy2(two_stage_stage_a_src, two_stage_stage_a_dst)
+        two_stage_meta_dst.write_text(json.dumps(two_stage_payload, indent=2))
+
+        stage_b_enabled = bool(two_stage_payload.get("stage_b_enabled", False))
+        if stage_b_enabled:
+            if not two_stage_stage_b_src.exists():
+                if require_mandatory:
+                    raise FileNotFoundError(
+                        f"Missing mandatory two-stage artifact for {room_name} v{int(version)}: {two_stage_stage_b_src.name}"
+                    )
+                _clear_two_stage_latest_aliases()
+                return
+            shutil.copy2(two_stage_stage_b_src, two_stage_stage_b_dst)
+        elif two_stage_stage_b_dst.exists():
+            two_stage_stage_b_dst.unlink()
 
     def rollback_to_version(self, elder_id: str, room_name: str, version: int) -> bool:
         """
@@ -538,6 +708,10 @@ class ModelRegistry:
                 "_label_encoder.pkl",
                 "_thresholds.json",
                 "_adapter_weights.pkl",
+                "_activity_confidence_calibrator.json",
+                "_two_stage_meta.json",
+                "_two_stage_stage_a_model.keras",
+                "_two_stage_stage_b_model.keras",
             ]:
                 path = models_dir / f"{room_name}{suffix}"
                 if path.exists():
@@ -859,6 +1033,13 @@ class ModelRegistry:
             return None
         if str(payload.get("schema_version", "")).strip() != "beta6.two_stage_core.v1":
             return None
+        if payload.get("runtime_enabled") is False:
+            logger.info(
+                "Skipping runtime-disabled two-stage artifacts for %s/%s",
+                elder_id,
+                room_name,
+            )
+            return None
         try:
             saved_version = int(payload.get("saved_version", 0) or 0)
         except (TypeError, ValueError):
@@ -915,6 +1096,16 @@ class ModelRegistry:
             "primary_occupied_class_id": int(payload.get("primary_occupied_class_id", -1) or -1),
             "meta": payload,
         }
+
+    @staticmethod
+    def _is_discoverable_room_model_alias(filename: str) -> bool:
+        if not filename.endswith("_model.keras") or "_v" in filename:
+            return False
+        reserved_two_stage_suffixes = (
+            "_two_stage_stage_a_model.keras",
+            "_two_stage_stage_b_model.keras",
+        )
+        return not filename.endswith(reserved_two_stage_suffixes)
                 
     def load_models_for_elder(self, elder_id: str, platform: Any) -> List[str]:
         """
@@ -937,15 +1128,17 @@ class ModelRegistry:
             return []
 
         # Store calibrated per-class thresholds on the platform object.
-        if not hasattr(platform, 'class_thresholds'):
+        if not isinstance(getattr(platform, 'class_thresholds', None), dict):
             platform.class_thresholds = {}
-        if not hasattr(platform, 'two_stage_core_models'):
+        if not isinstance(getattr(platform, 'activity_confidence_artifacts', None), dict):
+            platform.activity_confidence_artifacts = {}
+        if not isinstance(getattr(platform, 'two_stage_core_models', None), dict):
             platform.two_stage_core_models = {}
         
         # Discover candidate rooms from both latest aliases and version metadata.
         room_names = set()
         for f in os.listdir(models_dir):
-            if f.endswith("_model.keras") and "_v" not in f:
+            if self._is_discoverable_room_model_alias(f):
                 room_names.add(f.replace("_model.keras", ""))
             if f.endswith("_versions.json"):
                 room_names.add(f.replace("_versions.json", ""))
@@ -968,6 +1161,7 @@ class ModelRegistry:
                 scaler_path = str(models_dir / f"{room_name}_scaler.pkl")
                 encoder_path = str(models_dir / f"{room_name}_label_encoder.pkl")
                 thresholds_path = models_dir / f"{room_name}_thresholds.json"
+                activity_confidence_path = models_dir / f"{room_name}_activity_confidence_calibrator.json"
                 
                 if not (os.path.exists(scaler_path) and os.path.exists(encoder_path)):
                     continue
@@ -1002,6 +1196,16 @@ class ModelRegistry:
                 else:
                     platform.class_thresholds[room_name] = {}
 
+                if activity_confidence_path.exists():
+                    try:
+                        with open(activity_confidence_path, 'r') as f:
+                            platform.activity_confidence_artifacts[room_name] = json.load(f)
+                    except Exception as e:
+                        logger.warning(f"Failed to load activity confidence artifact for {room_name}: {e}")
+                        platform.activity_confidence_artifacts[room_name] = {}
+                else:
+                    platform.activity_confidence_artifacts[room_name] = {}
+
                 current_version = int(self.get_current_version(elder_id, room_name) or 0)
                 two_stage_bundle = self._load_two_stage_core_bundle(
                     elder_id=elder_id,
@@ -1020,6 +1224,8 @@ class ModelRegistry:
                 platform.label_encoders.pop(room_name, None)
                 if hasattr(platform, "class_thresholds"):
                     platform.class_thresholds.pop(room_name, None)
+                if hasattr(platform, "activity_confidence_artifacts"):
+                    platform.activity_confidence_artifacts.pop(room_name, None)
                 if hasattr(platform, "two_stage_core_models"):
                     platform.two_stage_core_models.pop(room_name, None)
                 logger.error(f"Skipping room due to model load failure for {room_name}: {e}")
@@ -1029,6 +1235,8 @@ class ModelRegistry:
                 platform.label_encoders.pop(room_name, None)
                 if hasattr(platform, "class_thresholds"):
                     platform.class_thresholds.pop(room_name, None)
+                if hasattr(platform, "activity_confidence_artifacts"):
+                    platform.activity_confidence_artifacts.pop(room_name, None)
                 if hasattr(platform, "two_stage_core_models"):
                     platform.two_stage_core_models.pop(room_name, None)
                 logger.error(f"Failed to load model for {room_name}: {type(e).__name__}: {e}")
@@ -1038,6 +1246,8 @@ class ModelRegistry:
                 platform.label_encoders.pop(room_name, None)
                 if hasattr(platform, "class_thresholds"):
                     platform.class_thresholds.pop(room_name, None)
+                if hasattr(platform, "activity_confidence_artifacts"):
+                    platform.activity_confidence_artifacts.pop(room_name, None)
                 if hasattr(platform, "two_stage_core_models"):
                     platform.two_stage_core_models.pop(room_name, None)
                 logger.error(f"Unexpected error loading {room_name}: {e}")
@@ -1054,10 +1264,12 @@ class ModelRegistry:
         accuracy: float = None,
         samples: int = None,
         class_thresholds: Optional[Dict[int, float]] = None,
+        activity_confidence_artifact: Optional[Dict[str, Any]] = None,
         metrics: Optional[Dict[str, Any]] = None,
         model_identity: Optional[Dict[str, Any]] = None,
         promote_to_latest: bool = True,
         parent_version_id: Optional[int] = None,
+        cleanup_old_versions: bool = True,
     ) -> int:
         """
         Save model, scaler, and encoder to disk with versioning.
@@ -1074,6 +1286,7 @@ class ModelRegistry:
             model_identity: Optional model lineage payload (e.g., backbone_id/adapter_id).
             promote_to_latest: If True, promotes this version to active "latest".
             parent_version_id: Optional champion/source version used for warm-start lineage.
+            cleanup_old_versions: Whether to prune old versioned artifacts after saving.
             
         Returns:
             Version number of the saved model
@@ -1087,6 +1300,7 @@ class ModelRegistry:
             scaler_path = models_dir / f"{room_name}_v{version}_scaler.pkl"
             encoder_path = models_dir / f"{room_name}_v{version}_label_encoder.pkl"
             thresholds_path = models_dir / f"{room_name}_v{version}_thresholds.json"
+            activity_confidence_path = models_dir / f"{room_name}_v{version}_activity_confidence_calibrator.json"
             
             model.save(str(model_path))
             joblib.dump(scaler, scaler_path)
@@ -1095,6 +1309,9 @@ class ModelRegistry:
                 serializable_thresholds = {str(k): float(v) for k, v in class_thresholds.items()}
                 with open(thresholds_path, 'w') as f:
                     json.dump(serializable_thresholds, f, indent=2)
+            if activity_confidence_artifact is not None:
+                with open(activity_confidence_path, 'w') as f:
+                    json.dump(activity_confidence_artifact, f, indent=2)
             
             identity = model_identity or {}
             model_family = str(identity.get("family", "")).strip().lower()
@@ -1140,7 +1357,8 @@ class ModelRegistry:
             self._save_version_info(elder_id, room_name, info)
             
             # Cleanup old versions
-            self._cleanup_old_versions(elder_id, room_name)
+            if cleanup_old_versions:
+                self._cleanup_old_versions(elder_id, room_name)
             
             if promote_to_latest:
                 logger.info(f"✓ Saved and promoted {room_name} model v{version} for {elder_id}")

@@ -69,6 +69,11 @@ from ml.transformer_timeline_heads import (
     create_timeline_heads,
 )
 from ml.beta6.sequence.hmm_decoder import DEFAULT_DECODER_POLICY
+from ml.beta6.serving.activity_confidence import (
+    choose_activity_confidence_threshold,
+    fit_activity_confidence_calibrator,
+    score_activity_confidence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +233,7 @@ class TrainingPipeline:
         self.policy = policy or load_policy_from_env()
         self._policy_snapshot: Optional[TrainingPolicy] = None
         self._last_calibration_debug: List[Dict[str, Any]] = []
+        self._last_activity_confidence_artifact: Optional[Dict[str, Any]] = None
         self._last_release_gate_watch_reasons: List[str] = []
         self._last_unoccupied_downsample_debug: Dict[str, Any] = {}
         self._seed_panel_debug_context: Optional[Dict[str, Any]] = None
@@ -1833,6 +1839,15 @@ class TrainingPipeline:
             final_metrics["promotion_deferred"] = False if promoted else bool(
                 final_metrics.get("promotion_deferred", False)
             )
+        if selected_saved_version is not None:
+            try:
+                self.registry._cleanup_old_versions(
+                    elder_id,
+                    room_name,
+                    preserve_versions=[int(selected_saved_version)],
+                )
+            except Exception as e:
+                final_metrics["seed_panel_cleanup_error"] = f"{type(e).__name__}: {e}"
         final_metrics["seed_panel_debug"] = dict(seed_panel_debug)
         return final_metrics
 
@@ -5083,10 +5098,11 @@ class TrainingPipeline:
         For each class:
         - find lowest threshold that satisfies precision target and recall floor
         - fallback to best-F1 threshold when constraints are unattainable
-        - clip threshold to [policy.threshold_floor, policy.threshold_cap]
+        - clip threshold within the score space used at runtime
         """
         calibration_policy = self._active_policy().calibration
         thresholds = self._default_class_thresholds(room_name)
+        self._last_activity_confidence_artifact = None
         if len(X_calib) == 0 or len(y_calib) == 0:
             self._last_calibration_debug = []
             return thresholds
@@ -5108,78 +5124,460 @@ class TrainingPipeline:
             y_scores = tf.nn.softmax(y_scores, axis=1).numpy()
 
         n_classes = y_scores.shape[1]
+        label_names = [
+            (self._get_label_name(room_name, class_id) or f"class_{class_id}")
+            for class_id in range(n_classes)
+        ]
+        use_activity_confidence = bool(n_classes > 1)
+        activity_scores = np.max(y_scores, axis=1).astype(np.float64, copy=False)
+        predicted_indices = np.argmax(y_scores, axis=1).astype(np.int64, copy=False)
+        activity_confidence_source = "raw_top1_confidence"
+        if use_activity_confidence:
+            artifact = fit_activity_confidence_calibrator(
+                probabilities=y_scores,
+                true_indices=y_calib,
+                labels=label_names,
+                min_samples=int(calibration_policy.activity_confidence_min_samples),
+            )
+            if artifact:
+                self._last_activity_confidence_artifact = dict(artifact)
+                scored = score_activity_confidence(
+                    probabilities=y_scores,
+                    labels=label_names,
+                    artifact=artifact,
+                )
+                activity_scores = np.asarray(scored["scores"], dtype=np.float64)
+                predicted_indices = np.asarray(scored["predicted_indices"], dtype=np.int64)
+                activity_confidence_source = str(scored.get("confidence_source", "activity_acceptance_score_v1"))
+        raw_threshold_floor = float(calibration_policy.threshold_floor)
+        raw_threshold_cap = float(calibration_policy.threshold_cap)
+        activity_threshold_floor = float(calibration_policy.activity_confidence_threshold_floor)
+        activity_threshold_cap = float(calibration_policy.activity_confidence_threshold_cap)
         calibration_debug = []
 
         for class_id in range(n_classes):
-            label_name = self._get_label_name(room_name, class_id)
+            label_name = label_names[class_id]
             default_thr = float(DEFAULT_CONFIDENCE_THRESHOLD)
             y_true = (y_calib == class_id).astype(int)
             support = int(y_true.sum())
+            predicted_mask = predicted_indices == class_id
+            predicted_support = int(np.sum(predicted_mask))
+            uses_activity_thresholds = bool(self._last_activity_confidence_artifact)
+            threshold_floor = activity_threshold_floor if uses_activity_thresholds else raw_threshold_floor
+            threshold_cap = activity_threshold_cap if uses_activity_thresholds else raw_threshold_cap
 
             if support < int(calibration_policy.min_support_per_class):
                 thresholds[class_id] = float(
-                    np.clip(default_thr, calibration_policy.threshold_floor, calibration_policy.threshold_cap)
+                    np.clip(default_thr, threshold_floor, threshold_cap)
                 )
                 calibration_debug.append({
                     'class_id': class_id,
                     'label': label_name or 'unknown',
                     'support': support,
+                    'predicted_support': predicted_support,
                     'status': 'fallback_low_support',
                     'threshold': thresholds[class_id],
+                    'confidence_source': activity_confidence_source,
+                    'threshold_floor': threshold_floor,
+                    'threshold_cap': threshold_cap,
                 })
                 continue
 
-            scores = y_scores[:, class_id]
-            precision, recall, pr_thresholds = precision_recall_curve(y_true, scores)
-            if len(pr_thresholds) == 0:
-                thresholds[class_id] = float(
-                    np.clip(default_thr, calibration_policy.threshold_floor, calibration_policy.threshold_cap)
-                )
-                calibration_debug.append({
-                    'class_id': class_id,
-                    'label': label_name or 'unknown',
-                    'support': support,
-                    'status': 'fallback_no_curve',
-                    'threshold': thresholds[class_id],
-                })
-                continue
-
-            p = precision[:-1]
-            r = recall[:-1]
             target_precision = float(calibration_policy.get_precision_target(label_name))
             recall_floor = float(calibration_policy.get_recall_floor(label_name))
 
-            valid = np.where((p >= target_precision) & (r >= recall_floor))[0]
-            if len(valid) > 0:
-                # Lowest threshold among valid points -> highest recall satisfying precision target.
-                raw_threshold = float(np.min(pr_thresholds[valid]))
-                status = 'target_met'
+            if self._last_activity_confidence_artifact and predicted_support >= int(calibration_policy.min_support_per_class):
+                scores = activity_scores[predicted_mask]
+                outcomes = (y_calib[predicted_mask] == class_id).astype(int)
+                if len(scores) == 0 or int(np.sum(outcomes)) <= 0:
+                    final_threshold = float(
+                        np.clip(default_thr, threshold_floor, threshold_cap)
+                    )
+                    status = 'fallback_no_curve'
+                    near_share = 0.0
+                    selected_precision = 0.0
+                    selected_recall = 0.0
+                else:
+                    threshold_result = choose_activity_confidence_threshold(
+                        scores=scores,
+                        outcomes=outcomes,
+                        target_precision=target_precision,
+                        recall_floor=recall_floor,
+                        threshold_floor=threshold_floor,
+                        threshold_cap=threshold_cap,
+                        stability_window=float(calibration_policy.threshold_stability_window),
+                        max_near_threshold_share=float(calibration_policy.threshold_stability_max_near_share),
+                    )
+                    final_threshold = float(threshold_result["threshold"])
+                    status = str(threshold_result["status"])
+                    near_share = float(threshold_result.get("near_threshold_share", 0.0) or 0.0)
+                    selected_precision = float(threshold_result.get("selected_precision", 0.0) or 0.0)
+                    selected_recall = float(threshold_result.get("selected_recall", 0.0) or 0.0)
             else:
-                # Fallback: choose best F1 operating point.
-                f1 = (2.0 * p * r) / np.maximum(p + r, 1e-9)
-                best_idx = int(np.nanargmax(f1))
-                raw_threshold = float(pr_thresholds[best_idx])
-                status = 'fallback_best_f1'
+                scores = y_scores[:, class_id]
+                precision, recall, pr_thresholds = precision_recall_curve(y_true, scores)
+                if len(pr_thresholds) == 0:
+                    thresholds[class_id] = float(
+                        np.clip(default_thr, threshold_floor, threshold_cap)
+                    )
+                    calibration_debug.append({
+                        'class_id': class_id,
+                        'label': label_name or 'unknown',
+                        'support': support,
+                        'predicted_support': predicted_support,
+                        'status': 'fallback_no_curve',
+                        'threshold': thresholds[class_id],
+                        'confidence_source': activity_confidence_source,
+                        'threshold_floor': threshold_floor,
+                        'threshold_cap': threshold_cap,
+                    })
+                    continue
 
-            final_threshold = float(
-                np.clip(raw_threshold, calibration_policy.threshold_floor, calibration_policy.threshold_cap)
-            )
+                p = precision[:-1]
+                r = recall[:-1]
+                valid = np.where((p >= target_precision) & (r >= recall_floor))[0]
+                if len(valid) > 0:
+                    raw_threshold = float(np.min(pr_thresholds[valid]))
+                    status = 'target_met'
+                else:
+                    f1 = (2.0 * p * r) / np.maximum(p + r, 1e-9)
+                    best_idx = int(np.nanargmax(f1))
+                    raw_threshold = float(pr_thresholds[best_idx])
+                    status = 'fallback_best_f1'
+
+                final_threshold = float(
+                    np.clip(raw_threshold, threshold_floor, threshold_cap)
+                )
+                near_share = float(np.mean(np.abs(scores - final_threshold) <= float(calibration_policy.threshold_stability_window)))
+                selected_precision = float(p[valid[0]]) if len(valid) > 0 else float(np.max(p))
+                selected_recall = float(r[valid[0]]) if len(valid) > 0 else float(np.max(r))
+
             thresholds[class_id] = final_threshold
 
             calibration_debug.append({
                 'class_id': class_id,
                 'label': label_name or 'unknown',
                 'support': support,
+                'predicted_support': predicted_support,
                 'target_precision': float(target_precision),
                 'recall_floor': float(recall_floor),
                 'status': status,
                 'threshold': final_threshold,
+                'near_threshold_share': near_share,
+                'confidence_source': activity_confidence_source,
+                'threshold_floor': threshold_floor,
+                'threshold_cap': threshold_cap,
+                'selected_precision': selected_precision,
+                'selected_recall': selected_recall,
             })
 
         self._last_calibration_debug = calibration_debug
         logger.info(f"Calibration thresholds for {room_name}: {thresholds}")
         logger.info(f"Calibration breakdown for {room_name}: {calibration_debug}")
         return thresholds
+
+    def _prepare_recalibration_sequences(
+        self,
+        *,
+        room_name: str,
+        raw_df: pd.DataFrame,
+        seq_length: int,
+        validation_split: float,
+    ) -> Dict[str, Any]:
+        from ml.train_split_scaling_pipeline import _attach_activity_encoded_with_train_encoder
+
+        if raw_df is None or raw_df.empty:
+            raise ModelTrainError(f"No labeled data available for recalibration ({room_name})")
+
+        calibration_policy = self._active_policy().calibration
+        processed_df = self.platform.preprocess_without_scaling(
+            df=raw_df,
+            room_name=room_name,
+            is_training=True,
+            apply_denoising=False,
+        )
+        if processed_df is None or processed_df.empty:
+            raise ModelTrainError(f"Preprocessing returned no rows for recalibration ({room_name})")
+
+        processed_df = self.platform.apply_scaling(
+            processed_df,
+            room_name,
+            is_training=False,
+        )
+        processed_df = _attach_activity_encoded_with_train_encoder(
+            self.platform,
+            room_name,
+            processed_df,
+        )
+        processed_df = self._require_valid_activity_encoded(processed_df, room_name)
+
+        duplicate_policy = getattr(self.policy, "duplicate_resolution", None) or DuplicateResolutionPolicy()
+        if duplicate_policy.method != "first":
+            if "timestamp" not in processed_df.columns:
+                idx_col = processed_df.index.name or "index"
+                processed_df = processed_df.reset_index().rename(columns={idx_col: "timestamp"})
+            resolver = DuplicateTimestampResolver(policy=duplicate_policy)
+            processed_df = resolver.resolve(
+                processed_df,
+                timestamp_col="timestamp",
+                label_col="activity" if "activity" in processed_df.columns else "activity_encoded",
+            )
+
+        sensor_data = np.asarray(processed_df[self.platform.sensor_columns].values, dtype=np.float32)
+        labels = np.asarray(processed_df["activity_encoded"].values, dtype=np.int32)
+        if "timestamp" in processed_df.columns:
+            all_ts = pd.to_datetime(processed_df["timestamp"]).values
+        else:
+            all_ts = pd.to_datetime(processed_df.index).values
+
+        try:
+            X_seq, y_seq, seq_timestamps = safe_create_sequences(
+                platform=self.platform,
+                sensor_data=sensor_data,
+                labels=labels,
+                seq_length=seq_length,
+                room_name=room_name,
+                timestamps=all_ts,
+                strict=True,
+            )
+        except SequenceLabelAlignmentError as e:
+            raise ModelTrainError(f"Sequence alignment failed for recalibration ({room_name}): {e}") from e
+
+        X_seq = np.asarray(X_seq, dtype=np.float32)
+        y_seq = np.asarray(y_seq, dtype=np.int32)
+        seq_timestamps = np.asarray(seq_timestamps, dtype="datetime64[ns]")
+        if len(X_seq) < 2:
+            raise ModelTrainError(
+                f"Insufficient recalibration sequences for {room_name}: {len(X_seq)} < 2"
+            )
+
+        order = np.argsort(seq_timestamps)
+        X_seq = X_seq[order]
+        y_seq = y_seq[order]
+        seq_timestamps = seq_timestamps[order]
+
+        holdout_support_floor = self._resolve_min_holdout_support(room_name)
+        critical_support_info = self._resolve_critical_class_support(
+            room_name=room_name,
+            y_seq=y_seq,
+            min_support=holdout_support_floor,
+        )
+        default_split_idx = int(len(X_seq) * (1.0 - float(validation_split)))
+        default_split_idx = max(1, min(len(X_seq) - 1, default_split_idx))
+        split_idx, split_support_debug = self._select_temporal_split_index_with_support(
+            y_seq=y_seq,
+            default_split_idx=default_split_idx,
+            required_class_ids=critical_support_info.get("class_ids", []),
+            min_support=holdout_support_floor,
+        )
+
+        X_holdout = X_seq[split_idx:]
+        y_holdout = y_seq[split_idx:]
+        calib_split_support_debug: Dict[str, Any] = {"found": True}
+        if len(X_holdout) == 0:
+            raise ModelTrainError(f"Empty recalibration holdout split for {room_name}")
+
+        if len(X_holdout) >= int(calibration_policy.separate_calibration_min_holdout):
+            desired_calib_size = max(
+                int(calibration_policy.min_samples),
+                int(len(X_holdout) * float(calibration_policy.fraction_of_holdout)),
+            )
+            desired_calib_size = min(
+                desired_calib_size,
+                len(X_holdout) - int(calibration_policy.min_samples),
+            )
+            calib_size, calib_split_support_debug = self._select_calibration_size_with_support(
+                y_holdout=y_holdout,
+                default_calib_size=desired_calib_size,
+                min_calib_samples=int(calibration_policy.min_samples),
+                min_val_samples=int(calibration_policy.min_samples),
+                required_class_ids=critical_support_info.get("class_ids", []),
+                min_support=holdout_support_floor,
+            )
+            if calib_size is not None and int(calib_size) >= int(calibration_policy.min_samples):
+                validation_data = (X_holdout[:-calib_size], y_holdout[:-calib_size])
+                calibration_data = (X_holdout[-calib_size:], y_holdout[-calib_size:])
+            else:
+                validation_data = (X_holdout, y_holdout)
+                calibration_data = (X_holdout, y_holdout)
+        else:
+            validation_data = (X_holdout, y_holdout)
+            calibration_data = (X_holdout, y_holdout)
+
+        if len(calibration_data[0]) == 0 or len(calibration_data[1]) == 0:
+            raise ModelTrainError(f"Empty recalibration calibration split for {room_name}")
+
+        return {
+            "validation_data": (
+                np.asarray(validation_data[0], dtype=np.float32),
+                np.asarray(validation_data[1], dtype=np.int32),
+            ),
+            "calibration_data": (
+                np.asarray(calibration_data[0], dtype=np.float32),
+                np.asarray(calibration_data[1], dtype=np.int32),
+            ),
+            "split_support": split_support_debug,
+            "calibration_split_support": calib_split_support_debug,
+            "critical_labels": list(critical_support_info.get("labels", [])),
+            "total_sequences": int(len(X_seq)),
+            "holdout_sequences": int(len(X_holdout)),
+        }
+
+    def recalibrate_promoted_room_artifacts(
+        self,
+        *,
+        elder_id: str,
+        room_name: str,
+        raw_df: pd.DataFrame,
+        seq_length: int,
+        validation_split: float = 0.2,
+    ) -> Dict[str, Any]:
+        room_name = str(room_name)
+        if room_name not in getattr(self.platform, "room_models", {}):
+            self.registry.load_models_for_elder(elder_id, self.platform)
+
+        model = getattr(self.platform, "room_models", {}).get(room_name)
+        scaler = getattr(self.platform, "scalers", {}).get(room_name)
+        encoder = getattr(self.platform, "label_encoders", {}).get(room_name)
+        if model is None or scaler is None or encoder is None:
+            raise ModelTrainError(f"Missing promoted champion artifacts for recalibration ({elder_id}/{room_name})")
+
+        current_version = int(self.registry.get_current_version(elder_id, room_name) or 0)
+        if current_version <= 0:
+            raise ModelTrainError(f"No promoted champion version found for recalibration ({elder_id}/{room_name})")
+
+        current_meta = self.registry.get_current_version_metadata(elder_id, room_name) or {}
+        current_identity = dict(current_meta.get("model_identity") or {})
+        self._policy_snapshot = self._active_policy()
+        policy_hash = self._policy_hash(self._policy_snapshot)
+
+        prepared = self._prepare_recalibration_sequences(
+            room_name=room_name,
+            raw_df=raw_df,
+            seq_length=seq_length,
+            validation_split=validation_split,
+        )
+        validation_data = prepared["validation_data"]
+        calibration_data = prepared["calibration_data"]
+        class_thresholds = self._calibrate_class_thresholds(
+            model=model,
+            X_calib=calibration_data[0],
+            y_calib=calibration_data[1],
+            room_name=room_name,
+        )
+
+        accuracy = float(current_meta.get("accuracy", 0.0) or 0.0)
+        sample_count = int(current_meta.get("samples", prepared["total_sequences"]) or prepared["total_sequences"])
+        metrics: Dict[str, Any] = {
+            "room": room_name,
+            "accuracy": accuracy,
+            "samples": sample_count,
+            "training_mode": "recalibration_only",
+            "metric_source": "recalibration_only",
+            "gate_pass": True,
+            "gate_reasons": [],
+            "recalibration_of_version": int(current_version),
+            "policy_hash": policy_hash,
+            "validation_sequences": int(len(validation_data[0])),
+            "calibration_sequences": int(len(calibration_data[0])),
+            "total_sequences": int(prepared["total_sequences"]),
+            "holdout_sequences": int(prepared.get("holdout_sequences", len(validation_data[0]))),
+            "split_support": prepared["split_support"],
+            "calibration_split_support": prepared["calibration_split_support"],
+            "critical_labels": list(prepared["critical_labels"]),
+            "class_thresholds": dict(class_thresholds),
+            "activity_confidence_artifact": copy.deepcopy(self._last_activity_confidence_artifact),
+            "activity_confidence_enabled": bool(self._last_activity_confidence_artifact),
+            "calibration_debug": list(self._last_calibration_debug),
+        }
+
+        saved_version = self.registry.save_model_artifacts(
+            elder_id,
+            room_name,
+            model,
+            scaler,
+            encoder,
+            accuracy=accuracy,
+            samples=sample_count,
+            class_thresholds=class_thresholds,
+            activity_confidence_artifact=self._last_activity_confidence_artifact,
+            metrics=metrics,
+            model_identity=current_identity,
+            promote_to_latest=True,
+            parent_version_id=current_version,
+        )
+        metrics["saved_version"] = int(saved_version)
+        metrics["promoted_to_latest"] = True
+
+        two_stage_bundle = None
+        load_two_stage = getattr(self.registry, "_load_two_stage_core_bundle", None)
+        if callable(load_two_stage):
+            two_stage_bundle = load_two_stage(
+                elder_id=elder_id,
+                room_name=room_name,
+                current_version=current_version,
+            )
+        if isinstance(two_stage_bundle, dict) and bool(two_stage_bundle.get("stage_a_model") is not None):
+            two_stage_result = dict(two_stage_bundle)
+            two_stage_result["enabled"] = True
+            artifact_paths = self._write_two_stage_core_artifacts(
+                elder_id=elder_id,
+                room_name=room_name,
+                saved_version=int(saved_version),
+                two_stage_result=two_stage_result,
+                promote_to_latest=True,
+            )
+            metrics["two_stage_core"] = {
+                "enabled": True,
+                "saved_version": int(saved_version),
+                "artifact_paths": artifact_paths,
+            }
+            if not isinstance(getattr(self.platform, "two_stage_core_models", None), dict):
+                self.platform.two_stage_core_models = {}
+            self.platform.two_stage_core_models[room_name] = dict(two_stage_bundle)
+
+        decision_trace_payload = {
+            "created_at_utc": _utc_now_iso_z(),
+            "elder_id": elder_id,
+            "room": room_name,
+            "saved_version": int(saved_version),
+            "training_mode": "recalibration_only",
+            "policy_hash": policy_hash,
+            "class_thresholds": {str(k): float(v) for k, v in class_thresholds.items()},
+            "calibration_debug": list(self._last_calibration_debug),
+            "metrics": metrics,
+            "release_gate": {"pass": True, "blocking_reasons": [], "watch_reasons": [], "reasons": []},
+        }
+        decision_trace_paths = self._write_decision_trace(
+            elder_id=elder_id,
+            room_name=room_name,
+            saved_version=int(saved_version),
+            payload=decision_trace_payload,
+        )
+        if decision_trace_paths:
+            metrics["decision_trace"] = decision_trace_paths
+
+        if not isinstance(getattr(self.platform, "class_thresholds", None), dict):
+            self.platform.class_thresholds = {}
+        self.platform.class_thresholds[room_name] = {
+            str(class_id): float(threshold)
+            for class_id, threshold in class_thresholds.items()
+        }
+        if not isinstance(getattr(self.platform, "activity_confidence_artifacts", None), dict):
+            self.platform.activity_confidence_artifacts = {}
+        self.platform.activity_confidence_artifacts[room_name] = copy.deepcopy(
+            self._last_activity_confidence_artifact or {}
+        )
+        self.platform.room_models[room_name] = model
+
+        logger.info(
+            "Recalibrated promoted champion artifacts for %s/%s: source_version=v%s -> promoted_version=v%s",
+            elder_id,
+            room_name,
+            current_version,
+            int(saved_version),
+        )
+        return metrics
 
     def train_room_with_leakage_free_scaling(
         self,
@@ -6506,6 +6904,8 @@ class TrainingPipeline:
                     f"using default threshold={DEFAULT_CONFIDENCE_THRESHOLD}"
                 )
             metrics['class_thresholds'] = class_thresholds
+            metrics["activity_confidence_artifact"] = copy.deepcopy(self._last_activity_confidence_artifact)
+            metrics["activity_confidence_enabled"] = bool(self._last_activity_confidence_artifact)
             calib_supports = [
                 int(entry.get("support", 0) or 0)
                 for entry in self._last_calibration_debug
@@ -6720,6 +7120,8 @@ class TrainingPipeline:
 
             promote_to_latest = bool(gate_pass and not defer_promotion)
 
+            multi_seed_candidate_active = str(os.getenv("TRAINING_MULTI_SEED_ACTIVE", "")).strip() == "1"
+
             # Save artifacts via registry (with versioning); optionally defer promotion.
             saved_version = self.registry.save_model_artifacts(
                 elder_id,
@@ -6730,10 +7132,12 @@ class TrainingPipeline:
                 accuracy=float(reported_accuracy),
                 samples=int(train_samples_for_evidence),
                 class_thresholds=class_thresholds,
+                activity_confidence_artifact=self._last_activity_confidence_artifact,
                 metrics=metrics,
                 model_identity=model_identity,
                 promote_to_latest=promote_to_latest,
                 parent_version_id=parent_version_id,
+                cleanup_old_versions=not multi_seed_candidate_active,
             )
             metrics["saved_version"] = int(saved_version)
             metrics["promotion_deferred"] = bool(defer_promotion and gate_pass)
@@ -6823,8 +7227,19 @@ class TrainingPipeline:
                         "min_samples": int(calibration_policy.min_samples),
                         "separate_calibration_min_holdout": int(calibration_policy.separate_calibration_min_holdout),
                         "min_support_per_class": int(calibration_policy.min_support_per_class),
+                        "activity_confidence_min_samples": int(calibration_policy.activity_confidence_min_samples),
+                        "activity_confidence_threshold_floor": float(
+                            calibration_policy.activity_confidence_threshold_floor
+                        ),
+                        "activity_confidence_threshold_cap": float(
+                            calibration_policy.activity_confidence_threshold_cap
+                        ),
                         "threshold_floor": float(calibration_policy.threshold_floor),
                         "threshold_cap": float(calibration_policy.threshold_cap),
+                        "threshold_stability_window": float(calibration_policy.threshold_stability_window),
+                        "threshold_stability_max_near_share": float(
+                            calibration_policy.threshold_stability_max_near_share
+                        ),
                     },
                 },
                 "data": {
@@ -6897,6 +7312,11 @@ class TrainingPipeline:
                     str(class_id): float(threshold)
                     for class_id, threshold in class_thresholds.items()
                 }
+                if not isinstance(getattr(self.platform, "activity_confidence_artifacts", None), dict):
+                    self.platform.activity_confidence_artifacts = {}
+                self.platform.activity_confidence_artifacts[room_name] = copy.deepcopy(
+                    self._last_activity_confidence_artifact or {}
+                )
                 self.platform.room_models[room_name] = model
             elif gate_pass and defer_promotion:
                 logger.info(

@@ -74,3 +74,52 @@ def test_evaluate_calibration_reports_expected_fields():
     assert 0.0 <= payload["accuracy"] <= 1.0
     assert payload["brier_score"] >= 0.0
     assert payload["expected_calibration_error"] >= 0.0
+
+
+def test_infer_with_unknown_path_uses_supplied_activity_acceptance_score():
+    probs = np.array([[0.52, 0.48]], dtype=np.float64)
+    policy = UnknownPolicy(
+        min_confidence=0.55,
+        max_entropy=0.10,
+        outside_sensed_space_threshold=0.8,
+        abstain_rate_min=0.0,
+        abstain_rate_max=1.0,
+    )
+
+    result = infer_with_unknown_path(
+        probabilities=probs,
+        labels=["active_use", "unoccupied"],
+        policy=policy,
+        confidence_scores=np.array([0.80], dtype=np.float64),
+        confidence_source="activity_acceptance_score_v1",
+        apply_entropy_gate=False,
+    )
+
+    assert result["labels"][0] == "active_use"
+    assert result["uncertainty_states"][0] is None
+    assert result["confidence_source"] == "activity_acceptance_score_v1"
+    assert result["confidence"][0] == 0.80
+
+
+def test_infer_with_unknown_path_can_skip_duplicate_confidence_gate():
+    probs = np.array([[0.52, 0.48]], dtype=np.float64)
+    policy = UnknownPolicy(
+        min_confidence=0.55,
+        max_entropy=0.10,
+        outside_sensed_space_threshold=0.8,
+        abstain_rate_min=0.0,
+        abstain_rate_max=1.0,
+    )
+
+    result = infer_with_unknown_path(
+        probabilities=probs,
+        labels=["active_use", "unoccupied"],
+        policy=policy,
+        confidence_scores=np.array([0.235], dtype=np.float64),
+        confidence_source="activity_acceptance_score_v1",
+        apply_confidence_gate=False,
+        apply_entropy_gate=False,
+    )
+
+    assert result["labels"][0] == "active_use"
+    assert result["uncertainty_states"][0] is None

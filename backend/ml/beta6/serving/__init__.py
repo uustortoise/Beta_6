@@ -1,5 +1,6 @@
 """Beta 6 serving subpackage."""
 
+from .activity_confidence import *  # noqa: F401,F403
 from .capability_profiles import *  # noqa: F401,F403
 from .head_factory import *  # noqa: F401,F403
 from .prediction import *  # noqa: F401,F403

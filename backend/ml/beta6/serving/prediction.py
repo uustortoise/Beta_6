@@ -69,6 +69,11 @@ def infer_with_unknown_path(
     labels: Sequence[str],
     policy: UnknownPolicy,
     outside_sensed_space_scores: Optional[np.ndarray] = None,
+    confidence_scores: Optional[np.ndarray] = None,
+    confidence_source: Optional[str] = None,
+    preexisting_low_conf_flags: Optional[Sequence[bool]] = None,
+    apply_confidence_gate: bool = True,
+    apply_entropy_gate: bool = True,
 ) -> Dict[str, Any]:
     probs = np.asarray(probabilities, dtype=np.float64)
     if probs.ndim != 2:
@@ -78,15 +83,28 @@ def infer_with_unknown_path(
     norm = probs / np.where(probs.sum(axis=1, keepdims=True) <= 0.0, 1.0, probs.sum(axis=1, keepdims=True))
 
     labels_norm = [str(label).strip().lower() for label in labels]
-    conf = norm.max(axis=1)
     pred_idx = norm.argmax(axis=1)
     entropy = _entropy(norm)
+    if confidence_scores is None:
+        conf = norm.max(axis=1)
+        resolved_confidence_source = "raw_top1_confidence"
+    else:
+        conf = np.asarray(confidence_scores, dtype=np.float64).reshape(-1)
+        if len(conf) != len(norm):
+            raise ValueError("confidence_scores length mismatch")
+        resolved_confidence_source = str(confidence_source or "external_confidence_score").strip()
     if outside_sensed_space_scores is None:
         outside_scores = np.zeros(len(norm), dtype=np.float64)
     else:
         outside_scores = np.asarray(outside_sensed_space_scores, dtype=np.float64).reshape(-1)
         if len(outside_scores) != len(norm):
             raise ValueError("outside_sensed_space_scores length mismatch")
+    if preexisting_low_conf_flags is None:
+        upstream_low_conf = np.zeros(len(norm), dtype=bool)
+    else:
+        upstream_low_conf = np.asarray(preexisting_low_conf_flags, dtype=bool).reshape(-1)
+        if len(upstream_low_conf) != len(norm):
+            raise ValueError("preexisting_low_conf_flags length mismatch")
 
     predicted_labels = []
     uncertainty_states = []
@@ -95,11 +113,15 @@ def infer_with_unknown_path(
             predicted_labels.append(policy.abstain_label)
             uncertainty_states.append(policy.outside_sensed_space_state)
             continue
-        if conf[i] < policy.min_confidence:
+        if upstream_low_conf[i]:
             predicted_labels.append(policy.abstain_label)
             uncertainty_states.append(policy.low_confidence_state)
             continue
-        if entropy[i] > policy.max_entropy:
+        if apply_confidence_gate and conf[i] < policy.min_confidence:
+            predicted_labels.append(policy.abstain_label)
+            uncertainty_states.append(policy.low_confidence_state)
+            continue
+        if apply_entropy_gate and entropy[i] > policy.max_entropy:
             predicted_labels.append(policy.abstain_label)
             uncertainty_states.append(policy.unknown_state)
             continue
@@ -112,6 +134,7 @@ def infer_with_unknown_path(
         "labels": predicted_labels,
         "uncertainty_states": uncertainty_states,
         "confidence": conf.tolist(),
+        "confidence_source": resolved_confidence_source,
         "entropy": entropy.tolist(),
         "abstain_rate": abstain_rate,
         "policy_targets": {

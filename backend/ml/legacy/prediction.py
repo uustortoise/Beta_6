@@ -9,6 +9,7 @@ from typing import Dict, Any, List, Optional
 from pathlib import Path
 
 from config import get_room_config, DB_PATH
+from ml.beta6.serving.activity_confidence import score_activity_confidence
 from ml.beta6.serving.prediction import infer_with_unknown_path, load_unknown_policy
 from ml.beta6.serving.runtime_hooks import (
     apply_beta6_hmm_runtime,
@@ -307,6 +308,9 @@ class PredictionPipeline:
         final_labels: np.ndarray,
         low_conf_flags: list[bool],
         low_conf_hints: list[Optional[str]],
+        confidence_scores: Optional[np.ndarray] = None,
+        confidence_source: Optional[str] = None,
+        apply_entropy_gate: bool = True,
     ) -> tuple[np.ndarray, Optional[list[Optional[str]]], Optional[list[bool]], list[bool], list[Optional[str]]]:
         return apply_beta6_unknown_abstain_runtime(
             room_name=room_name,
@@ -315,6 +319,9 @@ class PredictionPipeline:
             final_labels=final_labels,
             low_conf_flags=low_conf_flags,
             low_conf_hints=low_conf_hints,
+            confidence_scores=confidence_scores,
+            confidence_source=confidence_source,
+            apply_entropy_gate=apply_entropy_gate,
             load_unknown_policy_fn=load_unknown_policy,
             infer_with_unknown_path_fn=infer_with_unknown_path,
         )
@@ -343,7 +350,7 @@ class PredictionPipeline:
         meta = bundle.get("meta") if isinstance(bundle, dict) else {}
         if str((meta or {}).get("gate_mode", "")).strip().lower() == "primary":
             return True
-        if not _env_enabled("ENABLE_TWO_STAGE_CORE_RUNTIME", default=False):
+        if not _env_enabled("ENABLE_TWO_STAGE_CORE_RUNTIME", default=True):
             return False
         scoped = _parse_room_set_override(os.getenv("TWO_STAGE_CORE_RUNTIME_ROOMS", ""))
         if not scoped:
@@ -358,6 +365,11 @@ class PredictionPipeline:
         except (TypeError, ValueError):
             value = 0.5
         return float(np.clip(value, 0.0, 1.0))
+
+    @staticmethod
+    def _resolve_two_stage_strict_routing() -> bool:
+        raw = str(os.getenv("TWO_STAGE_CORE_STRICT_ROUTING", "true")).strip().lower()
+        return raw in {"1", "true", "yes", "on", "enabled"}
 
     @staticmethod
     def _to_probability_matrix(raw: Any) -> np.ndarray:
@@ -422,10 +434,13 @@ class PredictionPipeline:
         p_occ = stage_a_probs[:, 1]
         p_unocc = stage_a_probs[:, 0]
         occupied_mask = p_occ >= stage_a_threshold
+        strict_routing = bool(self._resolve_two_stage_strict_routing())
         y_pred_probs = np.zeros((n_samples, n_classes), dtype=np.float32)
+        excluded_arr = np.asarray(excluded_ids, dtype=np.int32)
+        occupied_arr = np.asarray(occupied_ids, dtype=np.int32)
         non_occ_indices = np.where(~occupied_mask)[0]
         if non_occ_indices.size > 0:
-            y_pred_probs[np.ix_(non_occ_indices, np.asarray(excluded_ids, dtype=np.int32))] = (
+            y_pred_probs[np.ix_(non_occ_indices, excluded_arr)] = (
                 1.0 / float(len(excluded_ids))
             )
 
@@ -433,9 +448,10 @@ class PredictionPipeline:
             occ_indices = np.where(occupied_mask)[0]
             p_occ_active = p_occ[occupied_mask]
             p_unocc_active = p_unocc[occupied_mask]
-            y_pred_probs[np.ix_(occ_indices, np.asarray(excluded_ids, dtype=np.int32))] = (
-                (p_unocc_active / float(len(excluded_ids)))[:, None]
-            )
+            if not strict_routing:
+                y_pred_probs[np.ix_(occ_indices, excluded_arr)] = (
+                    (p_unocc_active / float(len(excluded_ids)))[:, None]
+                )
 
             stage_b_model = bundle.get("stage_b_model")
             if stage_b_model is not None:
@@ -449,13 +465,19 @@ class PredictionPipeline:
                         f"shape={stage_b_probs.shape}, expected={len(occupied_ids)}"
                     )
                 stage_b_probs = stage_b_probs[occupied_mask]
-                for idx, class_id in enumerate(occupied_ids):
-                    y_pred_probs[occ_indices, class_id] = p_occ_active * stage_b_probs[:, idx]
+                for idx, class_id in enumerate(occupied_arr):
+                    if strict_routing:
+                        y_pred_probs[occ_indices, int(class_id)] = stage_b_probs[:, idx]
+                    else:
+                        y_pred_probs[occ_indices, int(class_id)] = p_occ_active * stage_b_probs[:, idx]
             else:
                 primary_occupied = int(bundle.get("primary_occupied_class_id", occupied_ids[0]) or occupied_ids[0])
                 if primary_occupied not in occupied_ids:
                     primary_occupied = occupied_ids[0]
-                y_pred_probs[occ_indices, primary_occupied] = p_occ_active
+                if strict_routing:
+                    y_pred_probs[occ_indices, int(primary_occupied)] = 1.0
+                else:
+                    y_pred_probs[occ_indices, int(primary_occupied)] = p_occ_active
 
         row_sums = np.sum(y_pred_probs, axis=1, keepdims=True)
         invalid_rows = row_sums[:, 0] <= 1e-8
@@ -588,6 +610,26 @@ class PredictionPipeline:
                 if not label_classes:
                     label_classes = [str(i) for i in range(y_pred_probs.shape[1])]
 
+                activity_confidence_artifact = (
+                    getattr(self.platform, "activity_confidence_artifacts", {}).get(room_name)
+                    if isinstance(getattr(self.platform, "activity_confidence_artifacts", {}), dict)
+                    else None
+                )
+                activity_confidence = score_activity_confidence(
+                    probabilities=y_pred_probs,
+                    labels=[str(lbl).strip().lower() for lbl in label_classes],
+                    artifact=activity_confidence_artifact,
+                )
+                decision_scores = np.asarray(activity_confidence.get("scores", confidences), dtype=float)
+                decision_score_source = str(
+                    activity_confidence.get("confidence_source", "raw_top1_confidence")
+                ).strip() or "raw_top1_confidence"
+                predicted_margins = np.asarray(
+                    activity_confidence.get("margins", confidences - top2_confidences),
+                    dtype=float,
+                )
+                predicted_entropy = np.asarray(activity_confidence.get("entropy", np.zeros(len(y_pred_probs))), dtype=float)
+
                 # Apply class-calibrated confidence thresholds (fallback to global threshold).
                 room_thresholds = getattr(self.platform, 'class_thresholds', {}).get(room_name, {}) or {}
 
@@ -602,7 +644,8 @@ class PredictionPipeline:
                 low_conf_count = 0
                 top1_labels = []
                 top2_labels = []
-                top1_probs = []
+                raw_top1_prob_values = []
+                decision_score_values = []
                 top2_probs = []
                 low_conf_flags = []
                 low_conf_thresholds = []
@@ -610,7 +653,7 @@ class PredictionPipeline:
 
                 for i, class_idx in enumerate(top1_idx):
                     class_idx = int(class_idx)
-                    prob = float(confidences[i])
+                    decision_score = float(decision_scores[i])
                     top1_label = str(decoded_top1[i])
                     top2_label = str(decoded_top2[i])
 
@@ -626,7 +669,7 @@ class PredictionPipeline:
                     if class_threshold < 0:
                         class_threshold = float(DEFAULT_CONFIDENCE_THRESHOLD)
 
-                    if prob < class_threshold:
+                    if decision_score < class_threshold:
                         final_labels.append('low_confidence')
                         low_conf_count += 1
                         low_conf_flags.append(True)
@@ -638,7 +681,8 @@ class PredictionPipeline:
 
                     top1_labels.append(top1_label)
                     top2_labels.append(top2_label)
-                    top1_probs.append(prob)
+                    raw_top1_prob_values.append(float(confidences[i]))
+                    decision_score_values.append(decision_score)
                     top2_probs.append(float(top2_confidences[i]))
                     low_conf_thresholds.append(class_threshold)
 
@@ -665,6 +709,9 @@ class PredictionPipeline:
                     final_labels=final_labels,
                     low_conf_flags=list(low_conf_flags),
                     low_conf_hints=list(low_conf_hints),
+                    confidence_scores=decision_scores,
+                    confidence_source=decision_score_source,
+                    apply_entropy_gate=(decision_score_source == "raw_top1_confidence"),
                 )
 
                 # Align timestamps (sequences start from seq_length - 1)
@@ -676,7 +723,7 @@ class PredictionPipeline:
                 final_labels, runtime_unknown_flags = self._apply_scoped_runtime_unknown(
                     room_name=room_name,
                     labels=final_labels,
-                    confidences=np.asarray(top1_probs, dtype=float),
+                    confidences=np.asarray(decision_score_values, dtype=float),
                     low_conf_flags=np.asarray(low_conf_flags, dtype=bool),
                     timestamps=np.asarray(valid_timestamps),
                     global_total_windows=int(global_total_windows),
@@ -684,7 +731,7 @@ class PredictionPipeline:
                 )
 
                 raw_top1_labels = np.asarray(top1_labels, dtype=object)
-                raw_top1_probs = np.asarray(top1_probs, dtype=float)
+                raw_top1_probs = np.asarray(raw_top1_prob_values, dtype=float)
                 raw_top2_labels = np.asarray(top2_labels, dtype=object)
                 raw_top2_probs = np.asarray(top2_probs, dtype=float)
                 effective_top1_labels: list[str] = []
@@ -693,11 +740,14 @@ class PredictionPipeline:
                 effective_top2_probs: list[float] = []
                 for j, chosen in enumerate(final_labels):
                     chosen_label = str(chosen)
-                    cls_idx = label_to_idx.get(chosen_label)
-                    if cls_idx is not None and 0 <= int(cls_idx) < y_pred_probs.shape[1]:
-                        eff_conf = float(y_pred_probs[j, int(cls_idx)])
+                    if decision_score_source == "raw_top1_confidence":
+                        cls_idx = label_to_idx.get(chosen_label)
+                        if cls_idx is not None and 0 <= int(cls_idx) < y_pred_probs.shape[1]:
+                            eff_conf = float(y_pred_probs[j, int(cls_idx)])
+                        else:
+                            eff_conf = float(raw_top1_probs[j])
                     else:
-                        eff_conf = float(raw_top1_probs[j])
+                        eff_conf = float(decision_scores[j])
                     effective_confidences.append(eff_conf)
                     if chosen_label in {"low_confidence", "unknown"}:
                         eff_top1_label = str(raw_top1_labels[j])
@@ -736,6 +786,8 @@ class PredictionPipeline:
                     'predicted_activity_raw': raw_labels,
                     'confidence': np.asarray(effective_confidences, dtype=float),
                     'confidence_raw': raw_top1_probs,
+                    'activity_acceptance_score': decision_scores,
+                    'activity_confidence_source': np.asarray([decision_score_source] * len(final_labels), dtype=object),
                     'predicted_top1_label': np.asarray(effective_top1_labels, dtype=object),
                     'predicted_top1_label_raw': raw_top1_labels,
                     'predicted_top1_prob': np.asarray(effective_confidences, dtype=float),
@@ -744,6 +796,8 @@ class PredictionPipeline:
                     'predicted_top2_label_raw': raw_top2_labels,
                     'predicted_top2_prob': np.asarray(effective_top2_probs, dtype=float),
                     'predicted_top2_prob_raw': raw_top2_probs,
+                    'predicted_top1_margin': predicted_margins,
+                    'predicted_entropy': predicted_entropy,
                     'low_confidence_threshold': low_conf_thresholds,
                     'is_low_confidence': low_conf_flags,
                     'low_confidence_hint_label': low_conf_hints,

@@ -216,8 +216,13 @@ _NESTED_SCHEMA_RULES: dict[str, dict[str, str]] = {
     "beta6_policy_defaults.yaml": {
         "clinical_priority.multipliers_by_label": "mapping",
         "clinical_priority.multipliers_by_room_label": "mapping",
+        "calibration.activity_confidence_min_samples": "scalar",
+        "calibration.activity_confidence_threshold_floor": "scalar",
+        "calibration.activity_confidence_threshold_cap": "scalar",
         "calibration.precision_targets_by_label": "mapping",
         "calibration.recall_floors_by_label": "mapping",
+        "calibration.threshold_stability_window": "scalar",
+        "calibration.threshold_stability_max_near_share": "scalar",
         "unoccupied_downsample.min_share_by_room": "mapping",
         "unoccupied_downsample.stride_by_room": "mapping",
         "unoccupied_downsample.max_post_downsample_prior_drift_by_room": "mapping",

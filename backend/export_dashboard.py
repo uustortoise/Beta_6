@@ -35,6 +35,12 @@ from utils.correction_eval_history import (
     fetch_and_enrich_correction_evaluations,
     summarize_correction_evaluation_decisions,
 )
+from services.label_proposal_service import (
+    apply_approved_label_review_batch,
+    create_label_review_batch,
+    load_label_review_snapshot,
+    update_label_review_statuses,
+)
 from sklearn.metrics import f1_score
 from dotenv import load_dotenv
 
@@ -2441,6 +2447,124 @@ def clear_all_caches():
     logger.info("All caches cleared after correction")
 
 
+def _load_label_review_upload(uploaded_file) -> pd.DataFrame:
+    """Parse a CSV/JSON proposal pack into a DataFrame for DB staging."""
+    if uploaded_file is None:
+        return pd.DataFrame()
+
+    suffix = Path(uploaded_file.name).suffix.lower()
+    if suffix == ".csv":
+        return pd.read_csv(uploaded_file)
+    if suffix == ".json":
+        payload = json.loads(uploaded_file.getvalue().decode("utf-8"))
+        if isinstance(payload, dict):
+            if isinstance(payload.get("items"), list):
+                return pd.DataFrame(payload["items"])
+            if isinstance(payload.get("rows"), list):
+                return pd.DataFrame(payload["rows"])
+            if isinstance(payload.get("proposals"), list):
+                return pd.DataFrame(payload["proposals"])
+            return pd.DataFrame([payload])
+        if isinstance(payload, list):
+            return pd.DataFrame(payload)
+        raise ValueError("Unsupported JSON proposal pack structure.")
+    raise ValueError("Proposal pack must be a CSV or JSON file.")
+
+
+def _format_label_review_batch_option(row: pd.Series) -> str:
+    batch_id = int(row.get("id"))
+    batch_name = str(row.get("batch_name") or f"Batch {batch_id}")
+    batch_status = str(row.get("batch_status") or "proposed")
+    scope = " | ".join(
+        part
+        for part in [
+            str(row.get("elder_id") or "").strip(),
+            str(row.get("room") or "").strip(),
+            str(row.get("record_date") or "").strip(),
+        ]
+        if part
+    )
+    return f"#{batch_id} {batch_name} [{batch_status}] {scope}".strip()
+
+
+def _prepare_label_review_items_display(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    out = df.copy()
+    if "timestamp_start" in out.columns:
+        out["timestamp_start"] = pd.to_datetime(out["timestamp_start"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
+    if "timestamp_end" in out.columns:
+        out["timestamp_end"] = pd.to_datetime(out["timestamp_end"], errors="coerce").dt.strftime("%Y-%m-%d %H:%M:%S")
+    if "reason_codes_json" in out.columns:
+        def _format_reason_codes(value):
+            if value is None or (isinstance(value, float) and pd.isna(value)):
+                return ""
+            if isinstance(value, str):
+                stripped = value.strip()
+                if not stripped:
+                    return ""
+                try:
+                    parsed = json.loads(stripped)
+                except Exception:
+                    return stripped
+                if isinstance(parsed, list):
+                    return ", ".join(str(v) for v in parsed)
+                if isinstance(parsed, dict):
+                    return ", ".join(f"{k}={v}" for k, v in parsed.items())
+                return str(parsed)
+            return str(value)
+
+        out["reason_codes"] = out["reason_codes_json"].apply(_format_reason_codes)
+    else:
+        out["reason_codes"] = ""
+    if "review_note" not in out.columns:
+        out["review_note"] = ""
+    out["decision"] = "keep"
+    return out
+
+
+def _render_label_review_timeline(proposed_df: pd.DataFrame, *, chart_title: str):
+    if proposed_df is None or proposed_df.empty:
+        st.info("No active proposed timestamp rows for the selected batch.")
+        return
+
+    viz_df = proposed_df.copy()
+    viz_df["timestamp"] = pd.to_datetime(viz_df["timestamp"], errors="coerce")
+    viz_df = viz_df.dropna(subset=["timestamp"])
+    if viz_df.empty:
+        st.info("Proposed timestamp rows had no valid timestamps.")
+        return
+
+    viz_df["end_time"] = viz_df["timestamp"] + pd.Timedelta(seconds=10)
+    viz_df["time"] = viz_df["timestamp"].dt.strftime("%H:%M:%S")
+    chart = alt.Chart(viz_df).mark_bar().encode(
+        x=alt.X("timestamp:T", axis=alt.Axis(format="%H:%M", title="Time")),
+        x2="end_time:T",
+        y=alt.Y("proposed_label:N", title="Proposed Label", sort="-x"),
+        color=alt.Color("review_status:N", title="Review State"),
+        tooltip=[
+            alt.Tooltip("time:N", title="Time"),
+            alt.Tooltip("current_label:N", title="Current Label"),
+            alt.Tooltip("proposed_label:N", title="Proposed Label"),
+            alt.Tooltip("source_granularity:N", title="Source"),
+            alt.Tooltip("review_status:N", title="Review Status"),
+            alt.Tooltip("reason_codes:N", title="Reason Codes"),
+        ],
+    ).properties(
+        title=chart_title,
+        height=220,
+        width="container",
+    ).configure_view(
+        strokeWidth=0
+    ).configure_axis(
+        labelFontSize=11,
+        titleFontSize=12,
+    ).interactive()
+
+    st.altair_chart(chart, use_container_width=True)
+
+
 
 # --- Activity Label Management ---
 DEFAULT_ACTIVITY_LABELS = [
@@ -4308,6 +4432,378 @@ with tab2:
                 
                 # Sync buffer (without auto-queue, just preserve manual edits)
                 st.session_state['df_buffer'] = edited_df.copy()
+
+                if target_type == 'train':
+                    st.divider()
+                    st.subheader("4. Proposed Label Review")
+                    st.caption("Use the timeline above as context, then review AI-suggested corrections here with full DB-backed decision logs.")
+
+                    review_scope_key = f"{elder_id_guess}_{sheet}_{record_date}"
+                    review_actor = st.text_input(
+                        "Review Actor",
+                        value="ops_ui",
+                        key=f"label_review_actor_{review_scope_key}",
+                        help="This name is written into the proposal-review audit log and applied correction history.",
+                    ).strip() or "ops_ui"
+
+                    with st.expander("Import Proposal Batch", expanded=False):
+                        st.caption(
+                            "Supported fields: `external_id`, `parent_external_id`, `granularity`, "
+                            "`timestamp_start`, `timestamp_end`, `current_label`, `proposed_label`, "
+                            "`confidence_tier`, `proposal_score`, `reason_codes`, `rationale`."
+                        )
+                        import_batch_name = st.text_input(
+                            "Batch Name",
+                            value=f"{sheet.title()} proposal review {record_date}",
+                            key=f"label_review_batch_name_{review_scope_key}",
+                        )
+                        import_source_kind = st.selectbox(
+                            "Proposal Source",
+                            ["forensic", "model_vote", "manual_import"],
+                            key=f"label_review_source_kind_{review_scope_key}",
+                        )
+                        import_source_ref = st.text_input(
+                            "Source Reference",
+                            value="",
+                            key=f"label_review_source_ref_{review_scope_key}",
+                            help="Optional file path, artifact path, or note pointing back to the generating forensic.",
+                        )
+                        import_notes = st.text_area(
+                            "Batch Notes",
+                            value="",
+                            key=f"label_review_notes_{review_scope_key}",
+                        )
+                        uploaded_proposal_pack = st.file_uploader(
+                            "Upload Proposal Pack",
+                            type=["csv", "json"],
+                            key=f"label_review_upload_{review_scope_key}",
+                        )
+                        if st.button("Store Proposal Batch", key=f"store_label_review_batch_{review_scope_key}"):
+                            try:
+                                imported_df = _load_label_review_upload(uploaded_proposal_pack)
+                                batch_id = create_label_review_batch(
+                                    batch_name=import_batch_name.strip() or f"{sheet.title()} proposal review",
+                                    proposals_df=imported_df,
+                                    created_by=review_actor,
+                                    source_kind=import_source_kind,
+                                    source_ref=import_source_ref.strip() or None,
+                                    notes=import_notes.strip() or None,
+                                    default_elder_id=elder_id_guess,
+                                    default_room=sheet,
+                                    default_record_date=record_date,
+                                )
+                                st.session_state[f"selected_label_review_batch_{review_scope_key}"] = batch_id
+                                st.success(f"Stored proposal batch #{batch_id}.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Failed to store proposal batch: {e}")
+
+                    show_all_batches = st.checkbox(
+                        "Show all proposal batches",
+                        value=False,
+                        key=f"label_review_show_all_{review_scope_key}",
+                    )
+                    batch_filter_kwargs = {}
+                    if not show_all_batches:
+                        batch_filter_kwargs = {
+                            "elder_id": elder_id_guess,
+                            "room": sheet,
+                            "record_date": record_date,
+                        }
+
+                    selected_batch_state_key = f"selected_label_review_batch_{review_scope_key}"
+                    selected_batch_hint = st.session_state.get(selected_batch_state_key)
+                    proposal_snapshot = load_label_review_snapshot(
+                        batch_id=selected_batch_hint,
+                        **batch_filter_kwargs,
+                    )
+                    if not proposal_snapshot["ok"]:
+                        st.warning(
+                            "Proposal review is temporarily unavailable: "
+                            f"{proposal_snapshot['error']}"
+                        )
+                    proposal_batches_df = proposal_snapshot["batches_df"]
+                    if proposal_batches_df.empty:
+                        st.info("No stored proposal batches match this context yet.")
+                    else:
+                        available_batch_ids = proposal_batches_df["id"].astype(int).tolist()
+                        default_batch_id = st.session_state.get(selected_batch_state_key, available_batch_ids[0])
+                        if default_batch_id not in available_batch_ids:
+                            default_batch_id = available_batch_ids[0]
+                        selected_batch_idx = available_batch_ids.index(default_batch_id)
+                        selected_batch_id = st.selectbox(
+                            "Proposal Batch",
+                            options=available_batch_ids,
+                            index=selected_batch_idx,
+                            key=f"label_review_batch_picker_{review_scope_key}",
+                            format_func=lambda batch_id: _format_label_review_batch_option(
+                                proposal_batches_df.loc[proposal_batches_df["id"] == batch_id].iloc[0]
+                            ),
+                        )
+                        st.session_state[selected_batch_state_key] = selected_batch_id
+
+                        proposal_snapshot = load_label_review_snapshot(
+                            batch_id=selected_batch_id,
+                            **batch_filter_kwargs,
+                        )
+                        if not proposal_snapshot["ok"]:
+                            st.warning(
+                                "Proposal review details are temporarily unavailable: "
+                                f"{proposal_snapshot['error']}"
+                            )
+                            proposal_items_df = pd.DataFrame()
+                            proposed_timestamp_df = pd.DataFrame()
+                            apply_ready_payload = {"batch_id": selected_batch_id, "rows": []}
+                            decision_log_df = pd.DataFrame()
+                            selected_batch_row = proposal_batches_df.loc[
+                                proposal_batches_df["id"] == selected_batch_id
+                            ].iloc[0]
+                        else:
+                            selected_batch_row = proposal_snapshot["selected_batch_row"]
+                            proposal_items_df = proposal_snapshot["items_df"]
+                            proposed_timestamp_df = proposal_snapshot["proposed_timestamp_df"]
+                            apply_ready_payload = proposal_snapshot["apply_ready_payload"]
+                            decision_log_df = proposal_snapshot["audit_df"]
+                            if selected_batch_row is None:
+                                selected_batch_row = proposal_batches_df.loc[
+                                    proposal_batches_df["id"] == selected_batch_id
+                                ].iloc[0]
+                        summary_cols = st.columns(5)
+                        summary_cols[0].metric("Status", str(selected_batch_row.get("batch_status") or "proposed"))
+                        summary_cols[1].metric("Rows", int(selected_batch_row.get("proposal_count") or 0))
+                        summary_cols[2].metric("Approved", int(selected_batch_row.get("approved_count") or 0))
+                        summary_cols[3].metric("Rejected", int(selected_batch_row.get("rejected_count") or 0))
+                        summary_cols[4].metric("Applied", int(selected_batch_row.get("applied_count") or 0))
+
+                        proposal_items_display_df = _prepare_label_review_items_display(proposal_items_df)
+
+                        st.markdown("**Proposed Timeline Overlay**")
+                        _render_label_review_timeline(
+                            proposed_timestamp_df,
+                            chart_title=f"Proposed Label Review - {sheet.title()} {record_date}",
+                        )
+
+                        segment_items_df = proposal_items_display_df[
+                            proposal_items_display_df["granularity"] == "segment"
+                        ].copy()
+                        if not segment_items_df.empty:
+                            st.markdown("**Segment Review**")
+                            segment_editor_df = segment_items_df[
+                                [
+                                    "id",
+                                    "external_id",
+                                    "timestamp_start",
+                                    "timestamp_end",
+                                    "current_label",
+                                    "proposed_label",
+                                    "confidence_tier",
+                                    "proposal_score",
+                                    "review_status",
+                                    "reason_codes",
+                                    "review_note",
+                                    "decision",
+                                ]
+                            ].copy()
+                            edited_segment_df = st.data_editor(
+                                segment_editor_df,
+                                use_container_width=True,
+                                hide_index=True,
+                                key=f"label_review_segment_editor_{selected_batch_id}",
+                                column_config={
+                                    "decision": st.column_config.SelectboxColumn(
+                                        "Decision",
+                                        options=["keep", "approve", "reject"],
+                                        required=True,
+                                    )
+                                },
+                                disabled=[
+                                    "id",
+                                    "external_id",
+                                    "timestamp_start",
+                                    "timestamp_end",
+                                    "current_label",
+                                    "proposed_label",
+                                    "confidence_tier",
+                                    "proposal_score",
+                                    "review_status",
+                                    "reason_codes",
+                                ],
+                            )
+                            if st.button("Save Segment Decisions", key=f"save_segment_decisions_{selected_batch_id}"):
+                                updates = 0
+                                for row in edited_segment_df.to_dict("records"):
+                                    decision = str(row.get("decision") or "keep").strip().lower()
+                                    current_status = str(row.get("review_status") or "proposed").strip().lower()
+                                    if decision == "keep":
+                                        continue
+                                    new_status = "approved" if decision == "approve" else "rejected"
+                                    if new_status == current_status and str(row.get("review_note") or "").strip() == str(
+                                        segment_editor_df.loc[segment_editor_df["id"] == row["id"], "review_note"].iloc[0] or ""
+                                    ).strip():
+                                        continue
+                                    update_label_review_statuses(
+                                        selected_batch_id,
+                                        [int(row["id"])],
+                                        new_status,
+                                        actor=review_actor,
+                                        note=str(row.get("review_note") or "").strip() or None,
+                                    )
+                                    updates += 1
+                                if updates:
+                                    st.success(f"Saved {updates} segment decision(s).")
+                                    st.rerun()
+                                else:
+                                    st.info("No segment decision changes to save.")
+
+                        timestamp_items_df = proposal_items_display_df[
+                            proposal_items_display_df["granularity"] == "timestamp"
+                        ].copy()
+                        if not timestamp_items_df.empty:
+                            st.markdown("**Timestamp Review**")
+                            focus_options = ["All segments"]
+                            if not segment_items_df.empty:
+                                focus_options.extend(
+                                    [
+                                        f"{row['external_id']} | {row['timestamp_start']} -> {row['timestamp_end']}"
+                                        for _, row in segment_items_df.iterrows()
+                                    ]
+                                )
+                            focus_selection = st.selectbox(
+                                "Focus Segment",
+                                options=focus_options,
+                                key=f"label_review_focus_segment_{selected_batch_id}",
+                            )
+                            filtered_timestamp_df = timestamp_items_df.copy()
+                            if focus_selection != "All segments":
+                                focus_external_id = focus_selection.split(" | ", 1)[0]
+                                focus_parent_ids = segment_items_df.loc[
+                                    segment_items_df["external_id"] == focus_external_id, "id"
+                                ].astype(int).tolist()
+                                if focus_parent_ids:
+                                    filtered_timestamp_df = filtered_timestamp_df[
+                                        filtered_timestamp_df["parent_id"].astype("Int64").isin(focus_parent_ids)
+                                    ].copy()
+
+                            timestamp_editor_df = filtered_timestamp_df[
+                                [
+                                    "id",
+                                    "external_id",
+                                    "parent_id",
+                                    "timestamp_start",
+                                    "current_label",
+                                    "proposed_label",
+                                    "confidence_tier",
+                                    "proposal_score",
+                                    "review_status",
+                                    "reason_codes",
+                                    "review_note",
+                                    "decision",
+                                ]
+                            ].copy()
+                            edited_timestamp_df = st.data_editor(
+                                timestamp_editor_df,
+                                use_container_width=True,
+                                hide_index=True,
+                                key=f"label_review_timestamp_editor_{selected_batch_id}",
+                                column_config={
+                                    "decision": st.column_config.SelectboxColumn(
+                                        "Decision",
+                                        options=["keep", "approve", "reject"],
+                                        required=True,
+                                    )
+                                },
+                                disabled=[
+                                    "id",
+                                    "external_id",
+                                    "parent_id",
+                                    "timestamp_start",
+                                    "current_label",
+                                    "proposed_label",
+                                    "confidence_tier",
+                                    "proposal_score",
+                                    "review_status",
+                                    "reason_codes",
+                                ],
+                            )
+                            if st.button("Save Timestamp Decisions", key=f"save_timestamp_decisions_{selected_batch_id}"):
+                                updates = 0
+                                for row in edited_timestamp_df.to_dict("records"):
+                                    decision = str(row.get("decision") or "keep").strip().lower()
+                                    current_status = str(row.get("review_status") or "proposed").strip().lower()
+                                    if decision == "keep":
+                                        continue
+                                    new_status = "approved" if decision == "approve" else "rejected"
+                                    if new_status == current_status and str(row.get("review_note") or "").strip() == str(
+                                        timestamp_editor_df.loc[timestamp_editor_df["id"] == row["id"], "review_note"].iloc[0] or ""
+                                    ).strip():
+                                        continue
+                                    update_label_review_statuses(
+                                        selected_batch_id,
+                                        [int(row["id"])],
+                                        new_status,
+                                        actor=review_actor,
+                                        note=str(row.get("review_note") or "").strip() or None,
+                                    )
+                                    updates += 1
+                                if updates:
+                                    st.success(f"Saved {updates} timestamp decision(s).")
+                                    st.rerun()
+                                else:
+                                    st.info("No timestamp decision changes to save.")
+
+                        st.markdown("**Exports**")
+                        review_export_df = proposal_items_display_df.copy()
+                        proposed_timestamp_export_df = proposed_timestamp_df.copy()
+                        if not proposed_timestamp_export_df.empty:
+                            proposed_timestamp_export_df["timestamp"] = pd.to_datetime(
+                                proposed_timestamp_export_df["timestamp"], errors="coerce"
+                            ).dt.strftime("%Y-%m-%d %H:%M:%S")
+                        export_cols = st.columns(3)
+                        export_cols[0].download_button(
+                            "Download Ops Review CSV",
+                            data=review_export_df.to_csv(index=False).encode("utf-8"),
+                            file_name=f"label_review_batch_{selected_batch_id}_ops_review.csv",
+                            mime="text/csv",
+                            key=f"download_label_review_ops_{selected_batch_id}",
+                        )
+                        export_cols[1].download_button(
+                            "Download Proposed Timestamp Set",
+                            data=proposed_timestamp_export_df.to_csv(index=False).encode("utf-8"),
+                            file_name=f"label_review_batch_{selected_batch_id}_timestamp_set.csv",
+                            mime="text/csv",
+                            key=f"download_label_review_ts_{selected_batch_id}",
+                        )
+                        export_cols[2].download_button(
+                            "Download Apply-Ready JSON",
+                            data=json.dumps(apply_ready_payload, indent=2).encode("utf-8"),
+                            file_name=f"label_review_batch_{selected_batch_id}_apply_ready.json",
+                            mime="application/json",
+                            key=f"download_label_review_apply_{selected_batch_id}",
+                        )
+
+                        if st.button("Apply Approved Corrections", key=f"apply_label_review_batch_{selected_batch_id}"):
+                            summary = apply_approved_label_review_batch(selected_batch_id, applied_by=review_actor)
+                            if summary.get("ok"):
+                                st.success(
+                                    f"Applied {summary.get('applied_rows', 0)} row(s) across "
+                                    f"{summary.get('applied_ranges', 0)} correction range(s)."
+                                )
+                                clear_all_caches()
+                                if 'loaded_data' in st.session_state:
+                                    del st.session_state['loaded_data']
+                                if 'df_buffer' in st.session_state:
+                                    del st.session_state['df_buffer']
+                                if 'loaded_file' in st.session_state:
+                                    del st.session_state['loaded_file']
+                                st.rerun()
+                            else:
+                                st.error(summary.get("error", "No approved proposal rows were applied."))
+
+                        st.markdown("**Decision Log**")
+                        if decision_log_df.empty:
+                            st.info("No decision log entries for this batch yet.")
+                        else:
+                            st.dataframe(decision_log_df, use_container_width=True, hide_index=True)
 
             else:
                 st.warning("No timestamp column found.")

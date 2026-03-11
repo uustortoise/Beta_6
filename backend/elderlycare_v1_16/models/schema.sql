@@ -106,6 +106,77 @@ CREATE TABLE IF NOT EXISTS correction_history (
 CREATE INDEX IF NOT EXISTS idx_correction_hist_elder ON correction_history(elder_id, corrected_at DESC);
 CREATE INDEX IF NOT EXISTS idx_correction_active ON correction_history(elder_id, is_deleted);
 
+-- 5c. Label Review Proposal Workflow
+-- Stages AI-suggested label proposals for ops review before they are applied.
+CREATE TABLE IF NOT EXISTS label_review_batches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_name TEXT NOT NULL,
+    elder_id TEXT,
+    room TEXT,
+    record_date DATE,
+    source_kind TEXT DEFAULT 'import',
+    source_ref TEXT,
+    notes TEXT,
+    created_by TEXT DEFAULT 'system',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    batch_status TEXT DEFAULT 'proposed',
+    proposal_count INTEGER DEFAULT 0,
+    approved_count INTEGER DEFAULT 0,
+    rejected_count INTEGER DEFAULT 0,
+    applied_count INTEGER DEFAULT 0,
+    last_action_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS label_review_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL,
+    parent_id INTEGER,
+    external_id TEXT,
+    parent_external_id TEXT,
+    elder_id TEXT NOT NULL,
+    room TEXT NOT NULL,
+    record_date DATE NOT NULL,
+    granularity TEXT NOT NULL,
+    timestamp_start TIMESTAMP NOT NULL,
+    timestamp_end TIMESTAMP NOT NULL,
+    current_label TEXT,
+    proposed_label TEXT NOT NULL,
+    confidence_tier TEXT,
+    proposal_score REAL,
+    reason_codes_json TEXT,
+    rationale_json TEXT,
+    source_model TEXT,
+    review_status TEXT DEFAULT 'proposed',
+    review_note TEXT,
+    reviewed_by TEXT,
+    reviewed_at TIMESTAMP,
+    applied_at TIMESTAMP,
+    applied_by TEXT,
+    display_order INTEGER DEFAULT 0,
+    created_by TEXT DEFAULT 'system',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS label_review_decision_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL,
+    proposal_id INTEGER,
+    action TEXT NOT NULL,
+    from_status TEXT,
+    to_status TEXT,
+    actor TEXT DEFAULT 'system',
+    note TEXT,
+    payload_json TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_label_review_batches_scope ON label_review_batches(elder_id, room, record_date);
+CREATE INDEX IF NOT EXISTS idx_label_review_items_batch ON label_review_items(batch_id, display_order);
+CREATE INDEX IF NOT EXISTS idx_label_review_items_parent ON label_review_items(parent_id);
+CREATE INDEX IF NOT EXISTS idx_label_review_items_scope ON label_review_items(elder_id, room, record_date, review_status);
+CREATE INDEX IF NOT EXISTS idx_label_review_log_batch ON label_review_decision_log(batch_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_label_review_log_item ON label_review_decision_log(proposal_id, created_at DESC);
+
 -- Performance indexes for medical history and contacts
 CREATE INDEX IF NOT EXISTS idx_medical_history_elder ON medical_history(elder_id, category);
 

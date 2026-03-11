@@ -1614,11 +1614,22 @@ class TrainingPipeline:
             summary = candidate.get("summary") or {}
             return summary if isinstance(summary, Mapping) else {}
 
-        def _score(candidate: Mapping[str, Any]) -> Tuple[int, int, int, float, float, int]:
+        def _score(candidate: Mapping[str, Any]) -> Tuple[int, int, int, int, int, float, float, float, int]:
             summary = _summary(candidate)
             collapsed = bool(summary.get("collapsed", False))
             gate_pass = bool(summary.get("gate_pass", False))
             no_regress_ok = bool(candidate.get("no_regress_ok", False))
+            stage_a_occupancy_saturated = bool(summary.get("stage_a_occupancy_saturated", False))
+            raw_stage_a_occupancy_rate_error = summary.get("stage_a_occupancy_rate_error")
+            stage_a_occupancy_rate_error_present = 0
+            stage_a_occupancy_rate_error_score = 0.0
+            try:
+                if raw_stage_a_occupancy_rate_error is not None:
+                    stage_a_occupancy_rate_error_score = -float(raw_stage_a_occupancy_rate_error)
+                    stage_a_occupancy_rate_error_present = 1
+            except (TypeError, ValueError):
+                stage_a_occupancy_rate_error_present = 0
+                stage_a_occupancy_rate_error_score = 0.0
             try:
                 gate_aligned_score = float(summary.get("gate_aligned_score", float("-inf")))
             except (TypeError, ValueError):
@@ -1635,6 +1646,9 @@ class TrainingPipeline:
                 1 if not collapsed else 0,
                 1 if gate_pass else 0,
                 1 if no_regress_ok else 0,
+                1 if not stage_a_occupancy_saturated else 0,
+                stage_a_occupancy_rate_error_present,
+                stage_a_occupancy_rate_error_score,
                 gate_aligned_score,
                 macro_f1,
                 -seed_value,
@@ -1686,7 +1700,54 @@ class TrainingPipeline:
         return room_key in enabled_rooms
 
     @staticmethod
-    def _build_seed_panel_candidate_summary(metrics: Mapping[str, Any]) -> Tuple[Dict[str, Any], bool]:
+    def _candidate_has_stage_a_occupancy_saturation(
+        room_name: str,
+        candidate_metrics: Mapping[str, Any],
+    ) -> bool:
+        if normalize_room_name(room_name) != "livingroom":
+            return False
+        two_stage_core = candidate_metrics.get("two_stage_core") or {}
+        if not isinstance(two_stage_core, Mapping):
+            return False
+        stage_a_calibration = two_stage_core.get("stage_a_calibration") or {}
+        if not isinstance(stage_a_calibration, Mapping):
+            return False
+        status = str(stage_a_calibration.get("status") or "").strip().lower()
+        if not status.startswith("fallback"):
+            return False
+        try:
+            predicted_occupied_rate = float(stage_a_calibration.get("predicted_occupied_rate"))
+        except (TypeError, ValueError):
+            return False
+        return bool(predicted_occupied_rate >= 0.999)
+
+    @staticmethod
+    def _candidate_stage_a_occupancy_rate_error(
+        room_name: str,
+        candidate_metrics: Mapping[str, Any],
+    ) -> Optional[float]:
+        if normalize_room_name(room_name) != "livingroom":
+            return None
+        two_stage_core = candidate_metrics.get("two_stage_core") or {}
+        if not isinstance(two_stage_core, Mapping):
+            return None
+        stage_a_calibration = two_stage_core.get("stage_a_calibration") or {}
+        if not isinstance(stage_a_calibration, Mapping):
+            return None
+        try:
+            true_occupied_rate = float(stage_a_calibration.get("true_occupied_rate"))
+            predicted_occupied_rate = float(stage_a_calibration.get("predicted_occupied_rate"))
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(true_occupied_rate) or not np.isfinite(predicted_occupied_rate):
+            return None
+        return float(abs(predicted_occupied_rate - true_occupied_rate))
+
+    def _build_seed_panel_candidate_summary(
+        self,
+        room_name: str,
+        metrics: Mapping[str, Any],
+    ) -> Tuple[Dict[str, Any], bool]:
         reasons = [str(item) for item in (metrics.get("gate_reasons") or []) if str(item).strip()]
         predicted_distribution = metrics.get("predicted_class_distribution") or {}
         total_predictions = 0.0
@@ -1721,6 +1782,7 @@ class TrainingPipeline:
             gate_aligned_score -= 1.0
         if collapsed:
             gate_aligned_score -= 5.0
+        stage_a_occupancy_rate_error = self._candidate_stage_a_occupancy_rate_error(room_name, metrics)
 
         summary = {
             "collapsed": bool(collapsed),
@@ -1731,8 +1793,110 @@ class TrainingPipeline:
             "dominant_share": float(dominant_share),
             "gate_reasons": reasons,
             "saved_version": metrics.get("saved_version"),
+            "stage_a_occupancy_saturated": bool(
+                self._candidate_has_stage_a_occupancy_saturation(room_name, metrics)
+            ),
+            "stage_a_occupancy_rate_error": (
+                float(stage_a_occupancy_rate_error)
+                if stage_a_occupancy_rate_error is not None
+                else None
+            ),
         }
         return summary, bool(no_regress_ok)
+
+    @staticmethod
+    def _candidate_has_stage_a_occupancy_collapse(
+        room_name: str,
+        candidate_metrics: Mapping[str, Any],
+    ) -> bool:
+        if not TrainingPipeline._candidate_has_stage_a_occupancy_saturation(
+            room_name,
+            candidate_metrics,
+        ):
+            return False
+        reasons = [
+            str(reason)
+            for reason in (candidate_metrics.get("gate_reasons") or [])
+            if str(reason).strip()
+        ]
+        if any(
+            marker in reason
+            for reason in reasons
+            for marker in (
+                "no_regress_failed",
+                "room_threshold_failed",
+                "predicted_class_collapse",
+                "critical_label_collapse",
+            )
+        ):
+            return True
+        predicted_distribution = candidate_metrics.get("predicted_class_distribution") or {}
+        if not isinstance(predicted_distribution, Mapping):
+            return False
+        total_predictions = 0.0
+        dominant_share = 0.0
+        numeric_counts: Dict[str, float] = {}
+        for key, value in predicted_distribution.items():
+            try:
+                numeric_counts[str(key)] = float(value)
+            except (TypeError, ValueError):
+                continue
+        total_predictions = float(sum(numeric_counts.values()))
+        if total_predictions <= 0.0 or not numeric_counts:
+            return False
+        dominant_count = max(float(value) for value in numeric_counts.values())
+        dominant_share = float(dominant_count) / total_predictions
+        return bool(dominant_share >= 0.95)
+
+    def _summarize_seed_panel_stability(
+        self,
+        room_name: str,
+        candidates: Sequence[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        candidate_count = int(len(candidates))
+        no_regress_pass_count = int(
+            sum(1 for candidate in candidates if bool(candidate.get("no_regress_ok", False)))
+        )
+        stage_a_collapse_count = int(
+            sum(
+                1
+                for candidate in candidates
+                if self._candidate_has_stage_a_occupancy_collapse(
+                    room_name,
+                    candidate.get("metrics") or {},
+                )
+            )
+        )
+        active_policy = self._active_policy()
+        promo_policy = getattr(active_policy, "promotion_eligibility", None)
+        if hasattr(promo_policy, "resolve_min_seed_panel_no_regress_pass_count"):
+            min_no_regress_pass_count = int(
+                promo_policy.resolve_min_seed_panel_no_regress_pass_count(room_name)
+            )
+        else:
+            raw_map = getattr(promo_policy, "min_seed_panel_no_regress_pass_count_by_room", {}) or {}
+            room_key = normalize_room_name(room_name)
+            try:
+                min_no_regress_pass_count = max(1, int(raw_map.get(room_key, 1) or 1))
+            except (TypeError, ValueError, AttributeError):
+                min_no_regress_pass_count = 1
+        stage_a_collapse_majority = bool(
+            candidate_count > 0 and (stage_a_collapse_count * 2) > candidate_count
+        )
+        unstable_reasons: List[str] = []
+        if no_regress_pass_count < min_no_regress_pass_count:
+            unstable_reasons.append("insufficient_no_regress_pass_count")
+        if stage_a_collapse_majority:
+            unstable_reasons.append("stage_a_collapse_majority")
+        return {
+            "seed_panel_candidate_count": candidate_count,
+            "seed_panel_min_no_regress_pass_count_required": int(min_no_regress_pass_count),
+            "seed_panel_no_regress_pass_count": no_regress_pass_count,
+            "seed_panel_stage_a_collapse_count": stage_a_collapse_count,
+            "seed_panel_stage_a_collapse_majority": bool(stage_a_collapse_majority),
+            "seed_panel_unstable_reasons": list(unstable_reasons),
+            "seed_panel_is_stable": not unstable_reasons,
+        }
 
     def _train_room_with_multi_seed_panel(
         self,
@@ -1769,7 +1933,10 @@ class TrainingPipeline:
                     gate_evaluation_result=gate_evaluation_result,
                     event_first_shadow=event_first_shadow,
                 )
-            summary, no_regress_ok = self._build_seed_panel_candidate_summary(candidate_metrics or {})
+            summary, no_regress_ok = self._build_seed_panel_candidate_summary(
+                room_name,
+                candidate_metrics or {},
+            )
             candidates.append(
                 {
                     "seed": int(seed),
@@ -1790,6 +1957,7 @@ class TrainingPipeline:
             )
 
         selected = self._select_multi_seed_candidate(candidates)
+        panel_stability = self._summarize_seed_panel_stability(room_name, candidates)
         seed_panel_debug = {
             "enabled": True,
             "selection_mode": "deterministic_multi_seed_panel",
@@ -1804,6 +1972,7 @@ class TrainingPipeline:
                 for candidate in candidates
             ],
         }
+        seed_panel_debug.update(panel_stability)
         final_metrics = copy.deepcopy(selected.get("metrics") or {})
         selected_artifacts = selected.get("artifacts") or {}
         if selected_artifacts.get("model") is not None:
@@ -1816,6 +1985,32 @@ class TrainingPipeline:
             self.platform.class_thresholds[room_name] = copy.deepcopy(
                 selected_artifacts.get("class_thresholds") or {}
             )
+
+        gate_reasons = [
+            str(reason)
+            for reason in (final_metrics.get("gate_reasons") or [])
+            if str(reason).strip()
+        ]
+        if not bool(panel_stability.get("seed_panel_is_stable", True)):
+            final_metrics["gate_pass"] = False
+            if (
+                int(panel_stability.get("seed_panel_no_regress_pass_count", 0))
+                < int(panel_stability.get("seed_panel_min_no_regress_pass_count_required", 1))
+            ):
+                gate_reasons.append(
+                    "seed_panel_unstable:"
+                    f"{normalize_room_name(room_name)}:"
+                    f"no_regress_pass_count={int(panel_stability.get('seed_panel_no_regress_pass_count', 0))}:"
+                    f"min_required={int(panel_stability.get('seed_panel_min_no_regress_pass_count_required', 1))}"
+                )
+            if bool(panel_stability.get("seed_panel_stage_a_collapse_majority", False)):
+                gate_reasons.append(
+                    "seed_panel_stage_a_collapse_majority:"
+                    f"{normalize_room_name(room_name)}:"
+                    f"{int(panel_stability.get('seed_panel_stage_a_collapse_count', 0))}/"
+                    f"{int(panel_stability.get('seed_panel_candidate_count', 0))}"
+                )
+        final_metrics["gate_reasons"] = gate_reasons
 
         selected_saved_version = final_metrics.get("saved_version")
         selected_gate_pass = bool(final_metrics.get("gate_pass", False))

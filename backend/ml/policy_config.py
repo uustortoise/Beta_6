@@ -25,6 +25,7 @@ from ml.policy_defaults import (
     get_minority_sampling_max_post_sampling_prior_drift_by_room,
     get_minority_sampling_prior_drift_guard_rooms,
     get_minority_sampling_target_share_by_room,
+    get_promotion_min_seed_panel_no_regress_pass_count_by_room,
     get_reproducibility_multi_seed_candidate_seeds_default,
     get_reproducibility_multi_seed_rooms_default,
     get_training_factorized_primary_rooms_default,
@@ -511,6 +512,16 @@ class ReproducibilityPolicy:
 @dataclass
 class PromotionEligibilityPolicy:
     min_training_days_with_champion: float = 7.0
+    min_seed_panel_no_regress_pass_count_by_room: dict[str, int] = field(
+        default_factory=get_promotion_min_seed_panel_no_regress_pass_count_by_room
+    )
+
+    def resolve_min_seed_panel_no_regress_pass_count(self, room_name: str) -> int:
+        room_key = normalize_room_name(room_name)
+        return max(
+            1,
+            int(self.min_seed_panel_no_regress_pass_count_by_room.get(room_key, 1) or 1),
+        )
 
 
 @dataclass
@@ -1127,6 +1138,12 @@ def load_policy_from_env(environ: Mapping[str, str] | None = None) -> TrainingPo
         promo.min_training_days_with_champion,
         minimum=0.0,
         maximum=3650.0,
+    )
+    promo.min_seed_panel_no_regress_pass_count_by_room = _read_room_int_overrides(
+        env,
+        "PROMOTION_MIN_SEED_PANEL_NO_REGRESS_PASS_COUNT_BY_ROOM",
+        promo.min_seed_panel_no_regress_pass_count_by_room,
+        minimum=1,
     )
 
     # Event-first controls (Lane C).

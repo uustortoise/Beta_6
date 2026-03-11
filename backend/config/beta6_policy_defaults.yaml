@@ -151,6 +151,7 @@ training:
   post_split_shuffle_rooms:
     - entrance
     - bedroom
+    - livingroom
   transition_focus_room_labels:
     bedroom: bedroom_normal_use
   transition_focus_radius_steps_by_room:
@@ -180,6 +181,10 @@ reproducibility:
     - 43
     - 44
     - 45
+
+promotion_eligibility:
+  min_seed_panel_no_regress_pass_count_by_room:
+    livingroom: 2
 
 runtime:
   hard_negative_risky_rooms:

@@ -129,6 +129,7 @@ class TestPromoteRoomVersionsFromNamespace(unittest.TestCase):
         self.assertEqual(room_summary["target_current_version"], 11)
         self.assertEqual(room_summary["copied_versions"], [11])
         self.assertEqual(room_summary["reused_versions"], [10])
+        self.assertIn(f"{self.room}_decision_trace.json", room_summary["latest_artifacts"])
 
         info = self.registry._load_version_info(self.target_elder, self.room)
         self.assertEqual(info["current_version"], 11)
@@ -146,6 +147,10 @@ class TestPromoteRoomVersionsFromNamespace(unittest.TestCase):
         )
         self.assertEqual(
             json.loads((models_dir / f"{self.room}_v11_decision_trace.json").read_text(encoding="utf-8"))["version"],
+            11,
+        )
+        self.assertEqual(
+            json.loads((models_dir / f"{self.room}_decision_trace.json").read_text(encoding="utf-8"))["version"],
             11,
         )
         self.assertTrue((models_dir / f"{self.room}_two_stage_meta.json").exists())

@@ -58,6 +58,7 @@ def _latest_artifact_names(room_name: str, versioned_names: set[str], version: i
         "_thresholds.json",
         "_adapter_weights.pkl",
         "_activity_confidence_calibrator.json",
+        "_decision_trace.json",
         "_two_stage_meta.json",
         "_two_stage_stage_a_model.keras",
         "_two_stage_stage_b_model.keras",

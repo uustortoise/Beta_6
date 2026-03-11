@@ -39,7 +39,10 @@ def test_load_policy_defaults_match_legacy_knobs():
     assert policy.reproducibility.multi_seed_rooms == ["entrance", "livingroom"]
     assert policy.reproducibility.multi_seed_candidate_seeds == [40, 41, 42, 43, 44, 45]
     assert policy.promotion_eligibility.min_training_days_with_champion == 7.0
-    assert policy.training_profile.post_split_shuffle_rooms == ["entrance", "bedroom"]
+    assert (
+        policy.promotion_eligibility.min_seed_panel_no_regress_pass_count_by_room["livingroom"] == 2
+    )
+    assert policy.training_profile.post_split_shuffle_rooms == ["entrance", "bedroom", "livingroom"]
     assert policy.training_profile.transition_focus_prior_drift_guard_rooms == ["bedroom"]
     assert policy.training_profile.transition_focus_max_post_sampling_prior_drift_by_room["bedroom"] == 0.10
     assert policy.two_stage_core.enabled is True
@@ -162,6 +165,19 @@ def test_load_policy_supports_room_fix_controls():
     assert policy.two_stage_core.stage_a_threshold_max == 0.88
     assert policy.two_stage_core.stage_a_min_predicted_occupied_ratio == 0.61
     assert policy.two_stage_core.stage_a_min_predicted_occupied_abs == 0.14
+
+
+def test_promotion_eligibility_supports_room_level_seed_panel_requirements():
+    policy = load_policy_from_env(
+        {
+            "PROMOTION_MIN_SEED_PANEL_NO_REGRESS_PASS_COUNT_BY_ROOM": "livingroom:3,entrance:2",
+        }
+    )
+
+    assert policy.promotion_eligibility.min_seed_panel_no_regress_pass_count_by_room == {
+        "livingroom": 3,
+        "entrance": 2,
+    }
 
 
 def test_label_map_env_parsing_for_calibration_and_clinical_priority():

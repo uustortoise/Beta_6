@@ -33,6 +33,22 @@ class ModelRegistry:
     
     # Maximum versions to keep per room (0 = unlimited)
     MAX_VERSIONS_PER_ROOM = 5
+    _MANDATORY_LATEST_SUFFIXES = (
+        "_model.keras",
+        "_scaler.pkl",
+        "_label_encoder.pkl",
+    )
+    _OPTIONAL_LATEST_SUFFIXES = (
+        "_thresholds.json",
+        "_adapter_weights.pkl",
+        "_activity_confidence_calibrator.json",
+        "_decision_trace.json",
+    )
+    _TWO_STAGE_LATEST_SUFFIXES = (
+        "_two_stage_meta.json",
+        "_two_stage_stage_a_model.keras",
+        "_two_stage_stage_b_model.keras",
+    )
     _BACKBONE_LAYER_PREFIXES = (
         "cnn_embedding",
         "transformer_block_",
@@ -306,17 +322,11 @@ class ModelRegistry:
         for v in versions_to_remove:
             ver = int(v.get("version", 0))
             # Remove versioned files
-            for suffix in [
-                "_model.keras",
-                "_scaler.pkl",
-                "_label_encoder.pkl",
-                "_thresholds.json",
-                "_adapter_weights.pkl",
-                "_activity_confidence_calibrator.json",
-                "_two_stage_meta.json",
-                "_two_stage_stage_a_model.keras",
-                "_two_stage_stage_b_model.keras",
-            ]:
+            for suffix in (
+                *self._MANDATORY_LATEST_SUFFIXES,
+                *self._OPTIONAL_LATEST_SUFFIXES,
+                *self._TWO_STAGE_LATEST_SUFFIXES,
+            ):
                 path = models_dir / f"{room_name}_v{ver}{suffix}"
                 if path.exists():
                     path.unlink()
@@ -379,7 +389,11 @@ class ModelRegistry:
 
             # 2. Alias Consistency
             models_dir = self.get_models_dir(elder_id)
-            suffixes = ["_model.keras", "_scaler.pkl", "_label_encoder.pkl"]
+            suffixes = (
+                *self._MANDATORY_LATEST_SUFFIXES,
+                *self._OPTIONAL_LATEST_SUFFIXES,
+                *self._TWO_STAGE_LATEST_SUFFIXES,
+            )
             
             if current == 0:
                 # Verify no unversioned aliases exist
@@ -391,12 +405,8 @@ class ModelRegistry:
                         report["repaired"] = True
             else:
                 # Verify aliases are bit-consistent with current champion artifacts.
-                mandatory = ["_model.keras", "_scaler.pkl", "_label_encoder.pkl"]
-                optional = [
-                    "_thresholds.json",
-                    "_adapter_weights.pkl",
-                    "_activity_confidence_calibrator.json",
-                ]
+                mandatory = self._MANDATORY_LATEST_SUFFIXES
+                optional = self._OPTIONAL_LATEST_SUFFIXES
                 missing_versioned_mandatory: list[str] = []
                 needs_sync = False
 
@@ -530,9 +540,38 @@ class ModelRegistry:
 
                 # Post-condition: mandatory aliases must exist when current_version > 0.
                 unresolved_aliases = [
-                    suffix for suffix in suffixes
+                    suffix
+                    for suffix in mandatory
                     if not (models_dir / f"{room_name}{suffix}").exists()
                 ]
+                for suffix in optional:
+                    src = models_dir / f"{room_name}_v{int(current)}{suffix}"
+                    dst = models_dir / f"{room_name}{suffix}"
+                    if src.exists() and not dst.exists():
+                        unresolved_aliases.append(suffix)
+                if two_stage_meta_src.exists():
+                    try:
+                        two_stage_payload = json.loads(two_stage_meta_src.read_text())
+                    except Exception:
+                        pass
+                    else:
+                        schema_ok = (
+                            str(two_stage_payload.get("schema_version", "")).strip()
+                            == "beta6.two_stage_core.v1"
+                        )
+                        runtime_enabled = bool(two_stage_payload.get("runtime_enabled", True))
+                        stage_b_enabled = bool(two_stage_payload.get("stage_b_enabled", False))
+                        if schema_ok and runtime_enabled:
+                            if not two_stage_meta_dst.exists():
+                                unresolved_aliases.append("_two_stage_meta.json")
+                            if two_stage_stage_a_src.exists() and not two_stage_stage_a_dst.exists():
+                                unresolved_aliases.append("_two_stage_stage_a_model.keras")
+                            if (
+                                stage_b_enabled
+                                and two_stage_stage_b_src.exists()
+                                and not two_stage_stage_b_dst.exists()
+                            ):
+                                unresolved_aliases.append("_two_stage_stage_b_model.keras")
                 if unresolved_aliases:
                     report["issues"].append(
                         f"Unresolved mandatory aliases for current_version {current}: {unresolved_aliases}"
@@ -562,12 +601,8 @@ class ModelRegistry:
         When `require_mandatory=True`, raises if mandatory source artifacts are missing.
         """
         models_dir = self.get_models_dir(elder_id)
-        mandatory = ["_model.keras", "_scaler.pkl", "_label_encoder.pkl"]
-        optional = [
-            "_thresholds.json",
-            "_adapter_weights.pkl",
-            "_activity_confidence_calibrator.json",
-        ]
+        mandatory = self._MANDATORY_LATEST_SUFFIXES
+        optional = self._OPTIONAL_LATEST_SUFFIXES
 
         for suffix in mandatory:
             src = models_dir / f"{room_name}_v{int(version)}{suffix}"
@@ -702,17 +737,11 @@ class ModelRegistry:
                 return True
 
             models_dir = self.get_models_dir(elder_id)
-            for suffix in [
-                "_model.keras",
-                "_scaler.pkl",
-                "_label_encoder.pkl",
-                "_thresholds.json",
-                "_adapter_weights.pkl",
-                "_activity_confidence_calibrator.json",
-                "_two_stage_meta.json",
-                "_two_stage_stage_a_model.keras",
-                "_two_stage_stage_b_model.keras",
-            ]:
+            for suffix in (
+                *self._MANDATORY_LATEST_SUFFIXES,
+                *self._OPTIONAL_LATEST_SUFFIXES,
+                *self._TWO_STAGE_LATEST_SUFFIXES,
+            ):
                 path = models_dir / f"{room_name}{suffix}"
                 if path.exists():
                     path.unlink()

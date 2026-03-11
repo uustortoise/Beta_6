@@ -147,6 +147,7 @@ class TestTrainingPipeline(unittest.TestCase):
     def test_should_shuffle_post_split_batches_matches_room_policy(self):
         self.assertTrue(self.pipeline._should_shuffle_post_split_batches("Entrance"))
         self.assertTrue(self.pipeline._should_shuffle_post_split_batches("Bedroom"))
+        self.assertTrue(self.pipeline._should_shuffle_post_split_batches("LivingRoom"))
 
     def test_build_beta6_parity_payload_maps_predictions_to_occupancy_trace(self):
         self.mock_platform.label_encoders["Bedroom"] = MagicMock()
@@ -2499,6 +2500,91 @@ class TestTrainingPipeline(unittest.TestCase):
         selected = self.pipeline._select_multi_seed_candidate(candidates)
         self.assertEqual(selected["seed"], 13)
 
+    def test_select_multi_seed_candidate_prefers_non_saturated_stage_a_seed(self):
+        candidates = [
+            {
+                "seed": 11,
+                "summary": {
+                    "collapsed": False,
+                    "gate_pass": True,
+                    "stage_a_occupancy_saturated": True,
+                    "gate_aligned_score": 0.95,
+                    "macro_f1": 0.95,
+                },
+                "no_regress_ok": True,
+            },
+            {
+                "seed": 17,
+                "summary": {
+                    "collapsed": False,
+                    "gate_pass": True,
+                    "stage_a_occupancy_saturated": False,
+                    "gate_aligned_score": 0.60,
+                    "macro_f1": 0.60,
+                },
+                "no_regress_ok": True,
+            },
+        ]
+
+        selected = self.pipeline._select_multi_seed_candidate(candidates)
+        self.assertEqual(selected["seed"], 17)
+
+    def test_select_multi_seed_candidate_prefers_lower_stage_a_occupancy_error(self):
+        candidates = [
+            {
+                "seed": 11,
+                "summary": {
+                    "collapsed": False,
+                    "gate_pass": True,
+                    "stage_a_occupancy_saturated": False,
+                    "stage_a_occupancy_rate_error": 0.86,
+                    "gate_aligned_score": 0.95,
+                    "macro_f1": 0.95,
+                },
+                "no_regress_ok": True,
+            },
+            {
+                "seed": 17,
+                "summary": {
+                    "collapsed": False,
+                    "gate_pass": True,
+                    "stage_a_occupancy_saturated": False,
+                    "stage_a_occupancy_rate_error": 0.07,
+                    "gate_aligned_score": 0.60,
+                    "macro_f1": 0.60,
+                },
+                "no_regress_ok": True,
+            },
+        ]
+
+        selected = self.pipeline._select_multi_seed_candidate(candidates)
+        self.assertEqual(selected["seed"], 17)
+
+    def test_build_seed_panel_candidate_summary_records_stage_a_occupancy_rate_error(self):
+        summary, no_regress_ok = self.pipeline._build_seed_panel_candidate_summary(
+            "LivingRoom",
+            {
+                "macro_f1": 0.70,
+                "gate_pass": True,
+                "gate_reasons": [],
+                "predicted_class_distribution": {
+                    "livingroom_normal_use": 24,
+                    "unoccupied": 76,
+                },
+                "two_stage_core": {
+                    "stage_a_calibration": {
+                        "status": "target_met",
+                        "true_occupied_rate": 0.14,
+                        "predicted_occupied_rate": 0.32,
+                    }
+                },
+            },
+        )
+
+        self.assertTrue(no_regress_ok)
+        self.assertFalse(bool(summary["stage_a_occupancy_saturated"]))
+        self.assertAlmostEqual(float(summary["stage_a_occupancy_rate_error"]), 0.18, places=6)
+
     def test_train_room_with_multi_seed_panel_reuses_selected_candidate_metrics(self):
         self.pipeline._active_policy = MagicMock(
             return_value=SimpleNamespace(
@@ -2612,6 +2698,198 @@ class TestTrainingPipeline(unittest.TestCase):
         )
         self.assertEqual(result["saved_version"], 102)
         self.assertEqual(result["seed_panel_debug"]["selected_seed"], 13)
+
+    def test_train_room_with_multi_seed_panel_rejects_unstable_livingroom_winner(self):
+        self.pipeline._active_policy = MagicMock(
+            return_value=SimpleNamespace(
+                reproducibility=SimpleNamespace(
+                    multi_seed_candidate_seeds=[11, 13, 17],
+                    random_seed=11,
+                ),
+                promotion_eligibility=SimpleNamespace(
+                    min_seed_panel_no_regress_pass_count_by_room={"livingroom": 2}
+                ),
+            )
+        )
+        stable_candidate = MagicMock()
+        stable_candidate.train_room.return_value = {
+            "macro_f1": 0.64,
+            "gate_pass": True,
+            "gate_reasons": [],
+            "predicted_class_distribution": {
+                "livingroom_normal_use": 55,
+                "unoccupied": 45,
+            },
+            "two_stage_core": {
+                "stage_a_calibration": {
+                    "status": "target_met",
+                    "predicted_occupied_rate": 0.12,
+                }
+            },
+            "saved_version": 101,
+        }
+        collapsed_candidate_a = MagicMock()
+        collapsed_candidate_a.train_room.return_value = {
+            "macro_f1": 0.08,
+            "gate_pass": False,
+            "gate_reasons": ["no_regress_failed:livingroom"],
+            "predicted_class_distribution": {
+                "livingroom_normal_use": 98,
+                "unoccupied": 2,
+            },
+            "two_stage_core": {
+                "stage_a_calibration": {
+                    "status": "fallback_recall_floor",
+                    "predicted_occupied_rate": 1.0,
+                }
+            },
+            "saved_version": 102,
+        }
+        collapsed_candidate_b = MagicMock()
+        collapsed_candidate_b.train_room.return_value = {
+            "macro_f1": 0.07,
+            "gate_pass": False,
+            "gate_reasons": ["no_regress_failed:livingroom"],
+            "predicted_class_distribution": {
+                "livingroom_normal_use": 96,
+                "unoccupied": 4,
+            },
+            "two_stage_core": {
+                "stage_a_calibration": {
+                    "status": "fallback_recall_floor",
+                    "predicted_occupied_rate": 1.0,
+                }
+            },
+            "saved_version": 103,
+        }
+
+        with patch.object(
+            self.pipeline,
+            "_spawn_candidate_pipeline",
+            side_effect=[stable_candidate, collapsed_candidate_a, collapsed_candidate_b],
+        ):
+            result = self.pipeline._train_room_with_multi_seed_panel(
+                room_name="LivingRoom",
+                processed_df=pd.DataFrame(),
+                seq_length=5,
+                elder_id="elder-1",
+            )
+
+        self.assertEqual(result["saved_version"], 101)
+        self.assertFalse(bool(result["gate_pass"]))
+        self.assertEqual(result["seed_panel_debug"]["selected_seed"], 11)
+        self.assertEqual(result["seed_panel_debug"]["seed_panel_candidate_count"], 3)
+        self.assertEqual(result["seed_panel_debug"]["seed_panel_no_regress_pass_count"], 1)
+        self.assertEqual(result["seed_panel_debug"]["seed_panel_stage_a_collapse_count"], 2)
+        self.assertFalse(bool(result["seed_panel_debug"]["seed_panel_is_stable"]))
+        self.assertEqual(
+            result["seed_panel_debug"]["seed_panel_unstable_reasons"],
+            [
+                "insufficient_no_regress_pass_count",
+                "stage_a_collapse_majority",
+            ],
+        )
+        self.assertIn(
+            "seed_panel_unstable:livingroom:no_regress_pass_count=1:min_required=2",
+            result["gate_reasons"],
+        )
+        self.assertIn(
+            "seed_panel_stage_a_collapse_majority:livingroom:2/3",
+            result["gate_reasons"],
+        )
+        self.mock_registry.rollback_to_version.assert_not_called()
+
+    def test_train_room_with_multi_seed_panel_accepts_stable_livingroom_panel(self):
+        self.pipeline._active_policy = MagicMock(
+            return_value=SimpleNamespace(
+                reproducibility=SimpleNamespace(
+                    multi_seed_candidate_seeds=[11, 13, 17],
+                    random_seed=11,
+                ),
+                promotion_eligibility=SimpleNamespace(
+                    min_seed_panel_no_regress_pass_count_by_room={"livingroom": 2}
+                ),
+            )
+        )
+        saturated_candidate_best = MagicMock()
+        saturated_candidate_best.train_room.return_value = {
+            "macro_f1": 0.64,
+            "room": "LivingRoom",
+            "gate_pass": True,
+            "gate_reasons": [],
+            "predicted_class_distribution": {
+                "livingroom_normal_use": 56,
+                "unoccupied": 44,
+            },
+            "two_stage_core": {
+                "stage_a_calibration": {
+                    "status": "fallback_recall_floor",
+                    "predicted_occupied_rate": 1.0,
+                }
+            },
+            "saved_version": 101,
+        }
+        saturated_candidate_second = MagicMock()
+        saturated_candidate_second.train_room.return_value = {
+            "macro_f1": 0.60,
+            "room": "LivingRoom",
+            "gate_pass": True,
+            "gate_reasons": [],
+            "predicted_class_distribution": {
+                "livingroom_normal_use": 54,
+                "unoccupied": 46,
+            },
+            "two_stage_core": {
+                "stage_a_calibration": {
+                    "status": "fallback_recall_floor",
+                    "predicted_occupied_rate": 1.0,
+                }
+            },
+            "saved_version": 102,
+        }
+        selected_candidate = MagicMock()
+        selected_candidate.train_room.return_value = {
+            "macro_f1": 0.55,
+            "room": "LivingRoom",
+            "gate_pass": True,
+            "gate_reasons": [],
+            "predicted_class_distribution": {
+                "livingroom_normal_use": 58,
+                "unoccupied": 42,
+            },
+            "two_stage_core": {
+                "stage_a_calibration": {
+                    "status": "target_met+pred_occ_floor",
+                    "predicted_occupied_rate": 0.07,
+                }
+            },
+            "saved_version": 103,
+        }
+
+        with patch.object(
+            self.pipeline,
+            "_spawn_candidate_pipeline",
+            side_effect=[saturated_candidate_best, saturated_candidate_second, selected_candidate],
+        ):
+            result = self.pipeline._train_room_with_multi_seed_panel(
+                room_name="LivingRoom",
+                processed_df=pd.DataFrame(),
+                seq_length=5,
+                elder_id="elder-1",
+            )
+
+        self.assertEqual(result["saved_version"], 103)
+        self.assertTrue(bool(result["gate_pass"]))
+        self.assertEqual(result["seed_panel_debug"]["selected_seed"], 17)
+        self.assertEqual(result["seed_panel_debug"]["seed_panel_no_regress_pass_count"], 3)
+        self.assertEqual(result["seed_panel_debug"]["seed_panel_stage_a_collapse_count"], 0)
+        self.assertTrue(bool(result["seed_panel_debug"]["seed_panel_is_stable"]))
+        self.assertEqual(result["seed_panel_debug"]["seed_panel_unstable_reasons"], [])
+        self.mock_registry.rollback_to_version.assert_called_once_with(
+            elder_id="elder-1",
+            room_name="LivingRoom",
+            version=103,
+        )
 
     def test_spawn_candidate_pipeline_respects_runtime_seed_override_with_explicit_policy(self):
         policy = load_policy_from_env(

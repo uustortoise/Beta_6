@@ -95,6 +95,7 @@ _SCHEMA_RULES: dict[str, dict[str, str]] = {
         "data_viability": "mapping",
         "training": "mapping",
         "reproducibility": "mapping",
+        "promotion_eligibility": "mapping",
         "runtime": "mapping",
     },
     "beta6_pretrain.yaml": {
@@ -257,6 +258,7 @@ _NESTED_SCHEMA_RULES: dict[str, dict[str, str]] = {
         "training.transition_focus_prior_drift_guard_rooms": "sequence",
         "reproducibility.multi_seed_rooms": "sequence",
         "reproducibility.multi_seed_candidate_seeds": "sequence",
+        "promotion_eligibility.min_seed_panel_no_regress_pass_count_by_room": "mapping",
         "runtime.hard_negative_risky_rooms": "sequence",
         "runtime.runtime_unknown_rooms": "sequence",
         "runtime.wf_min_minority_support_default": "scalar",

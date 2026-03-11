@@ -245,6 +245,16 @@ def get_training_post_split_shuffle_rooms_default() -> list[str]:
     return _get_str_list("training", "post_split_shuffle_rooms")
 
 
+def get_promotion_min_seed_panel_no_regress_pass_count_by_room() -> dict[str, int]:
+    return {
+        str(k).strip().lower(): int(v)
+        for k, v in _get_map(
+            "promotion_eligibility", "min_seed_panel_no_regress_pass_count_by_room"
+        ).items()
+        if str(k).strip()
+    }
+
+
 def get_training_two_stage_core_enabled_default() -> bool:
     value = _as_mapping(_load_config()).get("training", {})
     if not isinstance(value, Mapping):

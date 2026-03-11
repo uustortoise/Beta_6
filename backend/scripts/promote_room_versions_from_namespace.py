@@ -29,6 +29,181 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _is_json_artifact(path: Path) -> bool:
+    return path.suffix.lower() == ".json"
+
+
+def _rewrite_namespace_refs_in_str(
+    value: str,
+    *,
+    source_elder_id: str,
+    target_elder_id: str,
+    source_models_dir: Path,
+    target_models_dir: Path,
+) -> str:
+    text = str(value)
+    replacements = [
+        (str(source_models_dir.resolve()), str(target_models_dir.resolve())),
+        (str(source_models_dir), str(target_models_dir)),
+        (str(source_elder_id), str(target_elder_id)),
+    ]
+    for old, new in replacements:
+        if old:
+            text = text.replace(old, new)
+    return text
+
+
+def _normalize_namespace_refs(
+    value: Any,
+    *,
+    source_elder_id: str,
+    target_elder_id: str,
+    source_models_dir: Path,
+    target_models_dir: Path,
+) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _normalize_namespace_refs(
+                item,
+                source_elder_id=source_elder_id,
+                target_elder_id=target_elder_id,
+                source_models_dir=source_models_dir,
+                target_models_dir=target_models_dir,
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _normalize_namespace_refs(
+                item,
+                source_elder_id=source_elder_id,
+                target_elder_id=target_elder_id,
+                source_models_dir=source_models_dir,
+                target_models_dir=target_models_dir,
+            )
+            for item in value
+        ]
+    if isinstance(value, str):
+        return _rewrite_namespace_refs_in_str(
+            value,
+            source_elder_id=source_elder_id,
+            target_elder_id=target_elder_id,
+            source_models_dir=source_models_dir,
+            target_models_dir=target_models_dir,
+        )
+    return value
+
+
+def _canonicalize_namespace_refs(
+    value: Any,
+    *,
+    elder_ids: list[str],
+    models_dirs: list[Path],
+) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _canonicalize_namespace_refs(item, elder_ids=elder_ids, models_dirs=models_dirs)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _canonicalize_namespace_refs(item, elder_ids=elder_ids, models_dirs=models_dirs)
+            for item in value
+        ]
+    if isinstance(value, str):
+        text = str(value)
+        dir_strings = []
+        for item in models_dirs:
+            dir_strings.extend([str(item.resolve()), str(item)])
+        for candidate in sorted({s for s in dir_strings if s}, key=len, reverse=True):
+            text = text.replace(candidate, "<MODELS_DIR>")
+        for elder_id in sorted({str(item) for item in elder_ids if item}, key=len, reverse=True):
+            text = text.replace(elder_id, "<ELDER_ID>")
+        return text
+    return value
+
+
+def _load_json_payload(path: Path) -> Any:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _normalized_json_payload(
+    path: Path,
+    *,
+    source_elder_id: str,
+    target_elder_id: str,
+    source_models_dir: Path,
+    target_models_dir: Path,
+) -> Any:
+    payload = _load_json_payload(path)
+    return _normalize_namespace_refs(
+        payload,
+        source_elder_id=source_elder_id,
+        target_elder_id=target_elder_id,
+        source_models_dir=source_models_dir,
+        target_models_dir=target_models_dir,
+    )
+
+
+def _canonical_json_payload(
+    path: Path,
+    *,
+    source_elder_id: str,
+    target_elder_id: str,
+    source_models_dir: Path,
+    target_models_dir: Path,
+) -> Any:
+    payload = _load_json_payload(path)
+    return _canonicalize_namespace_refs(
+        payload,
+        elder_ids=[str(source_elder_id), str(target_elder_id)],
+        models_dirs=[source_models_dir, target_models_dir],
+    )
+
+
+def _json_artifacts_equivalent(
+    source_path: Path,
+    target_path: Path,
+    *,
+    source_elder_id: str,
+    target_elder_id: str,
+    source_models_dir: Path,
+    target_models_dir: Path,
+) -> bool:
+    return _canonical_json_payload(
+        source_path,
+        source_elder_id=source_elder_id,
+        target_elder_id=target_elder_id,
+        source_models_dir=source_models_dir,
+        target_models_dir=target_models_dir,
+    ) == _canonical_json_payload(
+        target_path,
+        source_elder_id=source_elder_id,
+        target_elder_id=target_elder_id,
+        source_models_dir=source_models_dir,
+        target_models_dir=target_models_dir,
+    )
+
+
+def _write_normalized_json_artifact(
+    source_path: Path,
+    target_path: Path,
+    *,
+    source_elder_id: str,
+    target_elder_id: str,
+    source_models_dir: Path,
+    target_models_dir: Path,
+) -> None:
+    normalized_payload = _normalized_json_payload(
+        source_path,
+        source_elder_id=source_elder_id,
+        target_elder_id=target_elder_id,
+        source_models_dir=source_models_dir,
+        target_models_dir=target_models_dir,
+    )
+    target_path.write_text(json.dumps(normalized_payload, indent=2), encoding="utf-8")
+
+
 def _version_entry_by_id(info: dict[str, Any], version: int) -> dict[str, Any] | None:
     for item in info.get("versions", []):
         if int(item.get("version", 0)) == int(version):
@@ -74,8 +249,23 @@ def _assert_compatible_duplicate(
     target_entry: dict[str, Any],
     source_artifacts: dict[str, Path],
     target_artifacts: dict[str, Path],
+    *,
+    source_elder_id: str,
+    target_elder_id: str,
+    source_models_dir: Path,
+    target_models_dir: Path,
 ) -> None:
-    if _normalize_version_entry(source_entry) != _normalize_version_entry(target_entry):
+    canonical_source_entry = _canonicalize_namespace_refs(
+        _normalize_version_entry(source_entry),
+        elder_ids=[str(source_elder_id), str(target_elder_id)],
+        models_dirs=[source_models_dir, target_models_dir],
+    )
+    canonical_target_entry = _canonicalize_namespace_refs(
+        _normalize_version_entry(target_entry),
+        elder_ids=[str(source_elder_id), str(target_elder_id)],
+        models_dirs=[source_models_dir, target_models_dir],
+    )
+    if canonical_source_entry != canonical_target_entry:
         raise ValueError(
             f"Conflicting metadata for {room_name} v{int(version)} between source and target namespaces"
         )
@@ -84,10 +274,24 @@ def _assert_compatible_duplicate(
         target_path = target_artifacts.get(artifact_name)
         if target_path is None or not target_path.exists():
             continue
-        if _sha256(source_path) != _sha256(target_path):
+        if _is_json_artifact(source_path):
+            if _json_artifacts_equivalent(
+                source_path,
+                target_path,
+                source_elder_id=source_elder_id,
+                target_elder_id=target_elder_id,
+                source_models_dir=source_models_dir,
+                target_models_dir=target_models_dir,
+            ):
+                continue
             raise ValueError(
                 f"Conflicting artifact for {room_name} v{int(version)}: {artifact_name}"
             )
+        if _sha256(source_path) == _sha256(target_path):
+            continue
+        raise ValueError(
+            f"Conflicting artifact for {room_name} v{int(version)}: {artifact_name}"
+        )
 
 
 def promote_room_versions_from_namespace(
@@ -142,7 +346,13 @@ def promote_room_versions_from_namespace(
             version = int(entry.get("version", 0) or 0)
             if version <= 0:
                 continue
-            normalized_entry = _normalize_version_entry(dict(entry))
+            normalized_entry = _normalize_namespace_refs(
+                _normalize_version_entry(dict(entry)),
+                source_elder_id=source_elder_id,
+                target_elder_id=target_elder_id,
+                source_models_dir=source_models_dir,
+                target_models_dir=target_models_dir,
+            )
             source_artifacts = _versioned_artifacts(source_models_dir, room_name, version)
             target_artifacts = _versioned_artifacts(target_models_dir, room_name, version)
 
@@ -155,6 +365,10 @@ def promote_room_versions_from_namespace(
                     existing_entry,
                     source_artifacts,
                     target_artifacts,
+                    source_elder_id=source_elder_id,
+                    target_elder_id=target_elder_id,
+                    source_models_dir=source_models_dir,
+                    target_models_dir=target_models_dir,
                 )
                 reused_versions.append(version)
             else:
@@ -163,6 +377,28 @@ def promote_room_versions_from_namespace(
 
             for artifact_name, source_path in source_artifacts.items():
                 target_path = target_models_dir / artifact_name
+                if _is_json_artifact(source_path):
+                    if target_path.exists():
+                        if not _json_artifacts_equivalent(
+                            source_path,
+                            target_path,
+                            source_elder_id=source_elder_id,
+                            target_elder_id=target_elder_id,
+                            source_models_dir=source_models_dir,
+                            target_models_dir=target_models_dir,
+                        ):
+                            raise ValueError(
+                                f"Refusing to overwrite conflicting target artifact: {artifact_name}"
+                            )
+                    _write_normalized_json_artifact(
+                        source_path,
+                        target_path,
+                        source_elder_id=source_elder_id,
+                        target_elder_id=target_elder_id,
+                        source_models_dir=source_models_dir,
+                        target_models_dir=target_models_dir,
+                    )
+                    continue
                 if target_path.exists():
                     if _sha256(source_path) != _sha256(target_path):
                         raise ValueError(

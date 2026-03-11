@@ -47,7 +47,21 @@ class TestPromoteRoomVersionsFromNamespace(unittest.TestCase):
             encoding="utf-8",
         )
         (models_dir / f"{room_name}_v{version}_decision_trace.json").write_text(
-            json.dumps({"room": room_name, "version": version, "tag": payload_tag}),
+            json.dumps(
+                {
+                    "elder_id": elder_id,
+                    "room": room_name,
+                    "version": version,
+                    "saved_version": version,
+                    "tag": payload_tag,
+                    "artifact_paths": {
+                        "stage_a_model_versioned": str(
+                            models_dir / f"{room_name}_v{version}_two_stage_stage_a_model.keras"
+                        ),
+                        "meta_versioned": str(models_dir / f"{room_name}_v{version}_two_stage_meta.json"),
+                    },
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -56,6 +70,9 @@ class TestPromoteRoomVersionsFromNamespace(unittest.TestCase):
                 json.dumps(
                     {
                         "schema_version": "beta6.two_stage_core.v1",
+                        "elder_id": elder_id,
+                        "room": room_name,
+                        "saved_version": version,
                         "runtime_enabled": True,
                         "stage_b_enabled": True,
                     }
@@ -153,10 +170,75 @@ class TestPromoteRoomVersionsFromNamespace(unittest.TestCase):
             json.loads((models_dir / f"{self.room}_decision_trace.json").read_text(encoding="utf-8"))["version"],
             11,
         )
+        versioned_trace = json.loads((models_dir / f"{self.room}_v11_decision_trace.json").read_text(encoding="utf-8"))
+        latest_trace = json.loads((models_dir / f"{self.room}_decision_trace.json").read_text(encoding="utf-8"))
+        latest_two_stage = json.loads((models_dir / f"{self.room}_two_stage_meta.json").read_text(encoding="utf-8"))
+        self.assertEqual(versioned_trace["elder_id"], self.target_elder)
+        self.assertEqual(latest_trace["elder_id"], self.target_elder)
+        self.assertEqual(latest_two_stage["elder_id"], self.target_elder)
+        self.assertIn(f"/models/{self.target_elder}/", versioned_trace["artifact_paths"]["stage_a_model_versioned"])
+        self.assertNotIn(f"/models/{self.source_elder}/", versioned_trace["artifact_paths"]["stage_a_model_versioned"])
         self.assertTrue((models_dir / f"{self.room}_two_stage_meta.json").exists())
         self.assertTrue((models_dir / f"{self.room}_two_stage_stage_a_model.keras").exists())
         self.assertTrue((models_dir / f"{self.room}_two_stage_stage_b_model.keras").exists())
         self.assertTrue((models_dir / f"{self.room}_v7_model.keras").exists())
+
+    def test_promote_room_versions_from_namespace_repairs_stale_target_json_on_repeat_promotion(self):
+        self._write_version_artifacts(
+            self.source_elder,
+            self.room,
+            11,
+            payload_tag="candidate",
+            include_two_stage=True,
+        )
+        self._write_versions_json(
+            self.source_elder,
+            self.room,
+            current_version=11,
+            versions=[
+                {"version": 11, "created_at": "2026-03-11T00:11:00", "promoted": True, "metrics": {"tag": "candidate"}},
+            ],
+        )
+
+        promote_room_versions_from_namespace(
+            backend_dir=self.test_dir,
+            source_elder_id=self.source_elder,
+            target_elder_id=self.target_elder,
+            room_versions={self.room: 11},
+        )
+
+        models_dir = self.registry.get_models_dir(self.target_elder)
+        stale_trace_path = models_dir / f"{self.room}_v11_decision_trace.json"
+        stale_trace = json.loads(stale_trace_path.read_text(encoding="utf-8"))
+        stale_trace["elder_id"] = self.source_elder
+        stale_trace["artifact_paths"]["stage_a_model_versioned"] = str(
+            self.registry.get_models_dir(self.source_elder) / f"{self.room}_v11_two_stage_stage_a_model.keras"
+        )
+        stale_trace_path.write_text(json.dumps(stale_trace), encoding="utf-8")
+
+        stale_latest_path = models_dir / f"{self.room}_decision_trace.json"
+        stale_latest_path.write_text(json.dumps(stale_trace), encoding="utf-8")
+
+        stale_two_stage_path = models_dir / f"{self.room}_v11_two_stage_meta.json"
+        stale_two_stage = json.loads(stale_two_stage_path.read_text(encoding="utf-8"))
+        stale_two_stage["elder_id"] = self.source_elder
+        stale_two_stage_path.write_text(json.dumps(stale_two_stage), encoding="utf-8")
+
+        promote_room_versions_from_namespace(
+            backend_dir=self.test_dir,
+            source_elder_id=self.source_elder,
+            target_elder_id=self.target_elder,
+            room_versions={self.room: 11},
+        )
+
+        repaired_trace = json.loads(stale_trace_path.read_text(encoding="utf-8"))
+        repaired_latest = json.loads(stale_latest_path.read_text(encoding="utf-8"))
+        repaired_two_stage = json.loads(stale_two_stage_path.read_text(encoding="utf-8"))
+        self.assertEqual(repaired_trace["elder_id"], self.target_elder)
+        self.assertEqual(repaired_latest["elder_id"], self.target_elder)
+        self.assertEqual(repaired_two_stage["elder_id"], self.target_elder)
+        self.assertIn(f"/models/{self.target_elder}/", repaired_trace["artifact_paths"]["stage_a_model_versioned"])
+        self.assertNotIn(f"/models/{self.source_elder}/", repaired_trace["artifact_paths"]["stage_a_model_versioned"])
 
 
 if __name__ == "__main__":

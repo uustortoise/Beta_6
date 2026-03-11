@@ -4172,6 +4172,15 @@ class TrainingPipeline:
             "room": str(room_name),
             "saved_version": int(saved_version),
             "gate_mode": str(two_stage_result.get("gate_mode") or self._resolve_two_stage_gate_mode()),
+            "runtime_enabled": bool(two_stage_result.get("runtime_enabled", True)),
+            "runtime_gate_source": str(two_stage_result.get("runtime_gate_source") or ""),
+            "selected_reliable": bool(two_stage_result.get("selected_reliable", True)),
+            "fail_closed": bool(two_stage_result.get("fail_closed", False)),
+            "fail_closed_reason": (
+                None
+                if two_stage_result.get("fail_closed_reason") in (None, "")
+                else str(two_stage_result.get("fail_closed_reason"))
+            ),
             "stage_b_enabled": bool(stage_b_enabled),
             "stage_b_reason": str(two_stage_result.get("stage_b_reason") or ""),
             "stage_a_occupied_threshold": float(
@@ -6943,6 +6952,15 @@ class TrainingPipeline:
                         two_stage_result["runtime_enabled"] = bool(
                             selection.get("runtime_use_two_stage", False)
                         )
+                        two_stage_result["selected_reliable"] = bool(
+                            selection.get("selected_reliable", True)
+                        )
+                        two_stage_result["fail_closed"] = bool(selection.get("fail_closed", False))
+                        two_stage_result["fail_closed_reason"] = (
+                            None
+                            if selection.get("fail_closed_reason") in (None, "")
+                            else str(selection.get("fail_closed_reason"))
+                        )
                         if bool(selection.get("runtime_use_two_stage", False)):
                             y_pred = y_pred_two_stage
                             if training_strategy == "factorized_primary":
@@ -6975,6 +6993,9 @@ class TrainingPipeline:
                         metrics["two_stage_core"]["runtime_use_two_stage"] = False
                         two_stage_result["runtime_enabled"] = False
                         two_stage_result["runtime_gate_source"] = "single_stage_fallback_error"
+                        two_stage_result["selected_reliable"] = False
+                        two_stage_result["fail_closed"] = False
+                        two_stage_result["fail_closed_reason"] = None
                         logger.warning(f"Two-stage validation fallback for {room_name}: {e}")
 
                 shadow_eval_y_true = np.asarray(y_val_eval, dtype=np.int32)

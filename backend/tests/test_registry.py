@@ -863,6 +863,90 @@ class TestModelRegistry(unittest.TestCase):
         self.assertGreaterEqual(mock_load_room.call_count, 3)
 
     @patch("config.get_room_config")
+    def test_load_models_for_elder_repairs_runtime_disabled_two_stage_from_decision_trace(self, mock_get_room_config):
+        mock_cfg = MagicMock()
+        mock_cfg.calculate_seq_length.return_value = 5
+        mock_get_room_config.return_value = mock_cfg
+
+        models_dir = self.registry.get_models_dir(self.elder_id)
+        room = "Bedroom"
+        (models_dir / f"{room}_versions.json").write_text(
+            json.dumps(
+                {
+                    "versions": [{"version": 40, "promoted": True}],
+                    "current_version": 40,
+                }
+            )
+        )
+
+        (models_dir / f"{room}_v40_model.keras").write_text("model-v40")
+        joblib.dump({"scale": 1}, models_dir / f"{room}_v40_scaler.pkl")
+        joblib.dump(
+            _DummyEncoder(["bedroom_normal_use", "sleep", "unoccupied"]),
+            models_dir / f"{room}_v40_label_encoder.pkl",
+        )
+        shutil.copy2(models_dir / f"{room}_v40_model.keras", models_dir / f"{room}_model.keras")
+        shutil.copy2(models_dir / f"{room}_v40_scaler.pkl", models_dir / f"{room}_scaler.pkl")
+        shutil.copy2(models_dir / f"{room}_v40_label_encoder.pkl", models_dir / f"{room}_label_encoder.pkl")
+
+        (models_dir / f"{room}_v40_two_stage_stage_a_model.keras").write_text("stage-a-v40")
+        (models_dir / f"{room}_v40_two_stage_stage_b_model.keras").write_text("stage-b-v40")
+        missing_runtime_payload = {
+            "schema_version": "beta6.two_stage_core.v1",
+            "saved_version": 40,
+            "stage_b_enabled": True,
+            "stage_a_occupied_threshold": 0.95,
+            "num_classes": 3,
+            "excluded_class_ids": [2],
+            "occupied_class_ids": [0, 1],
+            "primary_occupied_class_id": 0,
+        }
+        (models_dir / f"{room}_v40_two_stage_meta.json").write_text(
+            json.dumps(missing_runtime_payload, indent=2)
+        )
+        (models_dir / f"{room}_v40_decision_trace.json").write_text(
+            json.dumps(
+                {
+                    "metrics": {
+                        "two_stage_core": {
+                            "runtime_use_two_stage": False,
+                            "gate_source": "single_stage_fallback_no_regress",
+                        }
+                    }
+                },
+                indent=2,
+            )
+        )
+
+        platform = MagicMock()
+        platform.room_models = {}
+        platform.scalers = {}
+        platform.label_encoders = {}
+        platform.class_thresholds = {}
+        platform.two_stage_core_models = {}
+        platform.sensor_columns = ["s1", "s2", "s3"]
+
+        with patch.object(
+            self.registry,
+            "load_room_model",
+            side_effect=lambda path, room_name, compile_model=True: f"loaded:{Path(path).name}",
+        ):
+            with patch.object(self.registry, "_try_load_shared_adapter_room_model", return_value=None):
+                loaded = self.registry.load_models_for_elder(self.elder_id, platform)
+
+        self.assertIn(room, loaded)
+        self.assertNotIn(room, platform.two_stage_core_models)
+        repaired_versioned_meta = json.loads((models_dir / f"{room}_v40_two_stage_meta.json").read_text())
+        self.assertFalse(bool(repaired_versioned_meta["runtime_enabled"]))
+        self.assertEqual(
+            repaired_versioned_meta["runtime_gate_source"],
+            "single_stage_fallback_no_regress",
+        )
+        self.assertFalse((models_dir / f"{room}_two_stage_meta.json").exists())
+        self.assertFalse((models_dir / f"{room}_two_stage_stage_a_model.keras").exists())
+        self.assertFalse((models_dir / f"{room}_two_stage_stage_b_model.keras").exists())
+
+    @patch("config.get_room_config")
     def test_load_models_for_elder_ignores_two_stage_aliases_during_room_discovery(self, mock_get_room_config):
         mock_cfg = MagicMock()
         mock_cfg.calculate_seq_length.return_value = 5

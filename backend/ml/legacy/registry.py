@@ -151,6 +151,92 @@ class ModelRegistry:
                 pass
         return filecmp.cmp(src, dst, shallow=False)
 
+    def _repair_two_stage_meta_runtime_fields(
+        self,
+        *,
+        models_dir: Path,
+        room_name: str,
+        meta_path: Path,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Backfill missing two-stage runtime gate fields from the matching decision trace.
+
+        Historical artifacts omitted `runtime_enabled`, which made runtime loading
+        default to `True` and could reactivate a two-stage bundle even when training
+        selected a single-stage fallback. When possible, infer the missing fields
+        from the corresponding decision trace and persist the repaired metadata.
+        """
+        if "runtime_enabled" in payload:
+            return payload
+
+        try:
+            saved_version = int(payload.get("saved_version", 0) or 0)
+        except (TypeError, ValueError):
+            return payload
+        if saved_version <= 0:
+            return payload
+
+        inferred: Dict[str, Any] = {}
+        trace_candidates = (
+            models_dir / f"{room_name}_v{int(saved_version)}_decision_trace.json",
+            models_dir / f"{room_name}_decision_trace.json",
+        )
+        for trace_path in trace_candidates:
+            if not trace_path.exists():
+                continue
+            try:
+                trace_payload = json.loads(trace_path.read_text())
+            except Exception:
+                continue
+            metrics = trace_payload.get("metrics") or {}
+            two_stage_core = metrics.get("two_stage_core") or {}
+            if not isinstance(two_stage_core, dict):
+                continue
+            if "runtime_use_two_stage" in two_stage_core:
+                inferred["runtime_enabled"] = bool(two_stage_core.get("runtime_use_two_stage"))
+            gate_source = two_stage_core.get("runtime_gate_source", two_stage_core.get("gate_source"))
+            if str(gate_source or "").strip():
+                inferred["runtime_gate_source"] = str(gate_source)
+            if "selected_reliable" in two_stage_core:
+                inferred["selected_reliable"] = bool(two_stage_core.get("selected_reliable"))
+            if "fail_closed" in two_stage_core:
+                inferred["fail_closed"] = bool(two_stage_core.get("fail_closed"))
+            if "fail_closed_reason" in two_stage_core:
+                reason = two_stage_core.get("fail_closed_reason")
+                inferred["fail_closed_reason"] = None if reason in (None, "") else str(reason)
+            if inferred:
+                break
+
+        if not inferred:
+            return payload
+
+        repaired = dict(payload)
+        repaired.update(inferred)
+
+        def _write_if_changed(path: Path) -> None:
+            try:
+                existing = json.loads(path.read_text()) if path.exists() else {}
+            except Exception:
+                existing = {}
+            updated = dict(existing) if isinstance(existing, dict) else {}
+            updated.update(inferred)
+            if updated != existing:
+                path.write_text(json.dumps(updated, indent=2))
+
+        _write_if_changed(meta_path)
+        versioned_meta_path = models_dir / f"{room_name}_v{int(saved_version)}_two_stage_meta.json"
+        if versioned_meta_path != meta_path and versioned_meta_path.exists():
+            _write_if_changed(versioned_meta_path)
+
+        logger.info(
+            "Repaired missing two-stage runtime metadata for %s/%s v%s using decision trace",
+            models_dir.name,
+            room_name,
+            saved_version,
+        )
+        return repaired
+
     @staticmethod
     def _reconcile_promotion_state(info: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -459,6 +545,12 @@ class ModelRegistry:
                 if two_stage_meta_src.exists():
                     try:
                         two_stage_payload = json.loads(two_stage_meta_src.read_text())
+                        two_stage_payload = self._repair_two_stage_meta_runtime_fields(
+                            models_dir=models_dir,
+                            room_name=room_name,
+                            meta_path=two_stage_meta_src,
+                            payload=two_stage_payload,
+                        )
                     except Exception as e:
                         report["issues"].append(
                             f"Invalid two-stage metadata for current_version {current}: {two_stage_meta_src.name}: {e}"
@@ -552,6 +644,12 @@ class ModelRegistry:
                 if two_stage_meta_src.exists():
                     try:
                         two_stage_payload = json.loads(two_stage_meta_src.read_text())
+                        two_stage_payload = self._repair_two_stage_meta_runtime_fields(
+                            models_dir=models_dir,
+                            room_name=room_name,
+                            meta_path=two_stage_meta_src,
+                            payload=two_stage_payload,
+                        )
                     except Exception:
                         pass
                     else:
@@ -642,6 +740,12 @@ class ModelRegistry:
 
         try:
             two_stage_payload = json.loads(two_stage_meta_src.read_text())
+            two_stage_payload = self._repair_two_stage_meta_runtime_fields(
+                models_dir=models_dir,
+                room_name=room_name,
+                meta_path=two_stage_meta_src,
+                payload=two_stage_payload,
+            )
         except Exception as exc:
             if require_mandatory:
                 raise FileNotFoundError(
@@ -1057,6 +1161,12 @@ class ModelRegistry:
             return None
         try:
             payload = json.loads(meta_path.read_text())
+            payload = self._repair_two_stage_meta_runtime_fields(
+                models_dir=models_dir,
+                room_name=room_name,
+                meta_path=meta_path,
+                payload=payload,
+            )
         except Exception as e:
             logger.warning(f"Failed reading two-stage metadata for {elder_id}/{room_name}: {e}")
             return None

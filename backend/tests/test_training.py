@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 import pandas as pd
 import os
+import json
 from unittest.mock import MagicMock, patch, ANY
 import sys
 from pathlib import Path
@@ -143,6 +144,52 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertFalse(bool(selection.get("selected_reliable", True)))
         self.assertEqual(selection.get("fail_closed_reason"), "no_reliable_primary_candidate")
         self.assertEqual(selection["selected_source"], "single_stage_fail_closed_unreliable")
+
+    def test_write_two_stage_core_artifacts_persists_runtime_gate_metadata(self):
+        with TemporaryDirectory() as tmpdir:
+            models_dir = Path(tmpdir)
+            self.mock_registry.get_models_dir.return_value = models_dir
+
+            stage_a_model = MagicMock()
+            stage_a_model.save.side_effect = lambda path: Path(path).write_text("stage-a")
+
+            artifact_paths = self.pipeline._write_two_stage_core_artifacts(
+                elder_id="elder-1",
+                room_name="Bedroom",
+                saved_version=40,
+                two_stage_result={
+                    "enabled": True,
+                    "gate_mode": "primary",
+                    "stage_a_model": stage_a_model,
+                    "stage_b_enabled": False,
+                    "stage_a_occupied_threshold": 0.95,
+                    "stage_a_threshold_source": "calibration",
+                    "stage_a_calibration": {"threshold": 0.95, "status": "target_met"},
+                    "num_classes": 3,
+                    "excluded_class_ids": [2],
+                    "occupied_class_ids": [0, 1],
+                    "primary_occupied_class_id": 0,
+                    "runtime_enabled": False,
+                    "runtime_gate_source": "single_stage_fallback_no_regress",
+                    "selected_reliable": True,
+                    "fail_closed": False,
+                    "fail_closed_reason": None,
+                },
+                promote_to_latest=True,
+            )
+
+            self.assertIn("meta_versioned", artifact_paths)
+            versioned_meta = json.loads((models_dir / "Bedroom_v40_two_stage_meta.json").read_text())
+            latest_meta = json.loads((models_dir / "Bedroom_two_stage_meta.json").read_text())
+            for payload in (versioned_meta, latest_meta):
+                self.assertFalse(bool(payload["runtime_enabled"]))
+                self.assertEqual(
+                    payload["runtime_gate_source"],
+                    "single_stage_fallback_no_regress",
+                )
+                self.assertTrue(bool(payload["selected_reliable"]))
+                self.assertFalse(bool(payload["fail_closed"]))
+                self.assertIn("fail_closed_reason", payload)
 
     def test_should_shuffle_post_split_batches_matches_room_policy(self):
         self.assertTrue(self.pipeline._should_shuffle_post_split_batches("Entrance"))

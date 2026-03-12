@@ -39,6 +39,7 @@ from ml.policy_defaults import (
     get_training_transition_focus_prior_drift_guard_rooms,
     get_training_transition_focus_radius_steps_by_room,
     get_training_transition_focus_room_labels,
+    get_training_room_diagnostic_profiles_default,
     get_unoccupied_downsample_max_post_downsample_prior_drift_by_room,
     get_unoccupied_downsample_min_share_by_room,
     get_unoccupied_downsample_prior_drift_guard_rooms,
@@ -585,6 +586,9 @@ class TrainingProfilePolicy:
     transition_focus_prior_drift_guard_rooms: list[str] = field(
         default_factory=get_training_transition_focus_prior_drift_guard_rooms
     )
+    room_diagnostic_profiles: dict[str, dict[str, Any]] = field(
+        default_factory=get_training_room_diagnostic_profiles_default
+    )
     
     def is_pilot(self) -> bool:
         return self.profile.lower() == "pilot"
@@ -629,6 +633,30 @@ class TrainingProfilePolicy:
             "max_post_sampling_prior_drift": float(
                 min(max(max_post_sampling_prior_drift, 0.0), 1.0)
             ),
+        }
+
+    def get_room_diagnostic_profile(self, profile_name: str) -> dict[str, Any]:
+        profile_key = str(profile_name or "").strip().lower()
+        payload = self.room_diagnostic_profiles.get(profile_key, {})
+        if not isinstance(payload, Mapping):
+            return {}
+        room = normalize_room_name(payload.get("room"))
+        grouped_regime = str(payload.get("grouped_regime", "")).strip().lower()
+        typed_policy_fields = payload.get("typed_policy_fields", [])
+        env_overrides = payload.get("env_overrides", {})
+        return {
+            "room": room,
+            "grouped_regime": grouped_regime,
+            "typed_policy_fields": [
+                str(field).strip()
+                for field in (typed_policy_fields if isinstance(typed_policy_fields, list) else [])
+                if str(field).strip()
+            ],
+            "env_overrides": {
+                str(k).strip(): str(v).strip()
+                for k, v in (env_overrides.items() if isinstance(env_overrides, Mapping) else [])
+                if str(k).strip()
+            },
         }
 
 

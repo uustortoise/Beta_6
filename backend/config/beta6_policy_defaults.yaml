@@ -150,6 +150,24 @@ training:
     bedroom: 0.10
   transition_focus_prior_drift_guard_rooms:
     - bedroom
+  room_diagnostic_profiles:
+    livingroom_policy_sensitivity:
+      room: livingroom
+      grouped_regime: grouped_by_date
+      typed_policy_fields:
+        - two_stage_core.gate_mode
+        - training_profile.post_split_shuffle_rooms
+      env_overrides:
+        TWO_STAGE_CORE_GATE_MODE: shadow
+    bedroom_grouped_fragility:
+      room: bedroom
+      grouped_regime: grouped_by_date
+      typed_policy_fields:
+        - training_profile.transition_focus_room_labels
+        - training_profile.transition_focus_radius_steps_by_room
+        - training_profile.transition_focus_max_multiplier_by_room
+      env_overrides:
+        TRANSITION_FOCUS_ROOM_LABELS: bedroom:bedroom_normal_use
   min_holdout_support_default: 3
   min_holdout_support_by_room:
     bedroom: 5

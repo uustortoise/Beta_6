@@ -320,6 +320,40 @@ def get_training_transition_focus_prior_drift_guard_rooms() -> list[str]:
     return _get_str_list("training", "transition_focus_prior_drift_guard_rooms")
 
 
+def get_training_room_diagnostic_profiles_default() -> dict[str, dict[str, Any]]:
+    raw = _get_map("training", "room_diagnostic_profiles")
+    profiles: dict[str, dict[str, Any]] = {}
+    for profile_name, payload in raw.items():
+        if not isinstance(payload, Mapping):
+            continue
+        profile_key = str(profile_name).strip().lower()
+        if not profile_key:
+            continue
+        room_name = str(payload.get("room", "")).strip().lower()
+        grouped_regime = str(payload.get("grouped_regime", "")).strip().lower()
+        typed_policy_fields = payload.get("typed_policy_fields", [])
+        if not isinstance(typed_policy_fields, (list, tuple)):
+            typed_policy_fields = []
+        env_overrides = payload.get("env_overrides", {})
+        if not isinstance(env_overrides, Mapping):
+            env_overrides = {}
+        profiles[profile_key] = {
+            "room": room_name,
+            "grouped_regime": grouped_regime,
+            "typed_policy_fields": [
+                str(field).strip()
+                for field in typed_policy_fields
+                if str(field).strip()
+            ],
+            "env_overrides": {
+                str(k).strip(): str(v).strip()
+                for k, v in env_overrides.items()
+                if str(k).strip()
+            },
+        }
+    return profiles
+
+
 def get_reproducibility_multi_seed_rooms_default() -> list[str]:
     return _get_str_list("reproducibility", "multi_seed_rooms")
 

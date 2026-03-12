@@ -115,3 +115,22 @@
   - `pytest backend/tests/test_ui_services.py -q -k "null_confidence_rows or confidence_threshold"` -> 2 passed, 27 deselected, 3 warnings
   - `pytest backend/tests/test_ui_services.py backend/tests/test_health_server.py -q` -> 52 passed, 39 warnings
   - `python3 -m py_compile backend/services/correction_service.py backend/services/ops_service.py backend/health_server.py backend/tests/test_ui_services.py backend/tests/test_health_server.py` -> passed
+2026-03-12 21:35:20 UTC | TASK-18 beta61-fragile-room-contracts | Added Beta 6.1 fragile-room status/runtime-topology contract and replay diagnostics surfaces for LivingRoom/Bedroom policy forensics.
+- Code change:
+  - `backend/config/beta6_policy_defaults.yaml`
+  - `backend/ml/policy_defaults.py`
+  - `backend/ml/policy_config.py`
+  - `backend/ml/training.py`
+  - `backend/ml/room_experiments.py`
+  - `backend/scripts/run_room_experiments.py`
+  - `backend/tests/test_training.py`
+  - `backend/tests/test_policy_config.py`
+  - `backend/tests/test_run_room_experiments.py`
+- Task outcome:
+  - added named training diagnostic profiles for `livingroom_policy_sensitivity` and `bedroom_grouped_fragility` in policy defaults
+  - exposed `training_profile.room_diagnostic_profiles` in typed policy and accessor support via `get_room_diagnostic_profile(...)`
+  - added training-side fragile-room room status semantics (`pass|conditional|block`) and runtime-topology expectation resolution from saved `*_two_stage_meta.json` `runtime_enabled`
+  - persisted room status and runtime topology expectation into room decision traces/metrics
+  - added replay diagnostics module/script that emits typed-policy-traceable report payloads and carries grouped fragility context
+- Verification:
+  - `PYTHONPATH=backend pytest backend/tests/test_training.py backend/tests/test_run_room_experiments.py backend/tests/test_policy_config.py -q` -> 123 passed, 3 warnings

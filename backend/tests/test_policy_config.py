@@ -334,3 +334,21 @@ def test_event_first_env_overrides():
     assert policy.event_first.calibration_min_samples == 800
     assert policy.event_first.unknown_rate_global_cap == 0.11
     assert policy.event_first.unknown_rate_room_cap == 0.16
+
+
+def test_policy_defaults_can_emit_named_room_diagnostic_profiles():
+    policy = load_policy_from_env({})
+    profiles = policy.training_profile.room_diagnostic_profiles
+
+    assert isinstance(profiles, dict)
+    assert "livingroom_policy_sensitivity" in profiles
+    assert "bedroom_grouped_fragility" in profiles
+
+    livingroom_profile = profiles["livingroom_policy_sensitivity"]
+    assert livingroom_profile["room"] == "livingroom"
+    assert "typed_policy_fields" in livingroom_profile
+    assert "two_stage_core.gate_mode" in livingroom_profile["typed_policy_fields"]
+
+    bedroom_profile = profiles["bedroom_grouped_fragility"]
+    assert bedroom_profile["room"] == "bedroom"
+    assert bedroom_profile["grouped_regime"] == "grouped_by_date"

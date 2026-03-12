@@ -536,6 +536,55 @@ class TestTrainingPipeline(unittest.TestCase):
             self.assertTrue(versioned.exists())
             self.assertTrue(latest.exists())
 
+    def test_fragile_room_status_allows_pass_conditional_block(self):
+        self.assertEqual(
+            self.pipeline._resolve_fragile_room_status(
+                gate_pass=True,
+                runtime_topology_matches=True,
+                blocking_reasons=[],
+            ),
+            "pass",
+        )
+        self.assertEqual(
+            self.pipeline._resolve_fragile_room_status(
+                gate_pass=True,
+                runtime_topology_matches=False,
+                blocking_reasons=["runtime_topology_mismatch:bedroom"],
+            ),
+            "conditional",
+        )
+        self.assertEqual(
+            self.pipeline._resolve_fragile_room_status(
+                gate_pass=False,
+                runtime_topology_matches=False,
+                blocking_reasons=["gate_failed:bedroom"],
+            ),
+            "block",
+        )
+
+    def test_bedroom_runtime_expectation_uses_saved_runtime_enabled_flag(self):
+        with TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            self.mock_registry.get_models_dir.return_value = models_dir
+
+            meta_path = models_dir / "Bedroom_v38_two_stage_meta.json"
+            meta_path.write_text(
+                '{"schema_version":"beta6.two_stage_core.v1","saved_version":38,"runtime_enabled":false}',
+                encoding="utf-8",
+            )
+
+            topology = self.pipeline._resolve_room_runtime_topology_expectation(
+                elder_id="HK0011_jessica",
+                room_name="Bedroom",
+                saved_version=38,
+                runtime_use_two_stage=True,
+            )
+
+            self.assertEqual(topology["expected_runtime_mode"], "single_stage")
+            self.assertEqual(topology["actual_runtime_mode"], "two_stage")
+            self.assertFalse(bool(topology["matches"]))
+            self.assertEqual(topology["source"], "saved_two_stage_meta")
+
     @patch('ml.training.TrainingPipeline.augment_training_data')
     @patch('ml.training.build_transformer_model')
     @patch('ml.training.get_room_config')

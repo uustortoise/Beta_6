@@ -2788,6 +2788,77 @@ class TrainingPipeline:
             logger.warning(f"Failed writing decision trace for {elder_id}/{room_name}: {e}")
             return None
 
+    @staticmethod
+    def _resolve_fragile_room_status(
+        *,
+        gate_pass: bool,
+        runtime_topology_matches: bool,
+        blocking_reasons: Sequence[str],
+    ) -> str:
+        if not bool(gate_pass):
+            return "block"
+        reasons = [str(reason).strip().lower() for reason in (blocking_reasons or []) if str(reason).strip()]
+        strict_blockers = [
+            reason for reason in reasons if not reason.startswith("runtime_topology_mismatch:")
+        ]
+        if strict_blockers:
+            return "block"
+        if reasons:
+            return "conditional"
+        if not bool(runtime_topology_matches):
+            return "conditional"
+        return "pass"
+
+    def _resolve_room_runtime_topology_expectation(
+        self,
+        *,
+        elder_id: str,
+        room_name: str,
+        saved_version: int,
+        runtime_use_two_stage: bool,
+    ) -> Dict[str, Any]:
+        actual_runtime_mode = "two_stage" if bool(runtime_use_two_stage) else "single_stage"
+        expectation: Dict[str, Any] = {
+            "expected_runtime_mode": actual_runtime_mode,
+            "actual_runtime_mode": actual_runtime_mode,
+            "matches": True,
+            "source": "runtime_selection_fallback",
+        }
+        try:
+            models_dir = self.registry.get_models_dir(elder_id)
+            candidate_paths = [
+                models_dir / f"{room_name}_v{int(saved_version)}_two_stage_meta.json",
+                models_dir / f"{room_name}_two_stage_meta.json",
+            ]
+            meta_path = next((path for path in candidate_paths if path.exists()), None)
+            if meta_path is None:
+                return expectation
+
+            payload = json.loads(meta_path.read_text())
+            if str(payload.get("schema_version", "")).strip() != "beta6.two_stage_core.v1":
+                expectation["source"] = "invalid_two_stage_meta_schema"
+                return expectation
+
+            expected_runtime_mode = (
+                "two_stage"
+                if bool(payload.get("runtime_enabled", True))
+                else "single_stage"
+            )
+            expectation.update(
+                {
+                    "expected_runtime_mode": expected_runtime_mode,
+                    "actual_runtime_mode": actual_runtime_mode,
+                    "matches": expected_runtime_mode == actual_runtime_mode,
+                    "source": "saved_two_stage_meta",
+                    "meta_path": str(meta_path),
+                }
+            )
+            return expectation
+        except Exception as e:
+            expectation["source"] = "runtime_expectation_error"
+            expectation["error"] = f"{type(e).__name__}: {e}"
+            return expectation
+
     def _resolve_unoccupied_downsample_config(self, room_name: str) -> Dict[str, float | int]:
         """Resolve unoccupied downsample config from typed policy."""
         return self._active_policy().unoccupied_downsample.resolve(room_name)
@@ -6799,6 +6870,21 @@ class TrainingPipeline:
                 )
                 if isinstance(metrics.get("event_first_shadow"), dict):
                     metrics["event_first_shadow"]["artifact_paths"] = shadow_paths
+            runtime_topology = self._resolve_room_runtime_topology_expectation(
+                elder_id=elder_id,
+                room_name=room_name,
+                saved_version=int(saved_version),
+                runtime_use_two_stage=bool(
+                    ((metrics.get("two_stage_core") or {}).get("runtime_use_two_stage", False))
+                ),
+            )
+            room_status = self._resolve_fragile_room_status(
+                gate_pass=bool(gate_pass),
+                runtime_topology_matches=bool(runtime_topology.get("matches", True)),
+                blocking_reasons=list(gate_reasons),
+            )
+            metrics["runtime_topology"] = dict(runtime_topology)
+            metrics["room_status"] = str(room_status)
             decision_trace_payload = {
                 "created_at_utc": _utc_now_iso_z(),
                 "elder_id": elder_id,
@@ -6878,7 +6964,10 @@ class TrainingPipeline:
                     "blocking_reasons": list(gate_reasons),
                     "watch_reasons": list(gate_watch_reasons),
                     "reasons": list(gate_reasons),
+                    "room_status": str(room_status),
                 },
+                "runtime_topology": dict(runtime_topology),
+                "room_status": str(room_status),
                 "model_identity": model_identity,
                 "metrics": metrics,
             }

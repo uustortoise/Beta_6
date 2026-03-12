@@ -319,7 +319,7 @@ def test_shadow_compare_error_blocks_ladder_progression(monkeypatch):
     assert report["phase6_rollout_ladder"]["gate_summary"]["drift_alerts_within_budget"] is False
 
 
-def test_beta6_authority_live_run_uses_fallback_signing_key_when_env_missing(monkeypatch, tmp_path: Path):
+def test_beta6_authority_live_run_requires_explicit_signing_key(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("run_daily_analysis._is_beta6_authority_enabled", lambda: True)
     monkeypatch.delenv("BETA6_GATE_SIGNING_KEY", raising=False)
     monkeypatch.setattr(
@@ -336,19 +336,56 @@ def test_beta6_authority_live_run_uses_fallback_signing_key_when_env_missing(mon
         registry_v2=registry,
     )
 
-    assert gate_pass is True
-    assert report["pass"] is True
-    assert report["phase4_dynamic_gate"]["status"] == "ok"
-    eval_path = report["phase4_dynamic_gate"]["evaluation_report_path"]
-    assert isinstance(eval_path, str) and eval_path
-    assert Path(eval_path).exists()
-    assert report["phase4_dynamic_gate"]["evaluation_report_signature"].startswith("sha256:")
-    assert report["phase4_dynamic_gate"]["rejection_artifact_path"] is None
-    assert report["phase6_shadow_compare"]["status"] == "ok"
-    shadow_path = report["phase6_shadow_compare"]["summary"]["report_path"]
-    assert isinstance(shadow_path, str) and shadow_path
-    assert Path(shadow_path).exists()
-    assert report["phase6_shadow_compare"]["summary"]["signature"].startswith("sha256:")
+    assert gate_pass is False
+    assert report["pass"] is False
+    assert report["reason_code"] == "fail_gate_policy"
+    assert report["details"]["phase4_dynamic_gate_failed"] is True
+    assert "BETA6_GATE_SIGNING_KEY is required" in report["details"]["phase4_dynamic_gate_error"]
+    assert report["phase4_dynamic_gate"]["status"] == "error"
+    assert report["phase4_dynamic_gate"]["evaluation_report_path"] is None
+
+
+def test_beta6_training_preflight_requires_explicit_evidence_profile(monkeypatch, tmp_path):
+    monkeypatch.delenv("RELEASE_GATE_EVIDENCE_PROFILE", raising=False)
+    monkeypatch.setattr("run_daily_analysis.validate_label_policy_consistency", lambda **kwargs: SimpleNamespace(status="pass", errors=[], warnings=[]))
+    monkeypatch.setattr("run_daily_analysis.RAW_DATA_DIR", tmp_path / "raw")
+    monkeypatch.setattr("run_daily_analysis.ARCHIVE_DATA_DIR", tmp_path / "archive")
+    aggregate_file = tmp_path / "HK0011_jessica_train_4dec2025.xlsx"
+    aggregate_file.write_text("x")
+
+    ok, report = run_daily_analysis._validate_beta6_training_preflight(
+        elder_id="HK0011_jessica",
+        aggregate_files=[aggregate_file],
+    )
+
+    assert ok is False
+    assert report["reason"] == "release_gate_evidence_profile_missing"
+    assert report["checks"][0]["check"] == "release_gate_evidence_profile_explicit"
+    assert report["checks"][0]["pass"] is False
+
+
+def test_beta6_training_preflight_reports_postgres_unavailable(monkeypatch, tmp_path):
+    monkeypatch.setenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")
+    monkeypatch.setenv("BETA6_GATE_SIGNING_KEY", "test-live-key")
+    monkeypatch.setattr("run_daily_analysis.validate_label_policy_consistency", lambda **kwargs: SimpleNamespace(status="pass", errors=[], warnings=[]))
+    monkeypatch.setattr("run_daily_analysis.RAW_DATA_DIR", tmp_path / "raw")
+    monkeypatch.setattr("run_daily_analysis.ARCHIVE_DATA_DIR", tmp_path / "archive")
+    monkeypatch.setattr(
+        "run_daily_analysis._check_beta6_authority_postgres_preflight",
+        lambda: (False, {"error": "OperationalError: connection refused"}),
+    )
+    aggregate_file = tmp_path / "HK0011_jessica_train_4dec2025.xlsx"
+    aggregate_file.write_text("x")
+
+    ok, report = run_daily_analysis._validate_beta6_training_preflight(
+        elder_id="HK0011_jessica",
+        aggregate_files=[aggregate_file],
+    )
+
+    assert ok is False
+    assert report["reason"] == "postgres_unavailable"
+    assert report["checks"][2]["check"] == "postgres_reachable"
+    assert report["checks"][2]["pass"] is False
 
 
 def test_beta6_authority_live_run_persists_phase4_artifacts(monkeypatch, tmp_path: Path):

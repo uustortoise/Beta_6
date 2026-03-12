@@ -72,6 +72,27 @@ if [ ! -f "$BACKEND_DIR/.env" ] && [ -f "$BACKEND_DIR/.env.example" ]; then
     echo "Created $BACKEND_DIR/.env from .env.example"
 fi
 
+if [ -f "$BACKEND_DIR/.env" ]; then
+    set -a
+    source "$BACKEND_DIR/.env"
+    set +a
+fi
+
+ENABLE_BETA6_AUTHORITY="${ENABLE_BETA6_AUTHORITY:-true}"
+RELEASE_GATE_EVIDENCE_PROFILE="${RELEASE_GATE_EVIDENCE_PROFILE:-}"
+BETA6_GATE_SIGNING_KEY="${BETA6_GATE_SIGNING_KEY:-}"
+
+if [ "$ENABLE_BETA6_AUTHORITY" = "true" ]; then
+    if [ -z "$RELEASE_GATE_EVIDENCE_PROFILE" ]; then
+        echo "ERROR: RELEASE_GATE_EVIDENCE_PROFILE must be set explicitly when ENABLE_BETA6_AUTHORITY=true."
+        exit 1
+    fi
+    if [ -z "$BETA6_GATE_SIGNING_KEY" ]; then
+        echo "ERROR: BETA6_GATE_SIGNING_KEY must be set explicitly when ENABLE_BETA6_AUTHORITY=true."
+        exit 1
+    fi
+fi
+
 echo "[3/6] Running preflight doctor..."
 "$PROJECT_ROOT/ops_doctor.sh" preflight
 

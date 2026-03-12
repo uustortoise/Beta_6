@@ -37,3 +37,21 @@
 - Scope constraints:
   - docs-only change; no production code modified in this task
   - preserved unrelated local worktree changes outside the staged planning docs
+2026-03-12 14:55:00 UTC | TASK-13 beta61-authority-preflight | Started Beta 6.1 / 6.2 implementation in isolated worktree `.worktrees/beta61-beta62-execution` on branch `codex/beta61-beta62-execution` and completed the first authority-hardening step.
+- Code change:
+  - `backend/run_daily_analysis.py`
+  - `start.sh`
+  - `ops_start.sh`
+  - `backend/.env.example`
+  - `backend/tests/test_run_daily_analysis_beta6_authority.py`
+  - `backend/tests/test_run_daily_analysis_thresholds.py`
+- Task outcome:
+  - Beta 6.1 authority now requires explicit `RELEASE_GATE_EVIDENCE_PROFILE`
+  - live authority artifact signing now requires explicit `BETA6_GATE_SIGNING_KEY`
+  - training preflight now checks PostgreSQL reachability before claiming production readiness
+  - startup scripts now fail early when authority env contracts are missing
+  - Task 3 fallback/rollback bundle was re-run and verified green on the existing baseline with no additional code change required in this step
+- Verification:
+  - `pytest backend/tests/test_run_daily_analysis_beta6_authority.py backend/tests/test_run_daily_analysis_thresholds.py -q` -> 62 passed, 3 warnings
+  - `pytest backend/tests/test_beta6_registry_v2.py backend/tests/test_t80_rollout.py backend/tests/test_beta6_serving_loader.py -q` -> 55 passed, 3 warnings
+  - `bash -n start.sh && bash -n ops_start.sh` -> passed

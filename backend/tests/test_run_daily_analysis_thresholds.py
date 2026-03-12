@@ -1,6 +1,7 @@
 import run_daily_analysis
 from run_daily_analysis import _resolve_scheduled_threshold
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 import json
 
@@ -253,12 +254,16 @@ def test_dedupe_training_files_collapses_alias_prefix_duplicate_day(tmp_path):
     assert [p.name for p in out] == ["HK0011_jessica_train_4dec2025.xlsx"]
 
 
-def test_beta6_authority_sets_default_evidence_profile(monkeypatch):
+def test_beta6_authority_requires_explicit_evidence_profile(monkeypatch):
     monkeypatch.delenv("RELEASE_GATE_EVIDENCE_PROFILE", raising=False)
     monkeypatch.setattr("run_daily_analysis._is_beta6_authority_enabled", lambda: True)
 
-    run_daily_analysis._ensure_beta6_authority_evidence_profile_default()
-    assert run_daily_analysis.os.getenv("RELEASE_GATE_EVIDENCE_PROFILE") == "pilot_stage_a"
+    ok, report = run_daily_analysis._validate_beta6_authority_env_preflight()
+
+    assert ok is False
+    assert report["reason"] == "release_gate_evidence_profile_missing"
+    assert report["checks"][0]["check"] == "release_gate_evidence_profile_explicit"
+    assert report["checks"][0]["pass"] is False
 
 
 def test_runtime_activation_preflight_skips_when_runtime_flags_disabled(monkeypatch):
@@ -302,13 +307,19 @@ def test_runtime_activation_preflight_calls_single_validator_when_runtime_enable
     assert str(captured["registry_root"]).endswith("registry_v2")
 
 
-def test_beta6_authority_default_evidence_profile_respects_explicit_env(monkeypatch):
+def test_beta6_authority_env_preflight_accepts_explicit_evidence_profile(monkeypatch):
     monkeypatch.setenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")
+    monkeypatch.setenv("BETA6_GATE_SIGNING_KEY", "test-live-key")
     monkeypatch.setattr("run_daily_analysis._is_beta6_authority_enabled", lambda: True)
+    monkeypatch.setattr(
+        "run_daily_analysis._check_beta6_authority_postgres_preflight",
+        lambda: (True, {"status": "ok"}),
+    )
 
-    run_daily_analysis._ensure_beta6_authority_evidence_profile_default()
+    ok, report = run_daily_analysis._validate_beta6_authority_env_preflight()
 
-    assert run_daily_analysis.os.getenv("RELEASE_GATE_EVIDENCE_PROFILE") == "production"
+    assert ok is True
+    assert report["reason"] == "ok"
 
 
 def test_validate_beta6_training_preflight_fails_when_label_policy_check_fails(monkeypatch, tmp_path):
@@ -324,6 +335,9 @@ def test_validate_beta6_training_preflight_fails_when_label_policy_check_fails(m
         warnings = []
 
     monkeypatch.setattr("run_daily_analysis.validate_label_policy_consistency", lambda **kwargs: _Report())
+    monkeypatch.setenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")
+    monkeypatch.setenv("BETA6_GATE_SIGNING_KEY", "test-live-key")
+    monkeypatch.setattr("run_daily_analysis._check_beta6_authority_postgres_preflight", lambda: (True, {"status": "ok"}))
     monkeypatch.setattr("run_daily_analysis.RAW_DATA_DIR", tmp_path / "raw")
     monkeypatch.setattr("run_daily_analysis.ARCHIVE_DATA_DIR", tmp_path / "archive")
     agg = [tmp_path / "HK0011_jessica_train_4dec2025.xlsx"]
@@ -351,6 +365,9 @@ def test_validate_beta6_training_preflight_passes_for_consistent_inputs(monkeypa
     (archive / "HK001_jessica_train_5dec2025.parquet").write_text("x")
 
     monkeypatch.setattr("run_daily_analysis.validate_label_policy_consistency", lambda **kwargs: _Report())
+    monkeypatch.setenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")
+    monkeypatch.setenv("BETA6_GATE_SIGNING_KEY", "test-live-key")
+    monkeypatch.setattr("run_daily_analysis._check_beta6_authority_postgres_preflight", lambda: (True, {"status": "ok"}))
     monkeypatch.setattr("run_daily_analysis.RAW_DATA_DIR", raw)
     monkeypatch.setattr("run_daily_analysis.ARCHIVE_DATA_DIR", archive)
     agg = [raw / "HK0011_jessica_train_4dec2025.xlsx", archive / "HK001_jessica_train_5dec2025.parquet"]
@@ -1218,8 +1235,12 @@ def test_train_files_rolls_back_promoted_rooms_when_wf_report_has_no_failed_room
         rollback_args["room_names"] = list(room_names)
         return room_names, []
 
+    monkeypatch.setenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")
+    monkeypatch.setenv("BETA6_GATE_SIGNING_KEY", "test-live-key")
     monkeypatch.setattr("run_daily_analysis.get_elder_id_from_filename", lambda _: "elder_1")
     monkeypatch.setattr("run_daily_analysis._build_aggregate_training_set", lambda elder_id, files: files)
+    monkeypatch.setattr("run_daily_analysis.validate_label_policy_consistency", lambda **kwargs: SimpleNamespace(status="pass", errors=[], warnings=[]))
+    monkeypatch.setattr("run_daily_analysis._check_beta6_authority_postgres_preflight", lambda: (True, {"status": "ok"}))
     monkeypatch.setattr("run_daily_analysis.UnifiedPipeline", _PipelineStub)
     monkeypatch.setattr("run_daily_analysis.ModelRegistry", lambda *_args, **_kwargs: MagicMock())
     monkeypatch.setattr("run_daily_analysis._snapshot_current_versions", lambda *_args, **_kwargs: {"Bedroom": 1})
@@ -1372,8 +1393,12 @@ def test_train_files_promotes_deferred_candidates_after_wf_pass(monkeypatch, tmp
         def __init__(self):
             self.db = _DB()
 
+    monkeypatch.setenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")
+    monkeypatch.setenv("BETA6_GATE_SIGNING_KEY", "test-live-key")
     monkeypatch.setattr("run_daily_analysis.get_elder_id_from_filename", lambda _: "elder_1")
     monkeypatch.setattr("run_daily_analysis._build_aggregate_training_set", lambda elder_id, files: files)
+    monkeypatch.setattr("run_daily_analysis.validate_label_policy_consistency", lambda **kwargs: SimpleNamespace(status="pass", errors=[], warnings=[]))
+    monkeypatch.setattr("run_daily_analysis._check_beta6_authority_postgres_preflight", lambda: (True, {"status": "ok"}))
     monkeypatch.setattr("run_daily_analysis.UnifiedPipeline", _PipelineStub)
     monkeypatch.setattr("run_daily_analysis.ModelRegistry", lambda *_args, **_kwargs: registry)
     monkeypatch.setattr("run_daily_analysis._snapshot_current_versions", lambda *_args, **_kwargs: {"Bedroom": 1})
@@ -1452,8 +1477,12 @@ def test_train_files_marks_rejected_when_deferred_promotion_apply_fails(monkeypa
         def __init__(self):
             self.db = _DB()
 
+    monkeypatch.setenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")
+    monkeypatch.setenv("BETA6_GATE_SIGNING_KEY", "test-live-key")
     monkeypatch.setattr("run_daily_analysis.get_elder_id_from_filename", lambda _: "elder_1")
     monkeypatch.setattr("run_daily_analysis._build_aggregate_training_set", lambda elder_id, files: files)
+    monkeypatch.setattr("run_daily_analysis.validate_label_policy_consistency", lambda **kwargs: SimpleNamespace(status="pass", errors=[], warnings=[]))
+    monkeypatch.setattr("run_daily_analysis._check_beta6_authority_postgres_preflight", lambda: (True, {"status": "ok"}))
     monkeypatch.setattr("run_daily_analysis.UnifiedPipeline", _PipelineStub)
     monkeypatch.setattr("run_daily_analysis.ModelRegistry", lambda *_args, **_kwargs: registry)
     monkeypatch.setattr("run_daily_analysis._snapshot_current_versions", lambda *_args, **_kwargs: {"Bedroom": 1})
@@ -1525,8 +1554,12 @@ def test_train_files_rejects_when_decision_trace_missing(monkeypatch, tmp_path):
         def __init__(self):
             self.db = _DB()
 
+    monkeypatch.setenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")
+    monkeypatch.setenv("BETA6_GATE_SIGNING_KEY", "test-live-key")
     monkeypatch.setattr("run_daily_analysis.get_elder_id_from_filename", lambda _: "elder_1")
     monkeypatch.setattr("run_daily_analysis._build_aggregate_training_set", lambda elder_id, files: files)
+    monkeypatch.setattr("run_daily_analysis.validate_label_policy_consistency", lambda **kwargs: SimpleNamespace(status="pass", errors=[], warnings=[]))
+    monkeypatch.setattr("run_daily_analysis._check_beta6_authority_postgres_preflight", lambda: (True, {"status": "ok"}))
     monkeypatch.setattr("run_daily_analysis.UnifiedPipeline", _PipelineStub)
     monkeypatch.setattr("run_daily_analysis.ModelRegistry", lambda *_args, **_kwargs: MagicMock())
     monkeypatch.setattr("run_daily_analysis._snapshot_current_versions", lambda *_args, **_kwargs: {"Bedroom": 1})

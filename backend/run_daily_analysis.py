@@ -357,19 +357,75 @@ def _resolve_training_files_for_run(elder_id: str, incoming_files: list[Path]) -
 
 def _ensure_beta6_authority_evidence_profile_default() -> None:
     """
-    Ensure pilot evidence defaults are applied in Beta 6 authority mode when
-    RELEASE_GATE_EVIDENCE_PROFILE is not explicitly configured.
+    Deprecated no-op kept for compatibility.
+
+    Beta 6.1 requires explicit authority env configuration and no longer
+    injects an implicit evidence profile default at runtime.
     """
+    return
+
+
+def _check_beta6_authority_postgres_preflight() -> tuple[bool, dict]:
+    try:
+        try:
+            from backend.db.legacy_adapter import LegacyDatabaseAdapter
+        except ImportError:
+            from elderlycare_v1_16.database import db as adapter
+        else:
+            adapter = LegacyDatabaseAdapter()
+
+        with adapter.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+        return True, {"status": "ok"}
+    except Exception as exc:
+        return False, {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _validate_beta6_authority_env_preflight() -> tuple[bool, dict]:
+    report: dict = {"checks": []}
+
+    def _push(name: str, ok: bool, details: dict | None = None) -> None:
+        entry = {"check": str(name), "pass": bool(ok)}
+        if details:
+            entry["details"] = details
+        report["checks"].append(entry)
+
     if not _is_beta6_authority_enabled():
-        return
-    raw = str(os.getenv("RELEASE_GATE_EVIDENCE_PROFILE", "")).strip().lower()
-    if raw:
-        return
-    os.environ["RELEASE_GATE_EVIDENCE_PROFILE"] = "pilot_stage_a"
-    logger.warning(
-        "BETA6 authority is enabled but RELEASE_GATE_EVIDENCE_PROFILE is unset; "
-        "defaulting to pilot_stage_a for timeline-window evidence floors."
+        report["reason"] = "disabled"
+        return True, report
+
+    evidence_profile_raw = str(os.getenv("RELEASE_GATE_EVIDENCE_PROFILE", "")).strip().lower()
+    evidence_profile_ok = bool(evidence_profile_raw)
+    _push(
+        "release_gate_evidence_profile_explicit",
+        evidence_profile_ok,
+        {"value": evidence_profile_raw or None},
     )
+    if not evidence_profile_ok:
+        report["reason"] = "release_gate_evidence_profile_missing"
+        return False, report
+
+    signing_key_raw = str(os.getenv("BETA6_GATE_SIGNING_KEY", "")).strip()
+    signing_key_ok = bool(signing_key_raw)
+    _push(
+        "beta6_gate_signing_key_explicit",
+        signing_key_ok,
+        {"configured": signing_key_ok},
+    )
+    if not signing_key_ok:
+        report["reason"] = "beta6_gate_signing_key_missing"
+        return False, report
+
+    postgres_ok, postgres_details = _check_beta6_authority_postgres_preflight()
+    _push("postgres_reachable", postgres_ok, postgres_details)
+    if not postgres_ok:
+        report["reason"] = "postgres_unavailable"
+        return False, report
+
+    report["reason"] = "ok"
+    return True, report
 
 
 def _validate_beta6_training_preflight(elder_id: str, aggregate_files: list[Path]) -> tuple[bool, dict]:
@@ -383,6 +439,13 @@ def _validate_beta6_training_preflight(elder_id: str, aggregate_files: list[Path
         if details:
             entry["details"] = details
         report["checks"].append(entry)
+
+    env_ok, env_report = _validate_beta6_authority_env_preflight()
+    for check in env_report.get("checks", []):
+        report["checks"].append(dict(check))
+    if not env_ok:
+        report["reason"] = str(env_report.get("reason") or "authority_env_preflight_failed")
+        return False, report
 
     # 1) Label policy consistency must pass.
     try:
@@ -1309,17 +1372,20 @@ def _build_beta6_room_gate_report(metric: dict) -> dict:
     return report
 
 
-def _beta6_gate_signing_key() -> str:
+def _beta6_gate_signing_key(*, require_explicit: bool = False) -> str:
     """
     Resolve signing key for Beta 6 gate artifacts.
 
-    Defaults to a deterministic Beta 6 fallback key when env is absent so local,
-    test, and Beta 6 authority runs keep emitting signed artifacts consistently.
-    Strict explicit-secret enforcement is deferred to Beta 6.2.
+    Defaults to a deterministic Beta 6 fallback key only for non-live runs.
+    Live authority runs must provide an explicit signing key.
     """
     raw = os.getenv("BETA6_GATE_SIGNING_KEY")
     if raw and str(raw).strip():
         return str(raw).strip()
+    if require_explicit:
+        raise RuntimeError(
+            "BETA6_GATE_SIGNING_KEY is required for live Beta 6 authority signing (registry_v2 present)"
+        )
     return "beta6-local-dev-signing-key"
 
 
@@ -1825,12 +1891,13 @@ def _apply_beta6_gate_authority(
     phase6_rollout_ladder_report: dict = {"status": "disabled", "reason": "not_evaluated"}
     phase6_auto_rollback_report: dict = {"status": "disabled", "reason": "not_evaluated"}
     artifact_output_dir = _beta6_gate_artifact_output_dir(elder_id, run_id, registry_v2)
+    require_explicit_signing_key = registry_v2 is not None
     try:
         phase4_gate_artifacts = orchestrator.run_phase4_dynamic_gate(
             room_reports=room_reports,
             run_id=run_id,
             elder_id=elder_id,
-            signing_key=_beta6_gate_signing_key(),
+            signing_key=_beta6_gate_signing_key(require_explicit=require_explicit_signing_key),
             output_dir=artifact_output_dir,
         )
     except Exception as exc:
@@ -1907,7 +1974,7 @@ def _apply_beta6_gate_authority(
             room_rows=shadow_compare_rows,
             run_id=run_id,
             elder_id=elder_id,
-            signing_key=_beta6_gate_signing_key(),
+            signing_key=_beta6_gate_signing_key(require_explicit=require_explicit_signing_key),
             output_path=shadow_compare_output_path,
             unexplained_divergence_rate_max=unexplained_divergence_rate_max,
             metadata={

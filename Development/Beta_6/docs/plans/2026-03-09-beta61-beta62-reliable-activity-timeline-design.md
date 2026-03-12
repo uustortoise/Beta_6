@@ -22,6 +22,25 @@ The new lesson is that Beta 6 is no longer mainly blocked by isolated room-model
 3. a correction loop that exists operationally, but is not yet treated as a first-class learning system
 4. duplicated namespace/module surfaces that increase confusion and slow experimentation
 
+## March 12 Jessica pre-final evidence
+
+Fresh reviewed evidence from the Jessica pre-final branch adds a more specific operational picture:
+
+1. candidate `HK0011_jessica_candidate_supportfix_20260310T2312Z` was `GO`
+2. room status was:
+   - `Bathroom = pass`
+   - `Bedroom = conditional`
+   - `Kitchen = pass`
+   - `LivingRoom = pass`
+3. Bedroom is not solved; it remains fail-closed and structurally fragile across valid alternate regimes
+4. Bedroom is operationally acceptable only under explicit safety controls
+5. Bedroom runtime expectations must follow the saved topology:
+   - `Bedroom_v38_two_stage_meta.json` says `runtime_enabled=false`
+   - Bedroom is intentionally single-stage fallback in that candidate
+   - Bedroom should not be assumed to appear in `platform.two_stage_core_models`
+6. LivingRoom remains policy-sensitive
+7. PostgreSQL / historical-corrections availability remains a tracked certification caveat
+
 ## Design Principles
 
 ### 1. Product timeline quality is the top-level objective
@@ -43,6 +62,16 @@ Beta 6.1 should now focus on:
 5. replayable room-policy diagnostics for rooms that remain sensitive to small policy changes
 
 Beta 6.1 should not absorb new modeling risk unless it directly fixes a production blocker.
+
+### 2A. Fragile-room contracts are first-class, not exceptions
+Beta 6.1 should explicitly support rooms that are operationally acceptable but not fully solved.
+
+That means:
+
+1. room status is governed as `pass`, `conditional`, or `block`
+2. `GO` is allowed with `conditional` rooms, but never with any `block`
+3. fragile-room runtime expectations must match saved runtime topology, not stale assumptions
+4. fragile-room safety controls are part of the production contract
 
 ### 3. Beta 6.2 is the correction-reduction track
 Beta 6.2 should be judged by whether it reduces human work while improving timeline quality. That means:
@@ -106,10 +135,11 @@ Make the current good integrated Beta 6 stack production-credible.
    - explicit production-profile run
    - Jessica + follow-on cohort shadow window
 
-5. **Room-policy sensitivity guardrails**
+5. **Fragile-room operational contracts and replay diagnostics**
    - replayable room-level policy sweep workflow before changing defaults
    - evidence pack for low-signal or policy-sensitive rooms such as LivingRoom
-   - no silent default retunes without resident-level replay evidence
+   - grouped-date / lineage fragility evidence for structurally fragile rooms such as Bedroom
+   - no silent default retunes or topology assumptions without saved artifact evidence
 
 ### Beta 6.1 success definition
 
@@ -118,6 +148,9 @@ Make the current good integrated Beta 6 stack production-credible.
 3. stable-day certification can be measured without hidden env assumptions
 4. product/ops views show timeline reliability and correction burden clearly
 5. room-level default changes are backed by replay evidence rather than ad hoc tuning
+6. fragile-room status is explicitly governed as `pass`, `conditional`, or `block`
+7. runtime expectations for fragile rooms match the saved runtime topology
+8. PostgreSQL / historical-corrections availability is tracked as an explicit certification signal
 
 ## Beta 6.2 Design
 
@@ -126,20 +159,35 @@ Maximize model-first timeline performance and minimize manual correction.
 
 ### Main workstreams
 
-1. **Shared `20x14` corpus program**
+1. **Offline governed training-file intake subsystem**
+   - source manifesting
+   - fingerprint / dedupe
+   - user/date tagging
+   - schema / quality checks
+   - per-room / per-date label summaries
+   - auto-approval unless red flags
+   - quarantine with explicit reasons
+
+2. **Shared `20x14` corpus program**
    The corpus is a Beta 6 shared asset with three views:
    - authority shadow cohort
    - unlabeled pretrain corpus
    - labeled high-trust fine-tune/eval corpus
 
-2. **Correction-to-training loop**
+3. **Grouped-regime robustness**
+   - grouped-by-date evaluation
+   - grouped-by-user evaluation
+   - worst-slice selection and gating
+   - fragile-room stability diagnostics
+
+4. **Correction-to-training loop**
    Every accepted correction should become structured training signal:
    - corrected events
    - boundary targets
    - hard negatives
    - residual review packs
 
-3. **Active-learning prioritization**
+5. **Active-learning prioritization**
    Route humans to the highest-yield slices:
    - uncertainty spikes
    - model disagreement
@@ -147,20 +195,20 @@ Maximize model-first timeline performance and minimize manual correction.
    - transition boundaries
    - rare context profiles
 
-4. **Timeline-native learning**
+6. **Timeline-native learning**
    Add event-native targets and heads:
    - onset
    - offset
    - duration
    - continuity
 
-5. **Context-conditioned modeling**
+7. **Context-conditioned modeling**
    Use the highest-value metadata first:
    - layout / adjacency / topology
    - helper / household context
    - demographics only after explicit offline value and fairness review
 
-6. **Learning-efficiency infrastructure**
+8. **Learning-efficiency infrastructure**
    Improve how much learning we get from each run:
    - canonical cached feature/sequence store
    - manifest/policy fingerprinting
@@ -169,7 +217,7 @@ Maximize model-first timeline performance and minimize manual correction.
    - smaller probe experiments before full retrains
    - replayable room-policy sweep harnesses for fast diagnosis
 
-7. **Namespace and SSOT cleanup**
+9. **Namespace and SSOT cleanup**
    Pick authoritative module paths for Beta 6.2 and prevent duplicate shadow implementations from proliferating.
 
 ### Beta 6.2 success definition
@@ -179,28 +227,36 @@ Maximize model-first timeline performance and minimize manual correction.
 3. training/research throughput improves materially
 4. Beta 6.1 outputs remain unchanged when Beta 6.2 flags are off
 5. room-level diagnosis can be done with small replay runs before full retrains
+6. intake can separate auto-approved training files from quarantined files with explicit reasons
+7. worst-date and worst-user fragile-room stability are visible and governable
 
 ## Metrics That Matter
 
 ### Beta 6.1 production metrics
 
 1. room pass rate
-2. run-level authority pass rate
-3. rollback drill success rate
-4. signed artifact completeness
-5. timeline contradiction rate
-6. duration MAE / fragmentation / unknown-rate / abstain-rate
-7. daily correction volume and review backlog
+2. room status mix: `pass`, `conditional`, `block`
+3. `GO` vs `NO-GO` decision consistency with room status
+4. fragile-room topology conformance to saved runtime artifacts
+5. run-level authority pass rate
+6. rollback drill success rate
+7. signed artifact completeness
+8. timeline contradiction rate
+9. duration MAE / fragmentation / unknown-rate / abstain-rate
+10. daily correction volume and review backlog
+11. PostgreSQL / historical-corrections availability state
 
 ### Beta 6.2 learning metrics
 
-1. review minutes required per resident-day
-2. accepted corrections per 100 resident-days
-3. event IoU / onset-offset tolerance / duration error
-4. residual contradiction rate after decoder/arbitration
-5. retrain wall-clock and cost per experiment
-6. sample efficiency from pretraining / active-learning / context conditioning
-7. time-to-diagnose a room-policy regression using replay sweeps
+1. intake auto-approval rate vs quarantine rate
+2. review minutes required per resident-day
+3. accepted corrections per 100 resident-days
+4. event IoU / onset-offset tolerance / duration error
+5. residual contradiction rate after decoder/arbitration
+6. retrain wall-clock and cost per experiment
+7. sample efficiency from pretraining / active-learning / context conditioning
+8. time-to-diagnose a room-policy regression using replay sweeps
+9. worst-date and worst-user fragile-room stability
 
 ## Planning Consequences
 

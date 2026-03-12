@@ -30,3 +30,10 @@
 - Testing:
   - PYTHONDONTWRITEBYTECODE=1 pytest backend/tests/test_run_daily_analysis_beta6_authority.py backend/tests/test_beta6_gate_engine.py backend/tests/test_beta6_timeline_hard_gates.py backend/tests/test_beta6_dynamic_gate_artifacts.py backend/tests/test_beta6_runtime_eval_parity.py backend/tests/test_prediction_beta6_runtime_hook_parity.py backend/tests/test_training.py backend/tests/test_prediction.py -q -> exit 0, 153 passed, 3 warnings in 3.84s
 - Decision: Proceed to one fresh daily analysis run and inspect Bedroom, Entrance, and Kitchen outcomes on live artifacts.
+2026-03-12 04:25:00 UTC | TASK-12 beta61-beta62-doc-refresh | Updated Beta 6.1 / Beta 6.2 source-of-truth planning docs to reflect Jessica pre-final GO evidence, Bedroom conditional fragility and saved-topology runtime caveat, LivingRoom/Bedroom replay diagnostics, governed intake/quarantine, grouped date/user robustness, and certification tracking for PostgreSQL/historical-corrections availability.
+- Documentation:
+  - updated `docs/plans/2026-03-09-beta61-beta62-reliable-activity-timeline-design.md`
+  - updated `docs/plans/2026-03-09-beta61-beta62-reliable-activity-timeline-execution.md`
+- Scope constraints:
+  - docs-only change; no production code modified in this task
+  - preserved unrelated local worktree changes outside the staged planning docs

@@ -662,6 +662,29 @@ def test_timeline_reliability_backlog_uses_confidence_threshold(test_db):
     assert metrics_low.get("review_backlog") == 0
 
 
+def test_timeline_reliability_backlog_ignores_null_confidence_rows(test_db):
+    elder = "OPS_SCORECARD_BACKLOG_NULL_1"
+    room = "livingroom"
+    with test_db.get_connection() as conn:
+        conn.execute("INSERT INTO elders (elder_id, full_name) VALUES (?, ?)", (elder, "Ops Backlog Null"))
+        conn.execute(
+            """
+            INSERT INTO adl_history
+            (elder_id, timestamp, room, activity_type, confidence, is_corrected, record_date, duration_minutes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (elder, "2026-03-07 10:00:00", room, "watch_tv", None, 0, "2026-03-07", 10),
+        )
+        conn.commit()
+
+    metrics = get_timeline_reliability_metrics(
+        elder_id=elder,
+        days=30,
+        confidence_threshold=0.60,
+    )
+    assert metrics.get("review_backlog") == 0
+
+
 def test_ops_service_model_update_monitor_exposes_metric_source_labels(test_db):
     elder = "OPS_MONITOR_1"
     metadata = {

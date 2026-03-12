@@ -431,7 +431,7 @@ def get_timeline_reliability_metrics(
             WHERE elder_id = ?
               AND timestamp >= ?
               AND COALESCE(is_corrected, 0) = 0
-              AND COALESCE(confidence, 0) < ?
+              AND confidence < ?
             """,
             (elder, cutoff_ts, float(confidence_threshold)),
         )

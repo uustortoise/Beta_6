@@ -104,3 +104,14 @@
   - added a dedicated helper test surface plus caller delegation checks
 - Verification:
   - `pytest backend/tests/test_beta6_authority_contract.py backend/tests/test_run_daily_analysis_beta6_authority.py backend/tests/test_health_server.py -q` -> 47 passed, 3 warnings
+2026-03-12 21:19:42 UTC | TASK-17 beta61-scorecards-null-confidence-fix | Fixed the remaining scorecard backlog mismatch so null-confidence ADL rows no longer inflate the manual-review backlog.
+- Code change:
+  - `backend/services/correction_service.py`
+  - `backend/tests/test_ui_services.py`
+- Task outcome:
+  - `review_backlog` now mirrors the manual-review queue predicate for `confidence < threshold` instead of treating missing confidence as zero
+  - added a regression test proving null-confidence ADL rows are excluded from backlog counts
+- Verification:
+  - `pytest backend/tests/test_ui_services.py -q -k "null_confidence_rows or confidence_threshold"` -> 2 passed, 27 deselected, 3 warnings
+  - `pytest backend/tests/test_ui_services.py backend/tests/test_health_server.py -q` -> 52 passed, 39 warnings
+  - `python3 -m py_compile backend/services/correction_service.py backend/services/ops_service.py backend/health_server.py backend/tests/test_ui_services.py backend/tests/test_health_server.py` -> passed

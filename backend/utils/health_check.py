@@ -96,6 +96,47 @@ class HealthChecker:
     def check_postgresql(self) -> ComponentHealth:
         """Check PostgreSQL connectivity (Alias for check_database)."""
         return self.check_database()
+
+    def _env_truthy(self, name: str, default: bool = False) -> bool:
+        raw = os.getenv(name)
+        if raw is None:
+            return bool(default)
+        return str(raw).strip().lower() in {"1", "true", "yes", "y", "on", "enabled"}
+
+    def check_postgresql_preflight(self) -> tuple[bool, Dict[str, Any]]:
+        """
+        Direct PostgreSQL probe used by Beta 6 authority readiness checks.
+        """
+        conn = None
+        pg_db = None
+        try:
+            try:
+                from backend.elderlycare_v1_16.config.settings import USE_POSTGRESQL
+                from backend.db.database import db as dual_write_db
+            except Exception:
+                from elderlycare_v1_16.config.settings import USE_POSTGRESQL
+                from db.database import db as dual_write_db
+
+            if not bool(USE_POSTGRESQL):
+                return False, {"error": "USE_POSTGRESQL=false"}
+
+            pg_db = getattr(dual_write_db, "pg_db", None)
+            if pg_db is None:
+                return False, {"error": "PostgreSQL unavailable or failed to initialize"}
+
+            conn = pg_db.get_raw_connection()
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+            return True, {"status": "ok"}
+        except Exception as e:
+            return False, {"error": f"{type(e).__name__}: {e}"}
+        finally:
+            if pg_db is not None and conn is not None:
+                try:
+                    pg_db.return_connection(conn)
+                except Exception:
+                    pass
     
     def check_models(self) -> ComponentHealth:
         """Check ML models availability."""
@@ -167,14 +208,45 @@ class HealthChecker:
             db_health.status != HealthStatus.UNHEALTHY and
             models_health.status != HealthStatus.UNHEALTHY
         )
-        
+
+        components = {
+            "database": {"status": db_health.status.value, "message": db_health.message},
+            "models": {"status": models_health.status.value, "message": models_health.message},
+        }
+
+        authority_enabled = self._env_truthy("ENABLE_BETA6_AUTHORITY", default=True)
+        if authority_enabled:
+            evidence_profile = str(os.getenv("RELEASE_GATE_EVIDENCE_PROFILE", "")).strip()
+            signing_key = str(os.getenv("BETA6_GATE_SIGNING_KEY", "")).strip()
+            pg_ok, pg_details = self.check_postgresql_preflight()
+            contract_ok = bool(evidence_profile) and bool(signing_key) and bool(pg_ok)
+            ready = ready and contract_ok
+
+            reason_parts = []
+            if not evidence_profile:
+                reason_parts.append("RELEASE_GATE_EVIDENCE_PROFILE missing")
+            if not signing_key:
+                reason_parts.append("BETA6_GATE_SIGNING_KEY missing")
+            if not pg_ok:
+                reason_parts.append(str(pg_details.get("error", "PostgreSQL preflight failed")))
+            components["authority_contract"] = {
+                "status": HealthStatus.HEALTHY.value if contract_ok else HealthStatus.UNHEALTHY.value,
+                "message": "ok" if contract_ok else "; ".join(reason_parts),
+                "enabled": True,
+                "evidence_profile": evidence_profile or None,
+                "postgres": pg_details,
+            }
+        else:
+            components["authority_contract"] = {
+                "status": "disabled",
+                "message": "ENABLE_BETA6_AUTHORITY is disabled",
+                "enabled": False,
+            }
+
         return {
             "ready": ready,
             "timestamp": datetime.now().isoformat(),
-            "components": {
-                "database": {"status": db_health.status.value, "message": db_health.message},
-                "models": {"status": models_health.status.value, "message": models_health.message}
-            }
+            "components": components,
         }
     
     def check_all(self) -> SystemHealth:

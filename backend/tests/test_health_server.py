@@ -11,6 +11,7 @@ from backend.health_server import (
     render_promotion_gate_prometheus_metrics,
     render_walk_forward_prometheus_metrics,
 )
+from backend.utils.health_check import ComponentHealth, HealthChecker, HealthStatus
 
 
 @patch("backend.health_server.load_room_training_dataframe")
@@ -167,6 +168,59 @@ def test_render_walk_forward_prometheus_metrics():
     assert 'beta_walk_forward_rooms_with_drift{elder_id="elder_123"} 1' in text
     assert 'beta_walk_forward_room_macro_f1_mean{elder_id="elder_123",room="bedroom"} 0.72' in text
     assert 'beta_walk_forward_room_drift_detected{elder_id="elder_123",room="bedroom"} 1' in text
+
+
+def test_health_readiness_requires_authority_contract_when_enabled(monkeypatch):
+    checker = HealthChecker(check_postgresql=True)
+    monkeypatch.setenv("ENABLE_BETA6_AUTHORITY", "1")
+    monkeypatch.delenv("RELEASE_GATE_EVIDENCE_PROFILE", raising=False)
+    monkeypatch.delenv("BETA6_GATE_SIGNING_KEY", raising=False)
+    monkeypatch.setattr(
+        checker,
+        "check_database",
+        lambda: ComponentHealth("database", HealthStatus.HEALTHY, "ok", 1.0),
+    )
+    monkeypatch.setattr(
+        checker,
+        "check_models",
+        lambda: ComponentHealth("ml_models", HealthStatus.HEALTHY, "ok", 1.0),
+    )
+    monkeypatch.setattr(
+        checker,
+        "check_postgresql_preflight",
+        lambda: (True, {"status": "ok"}),
+    )
+
+    out = checker.check_readiness()
+    assert out["ready"] is False
+    assert out["components"]["authority_contract"]["status"] == "unhealthy"
+
+
+def test_health_readiness_requires_postgres_when_authority_enabled(monkeypatch):
+    checker = HealthChecker(check_postgresql=True)
+    monkeypatch.setenv("ENABLE_BETA6_AUTHORITY", "yes")
+    monkeypatch.setenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")
+    monkeypatch.setenv("BETA6_GATE_SIGNING_KEY", "live-key")
+    monkeypatch.setattr(
+        checker,
+        "check_database",
+        lambda: ComponentHealth("database", HealthStatus.HEALTHY, "ok", 1.0),
+    )
+    monkeypatch.setattr(
+        checker,
+        "check_models",
+        lambda: ComponentHealth("ml_models", HealthStatus.HEALTHY, "ok", 1.0),
+    )
+    monkeypatch.setattr(
+        checker,
+        "check_postgresql_preflight",
+        lambda: (False, {"error": "connection refused"}),
+    )
+
+    out = checker.check_readiness()
+    assert out["ready"] is False
+    assert out["components"]["authority_contract"]["status"] == "unhealthy"
+    assert "connection refused" in out["components"]["authority_contract"]["message"]
 
 
 def test_read_runtime_fallback_by_room_reads_registry_state(tmp_path, monkeypatch):

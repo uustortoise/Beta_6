@@ -39,8 +39,9 @@ logger = logging.getLogger("DailyAutomation_Beta3")
 # Load Env
 load_dotenv()
 
-from elderlycare_v1_16.config.settings import RAW_DATA_DIR, ARCHIVE_DATA_DIR
+from elderlycare_v1_16.config.settings import RAW_DATA_DIR, ARCHIVE_DATA_DIR, USE_POSTGRESQL
 from config import get_release_gates_config
+from db.database import db as dual_write_db
 from ml.pipeline import UnifiedPipeline
 from ml.release_gates import resolve_scheduled_threshold
 from ml.registry import ModelRegistry
@@ -366,21 +367,29 @@ def _ensure_beta6_authority_evidence_profile_default() -> None:
 
 
 def _check_beta6_authority_postgres_preflight() -> tuple[bool, dict]:
-    try:
-        try:
-            from backend.db.legacy_adapter import LegacyDatabaseAdapter
-        except ImportError:
-            from elderlycare_v1_16.database import db as adapter
-        else:
-            adapter = LegacyDatabaseAdapter()
+    if not bool(USE_POSTGRESQL):
+        return False, {"error": "USE_POSTGRESQL=false"}
 
-        with adapter.get_connection() as conn:
-            cursor = conn.cursor()
+    pg_db = None
+    conn = None
+    try:
+        pg_db = getattr(dual_write_db, "pg_db", None)
+        if pg_db is None:
+            return False, {"error": "PostgreSQL unavailable or failed to initialize"}
+
+        conn = pg_db.get_raw_connection()
+        with conn.cursor() as cursor:
             cursor.execute("SELECT 1")
             cursor.fetchone()
         return True, {"status": "ok"}
     except Exception as exc:
         return False, {"error": f"{type(exc).__name__}: {exc}"}
+    finally:
+        if pg_db is not None and conn is not None:
+            try:
+                pg_db.return_connection(conn)
+            except Exception:
+                pass
 
 
 def _validate_beta6_authority_env_preflight() -> tuple[bool, dict]:

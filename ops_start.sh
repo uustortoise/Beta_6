@@ -82,7 +82,15 @@ ENABLE_BETA6_AUTHORITY="${ENABLE_BETA6_AUTHORITY:-true}"
 RELEASE_GATE_EVIDENCE_PROFILE="${RELEASE_GATE_EVIDENCE_PROFILE:-}"
 BETA6_GATE_SIGNING_KEY="${BETA6_GATE_SIGNING_KEY:-}"
 
-if [ "$ENABLE_BETA6_AUTHORITY" = "true" ]; then
+is_truthy() {
+    local raw="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+    case "$raw" in
+        1|true|yes|y|on|enabled) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+if is_truthy "$ENABLE_BETA6_AUTHORITY"; then
     if [ -z "$RELEASE_GATE_EVIDENCE_PROFILE" ]; then
         echo "ERROR: RELEASE_GATE_EVIDENCE_PROFILE must be set explicitly when ENABLE_BETA6_AUTHORITY=true."
         exit 1

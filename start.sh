@@ -48,7 +48,7 @@ set_env_key() {
 
 require_authority_env_contracts() {
     local authority_enabled="${ENABLE_BETA6_AUTHORITY:-true}"
-    if [ "$authority_enabled" != "true" ]; then
+    if ! is_truthy "$authority_enabled"; then
         return 0
     fi
 
@@ -65,6 +65,14 @@ require_authority_env_contracts() {
     fi
 
     return 0
+}
+
+is_truthy() {
+    local raw="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+    case "$raw" in
+        1|true|yes|y|on|enabled) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
 can_auth_postgres() {

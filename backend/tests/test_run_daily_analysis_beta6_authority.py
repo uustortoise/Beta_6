@@ -388,6 +388,77 @@ def test_beta6_training_preflight_reports_postgres_unavailable(monkeypatch, tmp_
     assert report["checks"][2]["pass"] is False
 
 
+def test_beta6_postgres_preflight_fails_when_postgres_feature_disabled(monkeypatch):
+    monkeypatch.setattr(run_daily_analysis, "USE_POSTGRESQL", False)
+    ok, details = run_daily_analysis._check_beta6_authority_postgres_preflight()
+    assert ok is False
+    assert "USE_POSTGRESQL=false" in str(details.get("error", ""))
+
+
+def test_beta6_postgres_preflight_fails_when_pg_db_missing(monkeypatch):
+    monkeypatch.setattr(run_daily_analysis, "USE_POSTGRESQL", True)
+    monkeypatch.setattr(
+        run_daily_analysis,
+        "dual_write_db",
+        SimpleNamespace(pg_db=None),
+    )
+    ok, details = run_daily_analysis._check_beta6_authority_postgres_preflight()
+    assert ok is False
+    assert "PostgreSQL unavailable" in str(details.get("error", ""))
+
+
+def test_beta6_postgres_preflight_passes_with_direct_pg_connection(monkeypatch):
+    monkeypatch.setattr(run_daily_analysis, "USE_POSTGRESQL", True)
+
+    class _Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, query):
+            self.query = query
+
+        def fetchone(self):
+            return (1,)
+
+    class _Conn:
+        def cursor(self):
+            return _Cursor()
+
+    returned = {"called": False}
+
+    class _Pg:
+        def get_raw_connection(self):
+            return _Conn()
+
+        def return_connection(self, conn):  # noqa: ARG002
+            returned["called"] = True
+
+    monkeypatch.setattr(run_daily_analysis, "dual_write_db", SimpleNamespace(pg_db=_Pg()))
+    ok, details = run_daily_analysis._check_beta6_authority_postgres_preflight()
+    assert ok is True
+    assert details.get("status") == "ok"
+    assert returned["called"] is True
+
+
+def test_beta6_postgres_preflight_reports_connection_errors(monkeypatch):
+    monkeypatch.setattr(run_daily_analysis, "USE_POSTGRESQL", True)
+
+    class _BoomPg:
+        def get_raw_connection(self):
+            raise RuntimeError("pg connect failed")
+
+        def return_connection(self, conn):  # noqa: ARG002
+            return None
+
+    monkeypatch.setattr(run_daily_analysis, "dual_write_db", SimpleNamespace(pg_db=_BoomPg()))
+    ok, details = run_daily_analysis._check_beta6_authority_postgres_preflight()
+    assert ok is False
+    assert "RuntimeError" in str(details.get("error", ""))
+
+
 def test_beta6_authority_live_run_persists_phase4_artifacts(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("run_daily_analysis._is_beta6_authority_enabled", lambda: True)
     monkeypatch.setenv("BETA6_GATE_SIGNING_KEY", "test-live-key")

@@ -74,3 +74,19 @@
 - Verification:
   - `PYTHONPATH=backend python3 -m pytest backend/tests/test_ui_services.py backend/tests/test_health_server.py -q` -> 45 passed, 39 warnings
   - `python3 -m py_compile backend/services/correction_service.py backend/services/ops_service.py backend/health_server.py backend/app/pages/1_correction_studio.py backend/app/pages/4_ops_dashboard.py backend/export_dashboard.py backend/tests/test_ui_services.py backend/tests/test_health_server.py` -> passed
+2026-03-12 20:33:50 UTC | TASK-15 beta61-authority-postgres-truthy-fix | Closed review findings on false-green PostgreSQL preflight, readiness gating, and shell/Python truthy mismatch.
+- Code change:
+  - `backend/run_daily_analysis.py`
+  - `backend/utils/health_check.py`
+  - `start.sh`
+  - `ops_start.sh`
+  - `backend/tests/test_run_daily_analysis_beta6_authority.py`
+  - `backend/tests/test_health_server.py`
+- Task outcome:
+  - authority preflight now probes PostgreSQL directly via `db.database.db.pg_db` and fails closed when `USE_POSTGRESQL=false`, PG init fails, or direct connect/query fails
+  - `/health/ready` now includes `authority_contract` and blocks readiness when authority is enabled but evidence/signing/PG preflight are missing
+  - startup shell gating now uses the same broad truthy semantics as Python (`1/true/yes/y/on/enabled`)
+- Verification:
+  - `PYTHONPATH=backend python3 -m pytest backend/tests/test_run_daily_analysis_beta6_authority.py backend/tests/test_health_server.py -q -k "postgres_preflight or authority_contract or readiness_requires_postgres"` -> 6 passed
+  - `PYTHONPATH=backend python3 -m pytest backend/tests/test_run_daily_analysis_beta6_authority.py backend/tests/test_run_daily_analysis_thresholds.py backend/tests/test_health_server.py -q` -> 86 passed, 3 warnings
+  - `bash -n start.sh && bash -n ops_start.sh` -> passed

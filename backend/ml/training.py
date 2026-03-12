@@ -13,6 +13,7 @@ import uuid
 import copy
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Dict, List, Tuple, Any, Optional, Mapping, Sequence
 
 # Import adapter
@@ -2826,11 +2827,15 @@ class TrainingPipeline:
         }
         try:
             models_dir = self.registry.get_models_dir(elder_id)
-            candidate_paths = [
-                models_dir / f"{room_name}_v{int(saved_version)}_two_stage_meta.json",
-                models_dir / f"{room_name}_two_stage_meta.json",
-            ]
-            meta_path = next((path for path in candidate_paths if path.exists()), None)
+            versioned_meta_path = models_dir / f"{room_name}_v{int(saved_version)}_two_stage_meta.json"
+            latest_meta_path = models_dir / f"{room_name}_two_stage_meta.json"
+            meta_path: Optional[Path] = None
+            source = "saved_two_stage_meta"
+            if versioned_meta_path.exists():
+                meta_path = versioned_meta_path
+            elif latest_meta_path.exists():
+                meta_path = latest_meta_path
+                source = "saved_two_stage_meta_latest_alias"
             if meta_path is None:
                 return expectation
 
@@ -2838,6 +2843,21 @@ class TrainingPipeline:
             if str(payload.get("schema_version", "")).strip() != "beta6.two_stage_core.v1":
                 expectation["source"] = "invalid_two_stage_meta_schema"
                 return expectation
+
+            if meta_path == latest_meta_path:
+                try:
+                    payload_saved_version = int(payload.get("saved_version", 0) or 0)
+                except (TypeError, ValueError):
+                    payload_saved_version = 0
+                if int(payload_saved_version) != int(saved_version):
+                    expectation.update(
+                        {
+                            "source": "stale_latest_two_stage_meta",
+                            "meta_path": str(meta_path),
+                            "stale_saved_version": int(payload_saved_version),
+                        }
+                    )
+                    return expectation
 
             expected_runtime_mode = (
                 "two_stage"
@@ -2849,7 +2869,7 @@ class TrainingPipeline:
                     "expected_runtime_mode": expected_runtime_mode,
                     "actual_runtime_mode": actual_runtime_mode,
                     "matches": expected_runtime_mode == actual_runtime_mode,
-                    "source": "saved_two_stage_meta",
+                    "source": source,
                     "meta_path": str(meta_path),
                 }
             )
@@ -3989,6 +4009,8 @@ class TrainingPipeline:
             "room": str(room_name),
             "saved_version": int(saved_version),
             "gate_mode": str(two_stage_result.get("gate_mode") or self._resolve_two_stage_gate_mode()),
+            "runtime_enabled": bool(two_stage_result.get("runtime_enabled", True)),
+            "runtime_gate_source": str(two_stage_result.get("runtime_gate_source") or ""),
             "stage_b_enabled": bool(stage_b_enabled),
             "stage_b_reason": str(two_stage_result.get("stage_b_reason") or ""),
             "stage_a_occupied_threshold": float(

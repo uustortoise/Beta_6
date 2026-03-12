@@ -1,5 +1,6 @@
 
 import unittest
+import json
 import numpy as np
 import pandas as pd
 import os
@@ -584,6 +585,60 @@ class TestTrainingPipeline(unittest.TestCase):
             self.assertEqual(topology["actual_runtime_mode"], "two_stage")
             self.assertFalse(bool(topology["matches"]))
             self.assertEqual(topology["source"], "saved_two_stage_meta")
+
+    def test_write_two_stage_core_artifacts_persists_runtime_enabled_flag(self):
+        with TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            self.mock_registry.get_models_dir.return_value = models_dir
+
+            stage_a_model = MagicMock()
+            stage_a_model.save.side_effect = lambda path: Path(path).write_text("stage_a", encoding="utf-8")
+
+            artifact_paths = self.pipeline._write_two_stage_core_artifacts(
+                elder_id="HK0011_jessica",
+                room_name="Bedroom",
+                saved_version=38,
+                two_stage_result={
+                    "enabled": True,
+                    "stage_a_model": stage_a_model,
+                    "stage_b_model": None,
+                    "stage_b_enabled": False,
+                    "runtime_enabled": False,
+                    "num_classes": 2,
+                    "excluded_class_ids": [0],
+                    "occupied_class_ids": [1],
+                    "primary_occupied_class_id": 1,
+                    "class_profile": {"classes": ["unoccupied", "sleep"]},
+                },
+                promote_to_latest=False,
+            )
+
+            payload = json.loads(Path(artifact_paths["meta_versioned"]).read_text(encoding="utf-8"))
+            self.assertIn("runtime_enabled", payload)
+            self.assertFalse(bool(payload["runtime_enabled"]))
+
+    def test_runtime_topology_expectation_ignores_stale_latest_two_stage_meta_alias(self):
+        with TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            self.mock_registry.get_models_dir.return_value = models_dir
+
+            latest_meta = models_dir / "Bedroom_two_stage_meta.json"
+            latest_meta.write_text(
+                '{"schema_version":"beta6.two_stage_core.v1","saved_version":37,"runtime_enabled":true}',
+                encoding="utf-8",
+            )
+
+            topology = self.pipeline._resolve_room_runtime_topology_expectation(
+                elder_id="HK0011_jessica",
+                room_name="Bedroom",
+                saved_version=38,
+                runtime_use_two_stage=False,
+            )
+
+            self.assertEqual(topology["source"], "stale_latest_two_stage_meta")
+            self.assertEqual(topology["expected_runtime_mode"], "single_stage")
+            self.assertTrue(bool(topology["matches"]))
+            self.assertEqual(int(topology["stale_saved_version"]), 37)
 
     @patch('ml.training.TrainingPipeline.augment_training_data')
     @patch('ml.training.build_transformer_model')

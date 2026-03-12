@@ -1,8 +1,13 @@
 import json
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 from ml.room_experiments import build_room_diagnostic_report
-from scripts.run_room_experiments import _build_manifest_payload
+from scripts.run_room_experiments import (
+    _build_manifest_payload,
+    _resolve_profile_typed_policy_values,
+)
 
 
 def test_livingroom_replay_candidate_is_traceable_to_typed_policy_fields():
@@ -70,3 +75,13 @@ def test_bedroom_grouped_date_fragility_is_persisted_in_review_surface(tmp_path:
 
     assert reloaded["report"]["fragility"]["grouped_by_date"]["worst_slice"] == "2026-03-07"
     assert reloaded["report"]["fragility"]["lineage"]["candidate_version"] == 29
+
+
+def test_profile_env_overrides_are_applied_to_typed_policy_values():
+    profile = {
+        "typed_policy_fields": ["two_stage_core.gate_mode"],
+        "env_overrides": {"TWO_STAGE_CORE_GATE_MODE": "shadow"},
+    }
+    with patch.dict(os.environ, {"TWO_STAGE_CORE_GATE_MODE": "primary"}, clear=False):
+        typed_values = _resolve_profile_typed_policy_values(profile)
+    assert typed_values["two_stage_core.gate_mode"] == "shadow"

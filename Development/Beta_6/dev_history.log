@@ -134,3 +134,18 @@
   - added replay diagnostics module/script that emits typed-policy-traceable report payloads and carries grouped fragility context
 - Verification:
   - `PYTHONPATH=backend pytest backend/tests/test_training.py backend/tests/test_run_room_experiments.py backend/tests/test_policy_config.py -q` -> 123 passed, 3 warnings
+2026-03-12 23:40:01 UTC | TASK-19 beta61-fragile-room-review-fixes | Closed review findings on runtime topology serialization, stale alias topology reads, and replay override traceability.
+- Code change:
+  - `backend/ml/training.py`
+  - `backend/scripts/run_room_experiments.py`
+  - `backend/tests/test_training.py`
+  - `backend/tests/test_run_room_experiments.py`
+- Task outcome:
+  - `_write_two_stage_core_artifacts` now persists `runtime_enabled` and `runtime_gate_source` in `*_two_stage_meta.json`
+  - `_resolve_room_runtime_topology_expectation` now rejects stale latest alias metadata when `saved_version` does not match current candidate
+  - replay CLI now applies profile `env_overrides` to the policy used for typed-policy value resolution before building manifest output
+  - added regression tests for all three review findings (writer/reader integration, stale alias guard, override application)
+- Verification:
+  - `PYTHONPATH=backend pytest backend/tests/test_training.py backend/tests/test_run_room_experiments.py -q -k "runtime_enabled_flag or stale_latest_two_stage_meta_alias or profile_env_overrides_are_applied_to_typed_policy_values or livingroom_replay_candidate_is_traceable_to_typed_policy_fields or bedroom_grouped_date_fragility"` -> 6 passed
+  - `PYTHONPATH=backend pytest backend/tests/test_training.py backend/tests/test_run_room_experiments.py backend/tests/test_policy_config.py -q` -> 126 passed, 3 warnings
+  - `python3 -m py_compile backend/ml/training.py backend/scripts/run_room_experiments.py backend/tests/test_training.py backend/tests/test_run_room_experiments.py` -> passed

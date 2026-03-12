@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -49,6 +50,22 @@ def _build_manifest_payload(
     }
 
 
+def _resolve_profile_typed_policy_values(profile: Mapping[str, Any]) -> dict[str, Any]:
+    resolved_env = dict(os.environ)
+    env_overrides = _as_mapping(profile.get("env_overrides"))
+    for key, value in env_overrides.items():
+        token = str(key).strip()
+        if token:
+            resolved_env[token] = str(value).strip()
+    policy = load_policy_from_env(resolved_env)
+    typed_fields = [
+        str(field).strip()
+        for field in profile.get("typed_policy_fields", [])
+        if str(field).strip()
+    ]
+    return resolve_typed_policy_values(policy=policy, typed_policy_fields=typed_fields)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run room replay diagnostics")
     parser.add_argument("--room", required=True, help="Room name (e.g. Bedroom)")
@@ -74,12 +91,7 @@ def main() -> int:
             f"Profile room mismatch: profile={profile.get('room')} requested={room}"
         )
 
-    typed_fields = [
-        str(field).strip()
-        for field in profile.get("typed_policy_fields", [])
-        if str(field).strip()
-    ]
-    typed_values = resolve_typed_policy_values(policy=policy, typed_policy_fields=typed_fields)
+    typed_values = _resolve_profile_typed_policy_values(profile)
     grouped_fragility = _parse_grouped_fragility(args.grouped_fragility)
     report = build_room_diagnostic_report(
         room_name=room,
@@ -102,4 +114,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

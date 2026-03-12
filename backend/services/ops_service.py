@@ -24,6 +24,7 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 from health_server import build_ml_snapshot_report
+from services.correction_service import get_timeline_reliability_metrics
 from services.db_utils import coerce_bool, get_dashboard_connection, parse_json_object, query_df
 from utils.elder_id_utils import apply_canonical_alias_map, parse_elder_id_from_filename
 
@@ -644,6 +645,62 @@ def get_model_status(elder_id: str) -> dict:
     except Exception as e:
         logger.error(f"Failed to fetch model status for {elder_id}: {e}")
         return {"status": {"overall": "error", "reason": str(e)}}
+
+
+def get_timeline_reliability_scorecard(
+    elder_id: str,
+    days: int = 30,
+    confidence_threshold: float = 0.60,
+) -> dict:
+    """
+    Product-facing scorecard for timeline reliability and correction load.
+    """
+    elder = str(elder_id or "").strip()
+    if not elder or elder == "All":
+        return {
+            "days": int(days),
+            "correction_volume": 0,
+            "review_backlog": 0,
+            "prediction_blocks": 0,
+            "review_needed_blocks": 0,
+            "manual_review_rate": None,
+            "unknown_abstain_rate": None,
+            "contradiction_rate": None,
+            "fragmentation_rate": None,
+            "unknown_abstain_trend": [],
+            "authority_state": "not_available",
+            "policy_sensitive_rooms": [],
+            "active_system": str(os.getenv("ACTIVE_SYSTEM", "beta6")).strip() or "beta6",
+        }
+
+    metrics = get_timeline_reliability_metrics(
+        elder_id=elder,
+        days=int(days),
+        confidence_threshold=float(confidence_threshold),
+    )
+
+    model_status = get_model_status(elder)
+    status_obj = model_status.get("status", {}) if isinstance(model_status, dict) else {}
+    authority_state = str(status_obj.get("overall", "not_available") or "not_available")
+    policy_sensitive_rooms: list[str] = []
+    rooms = model_status.get("rooms", []) if isinstance(model_status, dict) else []
+    for row in rooms if isinstance(rooms, list) else []:
+        if not isinstance(row, dict):
+            continue
+        room_status = str(row.get("status", "") or "").strip().lower()
+        if room_status not in {"watch", "action_needed"}:
+            continue
+        room_name = _normalize_room_key(str(row.get("room", "") or ""))
+        if room_name:
+            policy_sensitive_rooms.append(room_name)
+
+    metrics["authority_state"] = authority_state
+    metrics["policy_sensitive_rooms"] = sorted(set(policy_sensitive_rooms))
+    metrics["active_system"] = str(os.getenv("ACTIVE_SYSTEM", "beta6")).strip() or "beta6"
+    metrics["evidence_profile"] = (
+        str(os.getenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")).strip() or "production"
+    )
+    return metrics
 
 
 def get_sample_collection_status(elder_id: str) -> dict:

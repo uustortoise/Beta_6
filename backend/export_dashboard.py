@@ -2137,6 +2137,54 @@ def fetch_promotion_gate_monitor(elder_id: str, days: int = 30, limit: int = 60)
     }
 
 
+@st.cache_data(ttl=60)
+def fetch_timeline_reliability_scorecard(
+    elder_id: str,
+    days: int = 30,
+    confidence_threshold: float = 0.60,
+) -> dict:
+    """Fetch timeline reliability/correction-load scorecard from ops service."""
+    try:
+        from services.ops_service import get_timeline_reliability_scorecard
+    except Exception as e:
+        logger.error(f"Failed to import get_timeline_reliability_scorecard: {e}")
+        return {
+            "days": int(days),
+            "correction_volume": 0,
+            "review_backlog": 0,
+            "manual_review_rate": None,
+            "unknown_abstain_rate": None,
+            "contradiction_rate": None,
+            "fragmentation_rate": None,
+            "authority_state": "unknown",
+            "policy_sensitive_rooms": [],
+            "active_system": "beta6",
+            "error": str(e),
+        }
+
+    try:
+        return get_timeline_reliability_scorecard(
+            elder_id=elder_id,
+            days=int(days),
+            confidence_threshold=float(confidence_threshold),
+        )
+    except Exception as e:
+        logger.error(f"Failed to fetch timeline reliability scorecard for {elder_id}: {e}")
+        return {
+            "days": int(days),
+            "correction_volume": 0,
+            "review_backlog": 0,
+            "manual_review_rate": None,
+            "unknown_abstain_rate": None,
+            "contradiction_rate": None,
+            "fragmentation_rate": None,
+            "authority_state": "unknown",
+            "policy_sensitive_rooms": [],
+            "active_system": "beta6",
+            "error": str(e),
+        }
+
+
 @st.cache_data(ttl=300)
 def build_walk_forward_dataset(elder_id: str, room_name: str, lookback_days: int = 90):
     """
@@ -4685,6 +4733,30 @@ with tab3:
             p2.metric("Latest Change", latest_delta_text)
             p3.metric("Most Common Blocker", top_reason)
             p4.metric("Blocked Runs", blocked_runs)
+
+            timeline_scorecard = fetch_timeline_reliability_scorecard(
+                elder_id=selected_health_resident,
+                days=int(monitor_days),
+                confidence_threshold=0.60,
+            )
+            ts1, ts2, ts3, ts4 = st.columns(4)
+            ts1.metric("Corrections (Window)", int(timeline_scorecard.get("correction_volume", 0) or 0))
+            ts2.metric("Review Backlog", int(timeline_scorecard.get("review_backlog", 0) or 0))
+            manual_rate = timeline_scorecard.get("manual_review_rate")
+            ts3.metric(
+                "Manual Review Rate",
+                f"{float(manual_rate) * 100:.1f}%" if manual_rate is not None else "N/A",
+            )
+            unk_rate = timeline_scorecard.get("unknown_abstain_rate")
+            ts4.metric(
+                "Unknown/Abstain Rate",
+                f"{float(unk_rate) * 100:.1f}%" if unk_rate is not None else "N/A",
+            )
+            st.caption(
+                f"Authority state: {str(timeline_scorecard.get('authority_state', 'unknown')).replace('_', ' ').title()} | "
+                f"Active system: {timeline_scorecard.get('active_system', 'beta6')} | "
+                f"Policy-sensitive rooms: {', '.join(timeline_scorecard.get('policy_sensitive_rooms', [])) or 'none'}"
+            )
 
             latest_run = monitor.get("latest_run") or {}
             if latest_run:

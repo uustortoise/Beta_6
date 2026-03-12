@@ -387,9 +387,72 @@ def render():
                         acc_chart = acc_chart.properties(height=260)
                         st.altair_chart(acc_chart.interactive(), use_container_width=True)
 
-    # 4. Hard Negatives
     st.markdown("---")
-    st.subheader("Section D: Active Learning Queue")
+    st.subheader("Section D: Timeline Reliability & Correction Load")
+    with st.spinner("Computing timeline reliability scorecard..."):
+        scorecard = ops_service.get_timeline_reliability_scorecard(
+            elder_id=elder_id,
+            days=30,
+            confidence_threshold=0.60,
+        )
+
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("Corrections (30d)", int(scorecard.get("correction_volume", 0) or 0))
+    d2.metric("Review Backlog", int(scorecard.get("review_backlog", 0) or 0))
+    contradiction_rate = scorecard.get("contradiction_rate")
+    d3.metric(
+        "Contradiction Rate",
+        f"{float(contradiction_rate) * 100:.1f}%" if contradiction_rate is not None else "N/A",
+    )
+    fragmentation_rate = scorecard.get("fragmentation_rate")
+    d4.metric(
+        "Fragmentation Rate",
+        f"{float(fragmentation_rate) * 100:.1f}%" if fragmentation_rate is not None else "N/A",
+    )
+
+    e1, e2, e3 = st.columns(3)
+    manual_review_rate = scorecard.get("manual_review_rate")
+    unknown_rate = scorecard.get("unknown_abstain_rate")
+    e1.metric(
+        "Manual Review Rate",
+        f"{float(manual_review_rate) * 100:.1f}%" if manual_review_rate is not None else "N/A",
+    )
+    e2.metric(
+        "Unknown / Abstain Rate",
+        f"{float(unknown_rate) * 100:.1f}%" if unknown_rate is not None else "N/A",
+    )
+    e3.metric("Authority State", str(scorecard.get("authority_state", "unknown")).replace("_", " ").title())
+    st.caption(
+        f"Active system: {scorecard.get('active_system', 'beta6')} | "
+        f"Policy-sensitive rooms: {', '.join(scorecard.get('policy_sensitive_rooms', [])) or 'none'}"
+    )
+
+    trend_rows = scorecard.get("unknown_abstain_trend", [])
+    if isinstance(trend_rows, list) and trend_rows:
+        trend_df = pd.DataFrame(trend_rows)
+        trend_df["day"] = pd.to_datetime(trend_df["day"], errors="coerce")
+        trend_df = trend_df.dropna(subset=["day"])
+        if not trend_df.empty:
+            trend_chart = (
+                alt.Chart(trend_df.sort_values("day"))
+                .mark_line(point=True)
+                .encode(
+                    x=alt.X("day:T", title="Date"),
+                    y=alt.Y("unknown_abstain_rate:Q", title="Unknown / Abstain Rate"),
+                    tooltip=[
+                        alt.Tooltip("day:T", title="Date"),
+                        alt.Tooltip("prediction_blocks:Q", title="Prediction Blocks"),
+                        alt.Tooltip("unknown_abstain_blocks:Q", title="Unknown / Abstain Blocks"),
+                        alt.Tooltip("unknown_abstain_rate:Q", title="Rate", format=".2%"),
+                    ],
+                )
+                .properties(height=220)
+            )
+            st.altair_chart(trend_chart, use_container_width=True)
+
+    # 5. Hard Negatives
+    st.markdown("---")
+    st.subheader("Section E: Active Learning Queue")
     with st.spinner("Fetching queue..."):
         hn_sum = ops_service.get_hard_negative_summary(elder_id)
         

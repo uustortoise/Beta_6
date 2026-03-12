@@ -616,6 +616,7 @@ def render():
     )
     training_compare_df = compare_payload.get("training_timeline", pd.DataFrame())
     prediction_compare_df = compare_payload.get("prediction_timeline", pd.DataFrame())
+    compare_summary = compare_payload.get("summary", {}) if isinstance(compare_payload, dict) else {}
 
     st.markdown("---")
     st.subheader("Compare Timelines")
@@ -635,10 +636,15 @@ def render():
         st.info("No raw prediction rows found for this resident, room, and day.")
     else:
         review_blocks = prediction_compare_df[prediction_compare_df["review_reason"] != "clear"].copy()
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("Training Blocks", int(len(training_compare_df.index)) if training_compare_df is not None else 0)
         c2.metric("Prediction Blocks", int(len(prediction_compare_df.index)))
         c3.metric("Review Needed", int(len(review_blocks.index)))
+        manual_review_rate = compare_summary.get("manual_review_rate")
+        c4.metric(
+            "Manual Review Rate",
+            f"{float(manual_review_rate) * 100:.1f}%" if manual_review_rate is not None else "N/A",
+        )
         _render_prediction_compare_chart(
             prediction_compare_df,
             title=f"Prediction / Runtime Timeline — {selected_room} — {selected_date}",

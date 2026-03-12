@@ -54,10 +54,27 @@ try:
     from backend.utils.health_check import HealthChecker
     from backend.utils.data_loader import load_sensor_data
     from backend.utils.room_utils import normalize_room_name
+    from backend.services.correction_service import get_timeline_reliability_metrics
 except Exception:
     from utils.health_check import HealthChecker
     from utils.data_loader import load_sensor_data
     from utils.room_utils import normalize_room_name
+    try:
+        from services.correction_service import get_timeline_reliability_metrics
+    except Exception:  # pragma: no cover - defensive fallback for health startup
+        def get_timeline_reliability_metrics(elder_id: str, days: int = 30, confidence_threshold: float = 0.60) -> dict:
+            return {
+                "days": int(days),
+                "correction_volume": 0,
+                "review_backlog": 0,
+                "prediction_blocks": 0,
+                "review_needed_blocks": 0,
+                "manual_review_rate": None,
+                "unknown_abstain_rate": None,
+                "contradiction_rate": None,
+                "fragmentation_rate": None,
+                "unknown_abstain_trend": [],
+            }
 try:
     from ml.beta6.registry.registry_v2 import RegistryV2
 except Exception:  # pragma: no cover - optional runtime dependency in health checks
@@ -991,6 +1008,18 @@ def build_ml_snapshot_report(
 
     generated_at = _utc_iso(pd.Timestamp.utcnow())
     if not rows:
+        try:
+            timeline_reliability = get_timeline_reliability_metrics(
+                elder_id=elder_id,
+                days=30,
+                confidence_threshold=0.60,
+            )
+        except Exception:
+            timeline_reliability = {}
+        timeline_reliability = timeline_reliability if isinstance(timeline_reliability, dict) else {}
+        timeline_reliability["authority_state"] = "not_available"
+        timeline_reliability["policy_sensitive_rooms"] = []
+        timeline_reliability["active_system"] = str(os.getenv("ACTIVE_SYSTEM", "beta6")).strip() or "beta6"
         return {
             "elder_id": elder_id,
             "generated_at": generated_at,
@@ -1013,6 +1042,7 @@ def build_ml_snapshot_report(
                 "lookback_days": None,
             },
             "rooms": [],
+            "timeline_reliability": timeline_reliability,
             "raw": [] if include_raw else None,
         }, 200
 
@@ -1376,6 +1406,26 @@ def build_ml_snapshot_report(
         cleaned.pop("status_reason_code", None)
         normalized_rooms.append(cleaned)
 
+    try:
+        timeline_reliability = get_timeline_reliability_metrics(
+            elder_id=elder_id,
+            days=30,
+            confidence_threshold=0.60,
+        )
+    except Exception:
+        timeline_reliability = {}
+    timeline_reliability = timeline_reliability if isinstance(timeline_reliability, dict) else {}
+    timeline_reliability["authority_state"] = overall_status
+    timeline_reliability["policy_sensitive_rooms"] = sorted(
+        {
+            str(item.get("room", "") or "")
+            for item in normalized_rooms
+            if str(item.get("status", "") or "").strip().lower() in {"watch", "action_needed"}
+            and str(item.get("room", "") or "").strip()
+        }
+    )
+    timeline_reliability["active_system"] = str(os.getenv("ACTIVE_SYSTEM", "beta6")).strip() or "beta6"
+
     return {
         "elder_id": elder_id,
         "generated_at": generated_at,
@@ -1393,6 +1443,7 @@ def build_ml_snapshot_report(
             "lookback_days": _safe_int(latest_wf_config.get("lookback_days")),
         },
         "rooms": normalized_rooms,
+        "timeline_reliability": timeline_reliability,
         "raw": raw_items if include_raw else None,
     }, 200
 

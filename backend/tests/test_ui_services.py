@@ -492,6 +492,134 @@ def test_correction_service_build_compare_timeline_payload_marks_review_states(t
     assert second["training_activity_type"] == "watch_tv"
 
 
+def test_review_ui_exposes_manual_review_rate_in_compare_payload(test_db):
+    elder = "COMPARE002"
+    room = "bedroom"
+    record_day = date(2026, 3, 7)
+
+    with test_db.get_connection() as conn:
+        conn.execute("INSERT INTO elders (elder_id, full_name) VALUES (?, ?)", (elder, "Compare Timeline 2"))
+        conn.execute(
+            """
+            INSERT INTO adl_history
+            (elder_id, timestamp, room, activity_type, confidence, is_corrected, record_date, duration_minutes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (elder, "2026-03-07 09:00:00", room, "sleep", 1.0, 1, "2026-03-07", 10),
+        )
+        conn.execute(
+            """
+            INSERT INTO predictions
+            (resident_id, timestamp, room, activity, confidence, is_anomaly)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (elder, "2026-03-07 09:00:00", room, "unknown", 0.22, 0),
+        )
+        conn.execute(
+            """
+            INSERT INTO predictions
+            (resident_id, timestamp, room, activity, confidence, is_anomaly)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (elder, "2026-03-07 09:10:00", room, "sleep", 0.93, 0),
+        )
+        conn.commit()
+
+    payload = build_compare_timeline_payload(elder, room, record_day, confidence_threshold=0.60)
+    summary = payload.get("summary", {})
+    assert summary.get("prediction_blocks") == 2
+    assert summary.get("review_needed_blocks") == 1
+    assert summary.get("manual_review_rate") == pytest.approx(0.5)
+
+
+def test_ops_scorecard_includes_correction_volume_and_backlog(test_db, monkeypatch):
+    elder = "OPS_SCORECARD_1"
+    room = "livingroom"
+    monkeypatch.setattr(
+        ops_service,
+        "get_model_status",
+        lambda _elder: {
+            "status": {"overall": "watch"},
+            "rooms": [
+                {"room": "bedroom", "status": "watch"},
+                {"room": "kitchen", "status": "healthy"},
+            ],
+        },
+    )
+
+    with test_db.get_connection() as conn:
+        conn.execute("INSERT INTO elders (elder_id, full_name) VALUES (?, ?)", (elder, "Ops Scorecard"))
+        conn.execute(
+            """
+            INSERT INTO correction_history
+            (elder_id, room, timestamp_start, timestamp_end, old_activity, new_activity, rows_affected, corrected_by, corrected_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                elder,
+                room,
+                "2026-03-07 09:00:00",
+                "2026-03-07 09:10:00",
+                "unknown",
+                "watch_tv",
+                1,
+                "tester",
+                "2026-03-07 12:00:00",
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO adl_history
+            (elder_id, timestamp, room, activity_type, confidence, is_corrected, record_date, duration_minutes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (elder, "2026-03-07 09:00:00", room, "watch_tv", 1.0, 1, "2026-03-07", 10),
+        )
+        conn.execute(
+            """
+            INSERT INTO adl_history
+            (elder_id, timestamp, room, activity_type, confidence, is_corrected, record_date, duration_minutes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (elder, "2026-03-07 10:00:00", room, "low_confidence", 0.21, 0, "2026-03-07", 10),
+        )
+        conn.execute(
+            """
+            INSERT INTO predictions
+            (resident_id, timestamp, room, activity, confidence, is_anomaly)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (elder, "2026-03-07 09:00:00", room, "nap", 0.31, 0),
+        )
+        conn.execute(
+            """
+            INSERT INTO predictions
+            (resident_id, timestamp, room, activity, confidence, is_anomaly)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (elder, "2026-03-07 09:10:00", room, "unknown", 0.20, 0),
+        )
+        conn.execute(
+            """
+            INSERT INTO predictions
+            (resident_id, timestamp, room, activity, confidence, is_anomaly)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (elder, "2026-03-07 09:20:00", room, "watch_tv", 0.95, 0),
+        )
+        conn.commit()
+
+    scorecard = ops_service.get_timeline_reliability_scorecard(elder_id=elder, days=30, confidence_threshold=0.60)
+    assert scorecard.get("correction_volume") == 1
+    assert scorecard.get("review_backlog") >= 1
+    assert scorecard.get("manual_review_rate") is not None
+    assert scorecard.get("unknown_abstain_rate") is not None
+    assert scorecard.get("contradiction_rate") is not None
+    assert scorecard.get("fragmentation_rate") is not None
+    assert scorecard.get("authority_state") == "watch"
+    assert "bedroom" in scorecard.get("policy_sensitive_rooms", [])
+
+
 def test_ops_service_model_update_monitor_exposes_metric_source_labels(test_db):
     elder = "OPS_MONITOR_1"
     metadata = {

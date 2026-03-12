@@ -55,3 +55,22 @@
   - `pytest backend/tests/test_run_daily_analysis_beta6_authority.py backend/tests/test_run_daily_analysis_thresholds.py -q` -> 62 passed, 3 warnings
   - `pytest backend/tests/test_beta6_registry_v2.py backend/tests/test_t80_rollout.py backend/tests/test_beta6_serving_loader.py -q` -> 55 passed, 3 warnings
   - `bash -n start.sh && bash -n ops_start.sh` -> passed
+2026-03-12 20:24:46 UTC | TASK-14 beta61-scorecards | Implemented timeline reliability and correction-load scorecards for Ops/health/review surfaces.
+- Code change:
+  - `backend/services/correction_service.py`
+  - `backend/services/ops_service.py`
+  - `backend/health_server.py`
+  - `backend/app/pages/1_correction_studio.py`
+  - `backend/app/pages/4_ops_dashboard.py`
+  - `backend/export_dashboard.py`
+  - `backend/tests/test_ui_services.py`
+  - `backend/tests/test_health_server.py`
+- Task outcome:
+  - compare payload now returns summary counts and manual-review rate for UI display
+  - added reusable timeline reliability metrics (correction volume, backlog, contradiction, fragmentation, unknown/abstain, trend)
+  - published ops scorecard API with authority state, active-system marker, and policy-sensitive room list
+  - health snapshot now includes `timeline_reliability` block
+  - Ops Dashboard and Correction Studio now surface manual-review and reliability indicators
+- Verification:
+  - `PYTHONPATH=backend python3 -m pytest backend/tests/test_ui_services.py backend/tests/test_health_server.py -q` -> 45 passed, 39 warnings
+  - `python3 -m py_compile backend/services/correction_service.py backend/services/ops_service.py backend/health_server.py backend/app/pages/1_correction_studio.py backend/app/pages/4_ops_dashboard.py backend/export_dashboard.py backend/tests/test_ui_services.py backend/tests/test_health_server.py` -> passed

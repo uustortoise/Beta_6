@@ -96,6 +96,12 @@ def _majority_label(values: list[str], fallback: str = "unknown") -> str:
     return max(counter.items(), key=lambda item: item[1])[0]
 
 
+def _safe_rate(numerator: int, denominator: int) -> float | None:
+    if int(denominator) <= 0:
+        return None
+    return float(numerator) / float(denominator)
+
+
 def _normalize_timeline_frame(df: pd.DataFrame, *, default_room: str | None = None) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
@@ -300,9 +306,16 @@ def build_compare_timeline_payload(
     training_df = get_training_timeline(elder_id, room, date)
     prediction_df = get_prediction_timeline(elder_id, room, date)
     if prediction_df.empty:
+        training_blocks = int(len(training_df.index)) if training_df is not None else 0
         return {
             "training_timeline": training_df,
             "prediction_timeline": prediction_df,
+            "summary": {
+                "training_blocks": training_blocks,
+                "prediction_blocks": 0,
+                "review_needed_blocks": 0,
+                "manual_review_rate": None,
+            },
         }
 
     compare_df = prediction_df.copy()
@@ -350,9 +363,215 @@ def build_compare_timeline_payload(
             review_flags.append("corrected_truth")
         compare_df.at[idx, "review_reason"] = " / ".join(review_flags) if review_flags else "clear"
 
+    review_needed = int((compare_df["review_reason"] != "clear").sum())
+    prediction_blocks = int(len(compare_df.index))
+    training_blocks = int(len(training_df.index)) if training_df is not None else 0
     return {
         "training_timeline": training_df,
         "prediction_timeline": compare_df,
+        "summary": {
+            "training_blocks": training_blocks,
+            "prediction_blocks": prediction_blocks,
+            "review_needed_blocks": review_needed,
+            "manual_review_rate": _safe_rate(review_needed, prediction_blocks),
+        },
+    }
+
+
+def get_timeline_reliability_metrics(
+    elder_id: str,
+    days: int = 30,
+    confidence_threshold: float = 0.60,
+) -> dict:
+    """
+    Compute product-facing timeline reliability and correction-load metrics.
+    """
+    elder = str(elder_id or "").strip()
+    if not elder:
+        return {
+            "days": int(days),
+            "correction_volume": 0,
+            "review_backlog": 0,
+            "prediction_blocks": 0,
+            "review_needed_blocks": 0,
+            "manual_review_rate": None,
+            "unknown_abstain_rate": None,
+            "contradiction_rate": None,
+            "fragmentation_rate": None,
+            "unknown_abstain_trend": [],
+        }
+
+    days = max(1, int(days))
+    cutoff_dt = datetime.now() - timedelta(days=days)
+    cutoff_ts = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    correction_volume = 0
+    review_backlog = 0
+    try:
+        corr_df = query_df(
+            """
+            SELECT COUNT(*) AS count
+            FROM correction_history
+            WHERE elder_id = ?
+              AND COALESCE(is_deleted, 0) = 0
+              AND COALESCE(corrected_at, timestamp_end, timestamp_start) >= ?
+            """,
+            (elder, cutoff_ts),
+        )
+        if not corr_df.empty:
+            correction_volume = int(corr_df.iloc[0].get("count", 0) or 0)
+    except Exception:
+        correction_volume = 0
+
+    try:
+        backlog_df = query_df(
+            """
+            SELECT COUNT(*) AS count
+            FROM adl_history
+            WHERE elder_id = ?
+              AND timestamp >= ?
+              AND COALESCE(is_corrected, 0) = 0
+              AND LOWER(COALESCE(activity_type, '')) IN ('low_confidence', 'unknown')
+            """,
+            (elder, cutoff_ts),
+        )
+        if not backlog_df.empty:
+            review_backlog = int(backlog_df.iloc[0].get("count", 0) or 0)
+    except Exception:
+        review_backlog = 0
+
+    pred_df = query_df(
+        """
+        SELECT timestamp, room, activity AS activity_type, confidence
+        FROM predictions
+        WHERE resident_id = ?
+          AND timestamp >= ?
+        ORDER BY timestamp ASC
+        """,
+        (elder, cutoff_ts),
+    )
+
+    if pred_df.empty:
+        return {
+            "days": int(days),
+            "correction_volume": int(correction_volume),
+            "review_backlog": int(review_backlog),
+            "prediction_blocks": 0,
+            "review_needed_blocks": 0,
+            "manual_review_rate": None,
+            "unknown_abstain_rate": None,
+            "contradiction_rate": None,
+            "fragmentation_rate": None,
+            "unknown_abstain_trend": [],
+        }
+
+    out = pred_df.copy()
+    out["timestamp"] = pd.to_datetime(out.get("timestamp"), errors="coerce")
+    out = out.dropna(subset=["timestamp"])
+    if out.empty:
+        return {
+            "days": int(days),
+            "correction_volume": int(correction_volume),
+            "review_backlog": int(review_backlog),
+            "prediction_blocks": 0,
+            "review_needed_blocks": 0,
+            "manual_review_rate": None,
+            "unknown_abstain_rate": None,
+            "contradiction_rate": None,
+            "fragmentation_rate": None,
+            "unknown_abstain_trend": [],
+        }
+
+    out["activity_norm"] = out["activity_type"].fillna("").astype(str).str.strip().str.lower()
+    out["confidence_num"] = pd.to_numeric(out.get("confidence"), errors="coerce").fillna(0.0)
+    out["room_norm"] = out.get("room").fillna("").astype(str).map(lambda v: normalize_room_name(v) or "")
+    out["ts_key"] = out["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    unknown_labels = {"unknown", "low_confidence", "abstain"}
+    out["is_unknown_abstain"] = out["activity_norm"].isin(unknown_labels)
+    out["is_review_needed"] = out["is_unknown_abstain"] | (out["confidence_num"] < float(confidence_threshold))
+
+    prediction_blocks = int(len(out.index))
+    review_needed_blocks = int(out["is_review_needed"].sum())
+    unknown_abstain_blocks = int(out["is_unknown_abstain"].sum())
+
+    # Fragmentation rate: activity label switches between adjacent prediction blocks per room.
+    transitions = 0
+    transitions_base = 0
+    for _, room_df in out.groupby("room_norm", dropna=False):
+        room_sorted = room_df.sort_values("timestamp")
+        if len(room_sorted.index) <= 1:
+            continue
+        labels = room_sorted["activity_norm"].tolist()
+        transitions += int(sum(1 for idx in range(1, len(labels)) if labels[idx] != labels[idx - 1]))
+        transitions_base += int(len(labels) - 1)
+    fragmentation_rate = _safe_rate(transitions, transitions_base)
+
+    # Contradiction rate: mismatch against available adl labels at identical room+timestamp keys.
+    contradiction_rate = None
+    truth_df = query_df(
+        """
+        SELECT timestamp, room, activity_type
+        FROM adl_history
+        WHERE elder_id = ?
+          AND timestamp >= ?
+        """,
+        (elder, cutoff_ts),
+    )
+    if not truth_df.empty:
+        truth = truth_df.copy()
+        truth["timestamp"] = pd.to_datetime(truth.get("timestamp"), errors="coerce")
+        truth = truth.dropna(subset=["timestamp"])
+        if not truth.empty:
+            truth["activity_norm"] = truth["activity_type"].fillna("").astype(str).str.strip().str.lower()
+            truth["room_norm"] = truth.get("room").fillna("").astype(str).map(lambda v: normalize_room_name(v) or "")
+            truth["ts_key"] = truth["timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
+            merged = out.merge(
+                truth[["ts_key", "room_norm", "activity_norm"]],
+                on=["ts_key", "room_norm"],
+                how="inner",
+                suffixes=("_pred", "_truth"),
+            )
+            if not merged.empty:
+                mismatches = int(
+                    (merged["activity_norm_pred"].fillna("") != merged["activity_norm_truth"].fillna("")).sum()
+                )
+                contradiction_rate = _safe_rate(mismatches, int(len(merged.index)))
+
+    trend_df = (
+        out.assign(day_key=out["timestamp"].dt.strftime("%Y-%m-%d"))
+        .groupby("day_key", as_index=False)
+        .agg(
+            prediction_blocks=("ts_key", "count"),
+            unknown_abstain_blocks=("is_unknown_abstain", "sum"),
+        )
+    )
+    trend_df["unknown_abstain_rate"] = trend_df.apply(
+        lambda row: _safe_rate(int(row["unknown_abstain_blocks"]), int(row["prediction_blocks"])),
+        axis=1,
+    )
+    trend_rows = [
+        {
+            "day": str(row["day_key"]),
+            "prediction_blocks": int(row["prediction_blocks"]),
+            "unknown_abstain_blocks": int(row["unknown_abstain_blocks"]),
+            "unknown_abstain_rate": float(row["unknown_abstain_rate"])
+            if row["unknown_abstain_rate"] is not None
+            else None,
+        }
+        for _, row in trend_df.sort_values("day_key").iterrows()
+    ]
+
+    return {
+        "days": int(days),
+        "correction_volume": int(correction_volume),
+        "review_backlog": int(review_backlog),
+        "prediction_blocks": prediction_blocks,
+        "review_needed_blocks": review_needed_blocks,
+        "manual_review_rate": _safe_rate(review_needed_blocks, prediction_blocks),
+        "unknown_abstain_rate": _safe_rate(unknown_abstain_blocks, prediction_blocks),
+        "contradiction_rate": contradiction_rate,
+        "fragmentation_rate": fragmentation_rate,
+        "unknown_abstain_trend": trend_rows,
     }
 
 

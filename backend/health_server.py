@@ -801,6 +801,47 @@ def _mask_insufficient_evidence_metrics(room_payload: dict) -> None:
         metrics[key] = None
 
 
+_POLICY_SENSITIVE_REASON_CODES = {
+    "near_threshold",
+    "metric_below_threshold",
+    "gate_failed",
+    "routed_review_queue_uncertainty",
+}
+
+
+def _normalize_authority_state(raw_status: object) -> str:
+    status = str(raw_status or "").strip().lower()
+    if status in {"healthy", "unhealthy", "disabled"}:
+        return status
+    return "not_available"
+
+
+def _resolve_authority_state() -> str:
+    try:
+        readiness = health_checker.check_readiness()
+    except Exception:
+        return "not_available"
+    components = readiness.get("components", {}) if isinstance(readiness, dict) else {}
+    authority = components.get("authority_contract", {}) if isinstance(components, dict) else {}
+    return _normalize_authority_state(
+        authority.get("status") if isinstance(authority, dict) else None
+    )
+
+
+def _extract_policy_sensitive_rooms(room_rows: list[dict]) -> list[str]:
+    selected: set[str] = set()
+    for row in room_rows if isinstance(room_rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        reason_code = str(row.get("status_reason_code", "") or "").strip().lower()
+        if reason_code not in _POLICY_SENSITIVE_REASON_CODES:
+            continue
+        room_name = normalize_room_name(row.get("room"))
+        if room_name:
+            selected.add(room_name)
+    return sorted(selected)
+
+
 def _resolve_beta6_registry_v2_root() -> Path:
     raw = str(os.getenv("BETA6_REGISTRY_V2_ROOT", "")).strip()
     if raw:
@@ -1007,6 +1048,7 @@ def build_ml_snapshot_report(
         }, 503
 
     generated_at = _utc_iso(pd.Timestamp.utcnow())
+    authority_state = _resolve_authority_state()
     if not rows:
         try:
             timeline_reliability = get_timeline_reliability_metrics(
@@ -1017,7 +1059,7 @@ def build_ml_snapshot_report(
         except Exception:
             timeline_reliability = {}
         timeline_reliability = timeline_reliability if isinstance(timeline_reliability, dict) else {}
-        timeline_reliability["authority_state"] = "not_available"
+        timeline_reliability["authority_state"] = authority_state
         timeline_reliability["policy_sensitive_rooms"] = []
         timeline_reliability["active_system"] = str(os.getenv("ACTIVE_SYSTEM", "beta6")).strip() or "beta6"
         return {
@@ -1415,15 +1457,8 @@ def build_ml_snapshot_report(
     except Exception:
         timeline_reliability = {}
     timeline_reliability = timeline_reliability if isinstance(timeline_reliability, dict) else {}
-    timeline_reliability["authority_state"] = overall_status
-    timeline_reliability["policy_sensitive_rooms"] = sorted(
-        {
-            str(item.get("room", "") or "")
-            for item in normalized_rooms
-            if str(item.get("status", "") or "").strip().lower() in {"watch", "action_needed"}
-            and str(item.get("room", "") or "").strip()
-        }
-    )
+    timeline_reliability["authority_state"] = authority_state
+    timeline_reliability["policy_sensitive_rooms"] = _extract_policy_sensitive_rooms(rooms)
     timeline_reliability["active_system"] = str(os.getenv("ACTIVE_SYSTEM", "beta6")).strip() or "beta6"
 
     return {

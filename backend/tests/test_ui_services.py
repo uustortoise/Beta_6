@@ -13,6 +13,7 @@ from services.correction_service import (
     get_activity_timeline_any_room,
     get_low_confidence_queue,
     get_sensor_timeseries,
+    get_timeline_reliability_metrics,
     get_training_timeline,
     preview_batch_corrections,
     save_correction,
@@ -540,6 +541,10 @@ def test_ops_scorecard_includes_correction_volume_and_backlog(test_db, monkeypat
         "get_model_status",
         lambda _elder: {
             "status": {"overall": "watch"},
+            "timeline_reliability": {
+                "authority_state": "unhealthy",
+                "policy_sensitive_rooms": ["Bedroom"],
+            },
             "rooms": [
                 {"room": "bedroom", "status": "watch"},
                 {"room": "kitchen", "status": "healthy"},
@@ -616,8 +621,45 @@ def test_ops_scorecard_includes_correction_volume_and_backlog(test_db, monkeypat
     assert scorecard.get("unknown_abstain_rate") is not None
     assert scorecard.get("contradiction_rate") is not None
     assert scorecard.get("fragmentation_rate") is not None
-    assert scorecard.get("authority_state") == "watch"
+    assert scorecard.get("authority_state") == "unhealthy"
     assert "bedroom" in scorecard.get("policy_sensitive_rooms", [])
+
+
+def test_timeline_reliability_backlog_uses_confidence_threshold(test_db):
+    elder = "OPS_SCORECARD_BACKLOG_1"
+    room = "livingroom"
+    with test_db.get_connection() as conn:
+        conn.execute("INSERT INTO elders (elder_id, full_name) VALUES (?, ?)", (elder, "Ops Backlog"))
+        conn.execute(
+            """
+            INSERT INTO adl_history
+            (elder_id, timestamp, room, activity_type, confidence, is_corrected, record_date, duration_minutes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (elder, "2026-03-07 10:00:00", room, "watch_tv", 0.41, 0, "2026-03-07", 10),
+        )
+        conn.execute(
+            """
+            INSERT INTO adl_history
+            (elder_id, timestamp, room, activity_type, confidence, is_corrected, record_date, duration_minutes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (elder, "2026-03-07 10:10:00", room, "unknown", 0.75, 0, "2026-03-07", 10),
+        )
+        conn.commit()
+
+    metrics_high = get_timeline_reliability_metrics(
+        elder_id=elder,
+        days=30,
+        confidence_threshold=0.60,
+    )
+    metrics_low = get_timeline_reliability_metrics(
+        elder_id=elder,
+        days=30,
+        confidence_threshold=0.30,
+    )
+    assert metrics_high.get("review_backlog") == 1
+    assert metrics_low.get("review_backlog") == 0
 
 
 def test_ops_service_model_update_monitor_exposes_metric_source_labels(test_db):

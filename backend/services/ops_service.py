@@ -46,6 +46,22 @@ def _normalize_room_key(value: str) -> str:
     return normalized if isinstance(normalized, str) else ""
 
 
+def _normalize_authority_state(raw_status: object) -> str:
+    status = str(raw_status or "").strip().lower()
+    if status in {"healthy", "unhealthy", "disabled"}:
+        return status
+    return "not_available"
+
+
+def _normalize_room_list(values: object) -> list[str]:
+    rooms: set[str] = set()
+    for value in values if isinstance(values, list) else []:
+        room_name = _normalize_room_key(str(value or ""))
+        if room_name:
+            rooms.add(room_name)
+    return sorted(rooms)
+
+
 def _parse_manifest_timestamp(token: str) -> datetime | None:
     value = str(token or "").strip()
     if not value:
@@ -680,22 +696,17 @@ def get_timeline_reliability_scorecard(
     )
 
     model_status = get_model_status(elder)
-    status_obj = model_status.get("status", {}) if isinstance(model_status, dict) else {}
-    authority_state = str(status_obj.get("overall", "not_available") or "not_available")
-    policy_sensitive_rooms: list[str] = []
-    rooms = model_status.get("rooms", []) if isinstance(model_status, dict) else []
-    for row in rooms if isinstance(rooms, list) else []:
-        if not isinstance(row, dict):
-            continue
-        room_status = str(row.get("status", "") or "").strip().lower()
-        if room_status not in {"watch", "action_needed"}:
-            continue
-        room_name = _normalize_room_key(str(row.get("room", "") or ""))
-        if room_name:
-            policy_sensitive_rooms.append(room_name)
+    timeline_summary = (
+        model_status.get("timeline_reliability", {})
+        if isinstance(model_status, dict)
+        else {}
+    )
+    timeline_summary = timeline_summary if isinstance(timeline_summary, dict) else {}
+    authority_state = _normalize_authority_state(timeline_summary.get("authority_state"))
+    policy_sensitive_rooms = _normalize_room_list(timeline_summary.get("policy_sensitive_rooms"))
 
     metrics["authority_state"] = authority_state
-    metrics["policy_sensitive_rooms"] = sorted(set(policy_sensitive_rooms))
+    metrics["policy_sensitive_rooms"] = policy_sensitive_rooms
     metrics["active_system"] = str(os.getenv("ACTIVE_SYSTEM", "beta6")).strip() or "beta6"
     metrics["evidence_profile"] = (
         str(os.getenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")).strip() or "production"

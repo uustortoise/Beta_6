@@ -431,9 +431,9 @@ def get_timeline_reliability_metrics(
             WHERE elder_id = ?
               AND timestamp >= ?
               AND COALESCE(is_corrected, 0) = 0
-              AND LOWER(COALESCE(activity_type, '')) IN ('low_confidence', 'unknown')
+              AND COALESCE(confidence, 0) < ?
             """,
-            (elder, cutoff_ts),
+            (elder, cutoff_ts, float(confidence_threshold)),
         )
         if not backlog_df.empty:
             review_backlog = int(backlog_df.iloc[0].get("count", 0) or 0)

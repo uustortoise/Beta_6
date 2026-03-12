@@ -468,6 +468,140 @@ def test_health_snapshot_includes_timeline_reliability_metrics(monkeypatch):
     assert report["timeline_reliability"]["manual_review_rate"] == pytest.approx(0.4, abs=1e-9)
 
 
+def test_health_snapshot_timeline_authority_state_uses_authority_contract(monkeypatch):
+    class _FakeCursor:
+        def execute(self, query, params):
+            self.query = query
+            self.params = params
+
+        def fetchall(self):
+            return [
+                {
+                    "training_date": "2026-03-07T10:00:00Z",
+                    "status": "success",
+                    "accuracy": 0.92,
+                    "metadata": {
+                        "walk_forward_gate": {
+                            "pass": True,
+                            "reason": "all_rooms_passed",
+                            "room_reports": [
+                                {
+                                    "room": "Kitchen",
+                                    "pass": True,
+                                    "reasons": [],
+                                    "candidate_summary": {"macro_f1_mean": 0.81, "accuracy_mean": 0.93, "num_folds": 5},
+                                    "candidate_wf_config": {"lookback_days": 90},
+                                }
+                            ],
+                        },
+                    },
+                }
+            ]
+
+    class _FakeConn:
+        def cursor(self):
+            return _FakeCursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _FakeAdapter:
+        def get_connection(self):
+            return _FakeConn()
+
+    monkeypatch.setattr("backend.health_server.adapter", _FakeAdapter())
+    monkeypatch.setattr(
+        "backend.health_server.get_timeline_reliability_metrics",
+        lambda elder_id, days=30, confidence_threshold=0.60: {"correction_volume": 1},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "backend.health_server.health_checker.check_readiness",
+        lambda: {"components": {"authority_contract": {"status": "unhealthy"}}},
+    )
+
+    report, status = build_ml_snapshot_report(elder_id="elder_123", lookback_runs=10)
+    assert status == 200
+    assert report["timeline_reliability"]["authority_state"] == "unhealthy"
+
+
+def test_health_snapshot_policy_sensitive_rooms_use_reason_code_filter(monkeypatch):
+    class _FakeCursor:
+        def execute(self, query, params):
+            self.query = query
+            self.params = params
+
+        def fetchall(self):
+            return [
+                {
+                    "training_date": "2026-03-07T10:00:00Z",
+                    "status": "success",
+                    "accuracy": 0.92,
+                    "metadata": {
+                        "walk_forward_gate": {
+                            "pass": True,
+                            "reason": "all_rooms_passed",
+                            "room_reports": [
+                                {
+                                    "room": "Bedroom",
+                                    "pass": True,
+                                    "reasons": [],
+                                    "candidate_summary": {"macro_f1_mean": 0.81, "accuracy_mean": 0.93, "num_folds": 5},
+                                    "candidate_wf_config": {"lookback_days": 90},
+                                },
+                                {
+                                    "room": "Kitchen",
+                                    "pass": True,
+                                    "reasons": [],
+                                    "candidate_summary": {"macro_f1_mean": 0.81, "accuracy_mean": 0.93, "num_folds": 5},
+                                    "candidate_wf_config": {"lookback_days": 90},
+                                },
+                            ],
+                        },
+                    },
+                }
+            ]
+
+    class _FakeConn:
+        def cursor(self):
+            return _FakeCursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _FakeAdapter:
+        def get_connection(self):
+            return _FakeConn()
+
+    def _fake_room_status(payload, _global_threshold):
+        room = str(payload.get("room", "")).strip().lower()
+        if room == "bedroom":
+            return "watch", "near threshold", "near_threshold"
+        return "watch", "stale data", "data_stale"
+
+    monkeypatch.setattr("backend.health_server.adapter", _FakeAdapter())
+    monkeypatch.setattr("backend.health_server._build_room_status", _fake_room_status)
+    monkeypatch.setattr(
+        "backend.health_server.get_timeline_reliability_metrics",
+        lambda elder_id, days=30, confidence_threshold=0.60: {"correction_volume": 1},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "backend.health_server.health_checker.check_readiness",
+        lambda: {"components": {"authority_contract": {"status": "healthy"}}},
+    )
+
+    report, status = build_ml_snapshot_report(elder_id="elder_123", lookback_runs=10)
+    assert status == 200
+    assert report["timeline_reliability"]["policy_sensitive_rooms"] == ["bedroom"]
+
+
 def test_build_ml_snapshot_report_maps_room_status_and_thresholds(monkeypatch):
     monkeypatch.delenv("WF_DRIFT_THRESHOLD", raising=False)
     monkeypatch.delenv("WF_MIN_TRANSITION_F1", raising=False)

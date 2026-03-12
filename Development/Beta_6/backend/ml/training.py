@@ -66,6 +66,7 @@ from ml.transformer_timeline_heads import (
     TimelineHeadConfig,
     create_timeline_heads,
 )
+from ml.beta6.serving.activity_confidence import fit_activity_confidence_artifact
 from ml.beta6.sequence.hmm_decoder import DEFAULT_DECODER_POLICY
 
 logger = logging.getLogger(__name__)
@@ -229,6 +230,7 @@ class TrainingPipeline:
         self.policy = policy or load_policy_from_env()
         self._policy_snapshot: Optional[TrainingPolicy] = None
         self._last_calibration_debug: List[Dict[str, Any]] = []
+        self._last_activity_confidence_artifact: Optional[Dict[str, Any]] = None
         self._last_release_gate_watch_reasons: List[str] = []
         
         # macOS Optimization: Threading and Memory Growth
@@ -5275,6 +5277,7 @@ class TrainingPipeline:
         """
         calibration_policy = self._active_policy().calibration
         thresholds = self._default_class_thresholds(room_name)
+        self._last_activity_confidence_artifact = None
         if len(X_calib) == 0 or len(y_calib) == 0:
             self._last_calibration_debug = []
             return thresholds
@@ -5296,6 +5299,65 @@ class TrainingPipeline:
             y_scores = tf.nn.softmax(y_scores, axis=1).numpy()
 
         n_classes = y_scores.shape[1]
+        class_labels = [self._get_label_name(room_name, class_id) for class_id in range(n_classes)]
+        activity_conf_policy = self._active_policy().activity_confidence
+        if bool(activity_conf_policy.enabled):
+            try:
+                target_precision_by_label = {
+                    str(label).strip().lower(): float(calibration_policy.get_precision_target(label))
+                    for label in class_labels
+                }
+                recall_floor_by_label = {
+                    str(label).strip().lower(): float(calibration_policy.get_recall_floor(label))
+                    for label in class_labels
+                }
+                artifact = fit_activity_confidence_artifact(
+                    room_name=room_name,
+                    class_labels=class_labels,
+                    raw_probabilities=np.asarray(y_scores, dtype=np.float64),
+                    true_indices=np.asarray(y_calib, dtype=np.int64),
+                    default_threshold=float(DEFAULT_CONFIDENCE_THRESHOLD),
+                    target_precision_by_label=target_precision_by_label,
+                    recall_floor_by_label=recall_floor_by_label,
+                    threshold_floor=float(calibration_policy.threshold_floor),
+                    threshold_cap=float(calibration_policy.threshold_cap),
+                    min_support_per_class=int(activity_conf_policy.min_support_per_class),
+                    calibration_method=str(activity_conf_policy.calibration_method),
+                    threshold_band_width=float(activity_conf_policy.threshold_band_width),
+                    max_near_threshold_fraction=float(activity_conf_policy.max_near_threshold_fraction),
+                )
+                artifact_payload = artifact.to_dict()
+                self._last_activity_confidence_artifact = artifact_payload
+                calibration_debug = []
+                for class_id, label_name in enumerate(class_labels):
+                    label_key = str(label_name).strip().lower()
+                    final_threshold = float(
+                        artifact.thresholds_by_label.get(label_key, artifact.default_threshold)
+                    )
+                    thresholds[class_id] = float(
+                        np.clip(
+                            final_threshold,
+                            float(calibration_policy.threshold_floor),
+                            float(calibration_policy.threshold_cap),
+                        )
+                    )
+                    debug_entry = dict(artifact.debug.get(label_key, {}))
+                    debug_entry.setdefault("class_id", int(class_id))
+                    debug_entry.setdefault("label", label_key)
+                    debug_entry["threshold"] = float(thresholds[class_id])
+                    calibration_debug.append(debug_entry)
+
+                self._last_calibration_debug = calibration_debug
+                logger.info(f"Calibration thresholds for {room_name}: {thresholds}")
+                logger.info(f"Calibration breakdown for {room_name}: {calibration_debug}")
+                return thresholds
+            except Exception as e:
+                logger.warning(
+                    "Activity-confidence calibration failed for %s; falling back to legacy thresholds: %s",
+                    room_name,
+                    e,
+                )
+
         calibration_debug = []
 
         for class_id in range(n_classes):
@@ -6733,11 +6795,17 @@ class TrainingPipeline:
                 )
             else:
                 self._last_calibration_debug = []
+                self._last_activity_confidence_artifact = None
                 logger.warning(
                     f"No calibration split available for {room_name}; "
                     f"using default threshold={DEFAULT_CONFIDENCE_THRESHOLD}"
                 )
             metrics['class_thresholds'] = class_thresholds
+            metrics["activity_confidence_artifact"] = (
+                dict(self._last_activity_confidence_artifact)
+                if isinstance(self._last_activity_confidence_artifact, dict)
+                else None
+            )
             calib_supports = [
                 int(entry.get("support", 0) or 0)
                 for entry in self._last_calibration_debug
@@ -6966,6 +7034,7 @@ class TrainingPipeline:
                 model_identity=model_identity,
                 promote_to_latest=promote_to_latest,
                 parent_version_id=parent_version_id,
+                activity_confidence_artifact=self._last_activity_confidence_artifact,
             )
             metrics["saved_version"] = int(saved_version)
             metrics["promotion_deferred"] = bool(defer_promotion and gate_pass)
@@ -7029,6 +7098,7 @@ class TrainingPipeline:
                         "threshold_floor": float(calibration_policy.threshold_floor),
                         "threshold_cap": float(calibration_policy.threshold_cap),
                     },
+                    "activity_confidence": active_policy.activity_confidence.__dict__,
                 },
                 "data": {
                     "downsample_scope": "train_only_post_split",
@@ -7051,6 +7121,11 @@ class TrainingPipeline:
                 },
                 "calibration_debug": list(self._last_calibration_debug),
                 "class_thresholds": {str(k): float(v) for k, v in class_thresholds.items()},
+                "activity_confidence_artifact": (
+                    dict(self._last_activity_confidence_artifact)
+                    if isinstance(self._last_activity_confidence_artifact, dict)
+                    else None
+                ),
                 "release_gate": {
                     "pass": bool(gate_pass),
                     "blocking_reasons": list(gate_reasons),
@@ -7075,6 +7150,14 @@ class TrainingPipeline:
                     str(class_id): float(threshold)
                     for class_id, threshold in class_thresholds.items()
                 }
+                if not hasattr(self.platform, "activity_confidence_artifacts"):
+                    self.platform.activity_confidence_artifacts = {}
+                if isinstance(self._last_activity_confidence_artifact, dict):
+                    self.platform.activity_confidence_artifacts[room_name] = dict(
+                        self._last_activity_confidence_artifact
+                    )
+                else:
+                    self.platform.activity_confidence_artifacts.pop(room_name, None)
                 self.platform.room_models[room_name] = model
             elif gate_pass and defer_promotion:
                 logger.info(

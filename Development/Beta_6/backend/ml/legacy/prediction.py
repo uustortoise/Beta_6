@@ -14,6 +14,7 @@ from ml.beta6.serving.runtime_hooks import (
     apply_beta6_hmm_runtime,
     apply_beta6_unknown_abstain_runtime,
 )
+from ml.beta6.serving.activity_confidence import apply_activity_confidence_artifact
 from ml.beta6.sequence import decode_hmm_with_duration_priors, load_duration_prior_policy
 from ml.exceptions import PredictionError, DatabaseError
 from ml.policy_defaults import get_runtime_unknown_rooms_default
@@ -303,6 +304,7 @@ class PredictionPipeline:
         *,
         room_name: str,
         y_pred_probs: np.ndarray,
+        confidence_scores: Optional[np.ndarray] = None,
         label_classes: list[str],
         final_labels: np.ndarray,
         low_conf_flags: list[bool],
@@ -311,6 +313,7 @@ class PredictionPipeline:
         return apply_beta6_unknown_abstain_runtime(
             room_name=room_name,
             y_pred_probs=y_pred_probs,
+            confidence_scores=confidence_scores,
             label_classes=label_classes,
             final_labels=final_labels,
             low_conf_flags=low_conf_flags,
@@ -706,6 +709,26 @@ class PredictionPipeline:
 
                 # Apply class-calibrated confidence thresholds (fallback to global threshold).
                 room_thresholds = getattr(self.platform, 'class_thresholds', {}).get(room_name, {}) or {}
+                activity_conf_payload = getattr(
+                    self.platform,
+                    "activity_confidence_artifacts",
+                    {},
+                ).get(room_name)
+                top1_label_list = [str(label) for label in decoded_top1]
+                activity_conf_result = apply_activity_confidence_artifact(
+                    labels=top1_label_list,
+                    raw_confidence=np.asarray(confidences, dtype=float),
+                    artifact=activity_conf_payload,
+                    default_threshold=float(DEFAULT_CONFIDENCE_THRESHOLD),
+                )
+                calibrated_confidences = np.asarray(
+                    activity_conf_result.get("confidence", confidences),
+                    dtype=float,
+                )
+                calibrated_thresholds = np.asarray(
+                    activity_conf_result.get("thresholds", np.full(len(confidences), float(DEFAULT_CONFIDENCE_THRESHOLD))),
+                    dtype=float,
+                )
 
                 # Optional log for visibility; keep concise to avoid log spam.
                 if room_thresholds:
@@ -726,21 +749,23 @@ class PredictionPipeline:
 
                 for i, class_idx in enumerate(top1_idx):
                     class_idx = int(class_idx)
-                    prob = float(confidences[i])
+                    raw_prob = float(confidences[i])
+                    prob = float(calibrated_confidences[i])
                     top1_label = str(decoded_top1[i])
                     top2_label = str(decoded_top2[i])
 
-                    class_threshold = room_thresholds.get(
-                        str(class_idx),
-                        room_thresholds.get(class_idx, DEFAULT_CONFIDENCE_THRESHOLD),
-                    )
-                    try:
-                        class_threshold = float(class_threshold)
-                    except (TypeError, ValueError):
-                        class_threshold = float(DEFAULT_CONFIDENCE_THRESHOLD)
-
-                    if class_threshold < 0:
-                        class_threshold = float(DEFAULT_CONFIDENCE_THRESHOLD)
+                    class_threshold = float(calibrated_thresholds[i])
+                    if activity_conf_payload is None:
+                        class_threshold = room_thresholds.get(
+                            str(class_idx),
+                            room_thresholds.get(class_idx, DEFAULT_CONFIDENCE_THRESHOLD),
+                        )
+                        try:
+                            class_threshold = float(class_threshold)
+                        except (TypeError, ValueError):
+                            class_threshold = float(DEFAULT_CONFIDENCE_THRESHOLD)
+                        if class_threshold < 0:
+                            class_threshold = float(DEFAULT_CONFIDENCE_THRESHOLD)
 
                     if prob < class_threshold:
                         final_labels.append('low_confidence')
@@ -754,7 +779,7 @@ class PredictionPipeline:
 
                     top1_labels.append(top1_label)
                     top2_labels.append(top2_label)
-                    top1_probs.append(prob)
+                    top1_probs.append(raw_prob)
                     top2_probs.append(float(top2_confidences[i]))
                     low_conf_thresholds.append(class_threshold)
 
@@ -777,6 +802,7 @@ class PredictionPipeline:
                 ) = self._apply_beta6_unknown_abstain_runtime(
                     room_name=room_name,
                     y_pred_probs=y_pred_probs,
+                    confidence_scores=np.asarray(calibrated_confidences, dtype=float),
                     label_classes=label_classes,
                     final_labels=final_labels,
                     low_conf_flags=list(low_conf_flags),
@@ -801,6 +827,7 @@ class PredictionPipeline:
 
                 raw_top1_labels = np.asarray(top1_labels, dtype=object)
                 raw_top1_probs = np.asarray(top1_probs, dtype=float)
+                calibrated_top1_probs = np.asarray(calibrated_confidences, dtype=float)
                 raw_top2_labels = np.asarray(top2_labels, dtype=object)
                 raw_top2_probs = np.asarray(top2_probs, dtype=float)
                 effective_top1_labels: list[str] = []
@@ -811,9 +838,13 @@ class PredictionPipeline:
                     chosen_label = str(chosen)
                     cls_idx = label_to_idx.get(chosen_label)
                     if cls_idx is not None and 0 <= int(cls_idx) < y_pred_probs.shape[1]:
-                        eff_conf = float(y_pred_probs[j, int(cls_idx)])
+                        eff_conf_raw = float(y_pred_probs[j, int(cls_idx)])
                     else:
-                        eff_conf = float(raw_top1_probs[j])
+                        eff_conf_raw = float(raw_top1_probs[j])
+                    if chosen_label == str(raw_top1_labels[j]):
+                        eff_conf = float(calibrated_top1_probs[j])
+                    else:
+                        eff_conf = float(eff_conf_raw)
                     effective_confidences.append(eff_conf)
                     if chosen_label in {"low_confidence", "unknown"}:
                         eff_top1_label = str(raw_top1_labels[j])

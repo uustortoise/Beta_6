@@ -52,6 +52,14 @@ calibration:
     bedroom_normal_use: 0.10
     room_normal_use: 0.10
 
+activity_confidence:
+  enabled: true
+  calibration_method: isotonic
+  min_support_per_class: 30
+  threshold_band_width: 0.02
+  max_near_threshold_fraction: 0.35
+  fallback_threshold: 0.60
+
 unoccupied_downsample:
   min_share_by_room:
     bathroom: 0.25

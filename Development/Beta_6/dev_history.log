@@ -30,6 +30,392 @@
 - Testing:
   - PYTHONDONTWRITEBYTECODE=1 pytest backend/tests/test_run_daily_analysis_beta6_authority.py backend/tests/test_beta6_gate_engine.py backend/tests/test_beta6_timeline_hard_gates.py backend/tests/test_beta6_dynamic_gate_artifacts.py backend/tests/test_beta6_runtime_eval_parity.py backend/tests/test_prediction_beta6_runtime_hook_parity.py backend/tests/test_training.py backend/tests/test_prediction.py -q -> exit 0, 153 passed, 3 warnings in 3.84s
 - Decision: Proceed to one fresh daily analysis run and inspect Bedroom, Entrance, and Kitchen outcomes on live artifacts.
+2026-03-10 03:54:33 UTC | TASK-BATHROOM-RECOVERY | Planned Bathroom normal-use recovery follow-up
+- Action: Added a Bathroom-specific design doc and implementation plan focused on Stage A occupancy gating, threshold tradeoffs, and the smallest safe runtime fix after the two-stage parity repair.
+- Code change: docs/plans/2026-03-10-bathroom-normal-use-recovery-design.md, docs/plans/2026-03-10-bathroom-normal-use-recovery-implementation.md
+- Testing: Not run yet
+- Decision: Treat Bathroom as a narrowed `bathroom_normal_use` vs `unoccupied` gating problem rather than a room-wide collapse; gather Stage A evidence before choosing threshold-only vs. borderline-routing fix.
+2026-03-10 04:28:23 UTC | TASK-BATHROOM-RECOVERY | Promoted Bathroom v35 from the higher-recall historical two-stage frontier
+- Action: Verified that threshold-only and confidence-only changes were insufficient, scanned historical Bathroom two-stage bundles, rejected a manual alias swap because registry repair rewired it back to `current_version=34`, then created/promoted Bathroom `v35` with current single-stage fallback artifacts and a `v12`-derived two-stage runtime bundle / decision trace.
+- Code change: backend/models/HK0011_jessica/Bathroom_versions.json, backend/models/HK0011_jessica/Bathroom_v35_two_stage_meta.json, backend/models/HK0011_jessica/Bathroom_v35_decision_trace.json, backend/models/HK0011_jessica/Bathroom_v35_* artifacts, backend/models/HK0011_jessica/Bathroom_two_stage_* aliases, backend/models/HK0011_jessica/Bathroom_decision_trace.json, docs/reviews/beta6_jessica_17dec_forensic_2026-03-10.md
+- Testing:
+  - Historical version scan on Dec 17 -> current `v34` stayed best overall macro, but `v12`/`v13`/`v18` gave the best moderate `bathroom_normal_use` recovery frontier.
+  - Candidate comparison on Dec 4-10 plus Dec 17 -> `v12` family avg raw 3-class macro-F1 `0.6568`, avg `bathroom_normal_use` recall `0.6292`; `v34` baseline avg raw 3-class macro-F1 `0.6712`, avg `bathroom_normal_use` recall `0.5408`; `v29` was rejected because it spent too much `unoccupied`.
+  - Real Dec 17 rerun after promotion -> active two-stage `saved_version=35`, raw top-1 all-label accuracy `0.8178`, macro-F1 `0.5287`; final exported all-label accuracy `0.8158`, macro-F1 `0.4196`; raw 3-class macro-F1 `0.7052`; final 3-class macro-F1 `0.6996`.
+  - Repeated fresh loads -> Bathroom remained active in `two_stage_core_models` with `saved_version=35` and `stage_a_threshold=0.3311713933944702`.
+- Decision: Accept the explicit trade in favor of materially better Bathroom normal-use recall now; document that a future Bathroom retrain is still needed if we want to recover the lost `unoccupied` / macro frontier.
+2026-03-10 12:01:51 UTC | TASK-BEDROOM-LIVINGROOM-RETRAIN-BLOCKERS | Extended retrain-blocker forensic note with recipe-drift findings
+- Action: Compared Bedroom `v28` vs `v34` and LivingRoom `v27` vs `v29` decision traces, matched the observed collapses to policy/sampling code paths, and appended the follow-up findings to the blocker handoff note.
+- Code change: .worktrees/jessica-confidence-architecture/docs/reviews/2026-03-10-beta6-bedroom-livingroom-retrain-blockers.md, dev_history.log
+- Testing:
+  - Artifact comparison only; no retrain rerun executed in this turn.
+  - Bedroom evidence: sampled support/prior drift stayed nearly flat (`4.83` pp vs `4.82` pp) while policy hash changed (`23346140...` -> `b3d699f3...`) and `v31`-`v34` collapsed to all `sleep`.
+  - LivingRoom evidence: resolved downsample recipe stayed at `min_share=0.30`, `stride=4`, but sampled prior drift jumped from `8.86` pp in `v27` to `19.64` pp in `v29`, which then collapsed to all `unoccupied`.
+- Decision: Treat Bedroom as a training-policy / optimizer-path drift investigation and LivingRoom as a downsample-prior-drift investigation before any further threshold work.
+2026-03-10 12:51:25 UTC | TASK-BEDROOM-LIVINGROOM-POLICYFIX | Executed policy-first retrain rerun, benchmarked outcomes, and fixed multi-seed winner retention
+- Action: Applied the Bedroom neutral room-label weights and LivingRoom prior-drift guardrails, retrained the corrected-pack candidate namespace `HK0011_jessica_candidate_policyfix_20260310T121803Z`, benchmarked it on the Dec 17 corrected file, and patched multi-seed cleanup so deferred-promotion winner versions are preserved until after seed selection.
+- Code change: .worktrees/jessica-confidence-architecture/backend/config/beta6_policy_defaults.yaml, .worktrees/jessica-confidence-architecture/backend/ml/legacy/registry.py, .worktrees/jessica-confidence-architecture/backend/ml/training.py, .worktrees/jessica-confidence-architecture/backend/tests/test_policy_config.py, .worktrees/jessica-confidence-architecture/backend/tests/test_beta6_policy_config_schemas.py, .worktrees/jessica-confidence-architecture/backend/tests/test_registry.py, .worktrees/jessica-confidence-architecture/backend/tests/test_training.py, .worktrees/jessica-confidence-architecture/docs/reviews/2026-03-10-beta6-bedroom-livingroom-retrain-blockers.md, dev_history.log
+- Testing:
+  - Policy config verification:
+    - `pytest .worktrees/jessica-confidence-architecture/backend/tests/test_policy_config.py .worktrees/jessica-confidence-architecture/backend/tests/test_beta6_policy_config_schemas.py -q` -> 30 passed
+  - Registry and training verification:
+    - `pytest .worktrees/jessica-confidence-architecture/backend/tests/test_registry.py -q` -> 29 passed
+    - `pytest .worktrees/jessica-confidence-architecture/backend/tests/test_training.py -q` -> 107 passed
+  - Bedroom rerun result:
+    - `Bedroom_v37` no longer collapsed; holdout distribution `712 / 812 / 1323`, holdout macro-F1 `0.6257`
+    - Dec 17 final Bedroom macro-F1 improved from `0.2723` to `0.3511`
+    - residual promotion blocker is statistical-validity support (`class 0 has 2 < 30 samples`)
+  - LivingRoom rerun result:
+    - multi-seed panel selected seed `40`; holdout macro-F1 `0.4879`; sampled prior drift capped at `9.9975` pp
+    - deterministic seed-40 rerun produced `LivingRoom_v37` and preserved the selected artifacts after the cleanup fix
+    - Dec 17 final LivingRoom macro-F1 was `0.3031`, still below deployed recalibration-only `v30` at `0.3856`
+- Decision: Keep the current mixed deployable anchor unchanged; the Bedroom recommendation is confirmed, while LivingRoom now needs benchmark-quality improvement rather than collapse rescue.
+2026-03-10 13:49:06 UTC | TASK-LIVINGROOM-NODOWNSAMPLE | Executed the LivingRoom no-downsample rerun and benchmarked the resulting mixed candidate
+- Action: Changed the LivingRoom unoccupied-downsample default to `stride=1`, verified the policy/test surface, cloned `HK0011_jessica_candidate_policyfix_20260310T121803Z` into `HK0011_jessica_candidate_nodownsample_20260310T132301Z`, retrained only `LivingRoom` on the corrected Dec 10 + Dec 17 pack, and benchmarked the full candidate on the Dec 17 corrected file.
+- Code change: .worktrees/jessica-confidence-architecture/backend/config/beta6_policy_defaults.yaml, .worktrees/jessica-confidence-architecture/backend/tests/test_policy_config.py, .worktrees/jessica-confidence-architecture/backend/tests/test_beta6_policy_config_schemas.py, .worktrees/jessica-confidence-architecture/docs/reviews/2026-03-10-beta6-bedroom-livingroom-retrain-blockers.md, dev_history.log
+- Testing:
+  - Regression verification:
+    - `pytest .worktrees/jessica-confidence-architecture/backend/tests/test_policy_config.py .worktrees/jessica-confidence-architecture/backend/tests/test_beta6_policy_config_schemas.py -q` -> 32 passed
+    - `pytest .worktrees/jessica-confidence-architecture/backend/tests/test_training.py -q` -> 107 passed
+  - LivingRoom retrain result:
+    - multi-seed panel candidate seeds `40..45`; selected seed `42`
+    - selected `LivingRoom_v40`; holdout macro-F1 `0.6590`; holdout macro-recall `0.7222`
+    - selected holdout predicted distribution `livingroom_normal_use=249`, `unoccupied=1515`
+    - downsample debug confirmed the intervention: `removed=0`, `reason=no_removals`
+    - PostgreSQL training-history logging remained unavailable in the sandbox, but the retrain itself completed and the selected version was rolled back/promoted inside the isolated candidate namespace
+  - Dec 17 benchmark result:
+    - candidate summary: `.worktrees/jessica-confidence-architecture/tmp/jessica_17dec_eval_candidate_nodownsample_20260310T132301Z/final/comparison/summary.json`
+    - LivingRoom final accuracy `0.8748`, final macro-F1 `0.4340`, low-confidence rate `0.0000`
+    - overall final accuracy `0.8048`, overall final macro-F1 `0.4486`
+    - comparison: LivingRoom improved over the prior policy-fix rerun (`0.3031 -> 0.4340`) and over deployed recalibration-only `v30` (`0.3856 -> 0.4340`)
+- Decision: The LivingRoom root cause is confirmed as unoccupied downsampling itself, not a generic corrected-pack retrain failure; this no-downsample candidate is now the leading corrected-pack candidate in the branch, while Bedroom remains blocked only on statistical-validity support.
+2026-03-10 14:23:55 UTC | TASK-BETA6-SAFE-MIXED-CANDIDATE | Built and verified the fail-closed mixed candidate with Bedroom v36 and LivingRoom v40
+- Action: Added safe-path design/implementation docs, cloned `HK0011_jessica_candidate_nodownsample_20260310T132301Z` into `HK0011_jessica_candidate_safev36_20260310T141724Z`, rolled `Bedroom` back to `v36` with the registry helper, replay-benchmarked the candidate on the corrected Dec 17 workbook, ran a clean `UnifiedPipeline` load sanity pass, and updated the blocker handoff note with the resulting deployment split.
+- Code change: .worktrees/jessica-confidence-architecture/docs/plans/2026-03-10-beta6-safe-mixed-candidate-design.md, .worktrees/jessica-confidence-architecture/docs/plans/2026-03-10-beta6-safe-mixed-candidate-implementation.md, .worktrees/jessica-confidence-architecture/docs/reviews/2026-03-10-beta6-bedroom-livingroom-retrain-blockers.md, .worktrees/jessica-confidence-architecture/backend/models/HK0011_jessica_candidate_safev36_20260310T141724Z/*, .worktrees/jessica-confidence-architecture/tmp/jessica_17dec_eval_candidate_safev36_20260310T141724Z/final/*, .worktrees/jessica-confidence-architecture/tmp/jessica_17dec_eval_candidate_safev36_20260310T141724Z/load_sanity.json, dev_history.log
+- Testing:
+  - Namespace assembly verification:
+    - `Bedroom_versions.json` in `HK0011_jessica_candidate_safev36_20260310T141724Z` now reports `current_version=36`
+    - Bedroom latest aliases match `Bedroom_v36_*` byte-for-byte for model, scaler, label encoder, thresholds, and activity-confidence calibrator
+  - Dec 17 replay benchmark:
+    - command used corrected workbook `/Users/dickson/DT/DT_development/Development/New training files/Jessica (sleep and out fixed)/HK0011_jessica_train_17dec2025.xlsx`
+    - candidate summary: `.worktrees/jessica-confidence-architecture/tmp/jessica_17dec_eval_candidate_safev36_20260310T141724Z/final/comparison/summary.json`
+    - overall final accuracy `0.7944`, overall final macro-F1 `0.3974`
+    - Bedroom final macro-F1 `0.2723` (unchanged from the prior safe anchor)
+    - LivingRoom final macro-F1 `0.4340` (improved from `0.3856` in the prior mixed safe anchor)
+    - overall final macro-F1 improved over the old mixed candidate (`0.3922 -> 0.3974`) but stayed below the benchmark-leading `Bedroom_v37 + LivingRoom_v40` candidate (`0.4486`)
+  - Fresh-load sanity:
+    - `load_models_for_elder()` loaded all five rooms from the safe namespace
+    - version map matched the intended candidate: Bathroom `35`, Bedroom `36`, Entrance `26`, Kitchen `27`, LivingRoom `40`
+    - `platform.two_stage_core_models` contained `Bathroom` and `LivingRoom`
+    - all five rooms exposed thresholds and activity-confidence artifacts after load
+    - registry auto-repaired stale Bathroom latest aliases during load, but the candidate remained valid after repair
+- Decision: Treat `HK0011_jessica_candidate_safev36_20260310T141724Z` as the safest promotion-grade candidate in this branch when Bedroom must remain fail-closed. Keep `HK0011_jessica_candidate_nodownsample_20260310T132301Z` as the benchmark-leading option only if an explicit Bedroom `v37` support-gate exception is later approved. I did not overwrite the live `HK0011_jessica` namespace in this turn because that would be a separate higher-risk cross-namespace promotion step, not a previously validated room-wise deployment path in this branch.
+2026-03-10 14:29:02 UTC | TASK-BETA6-REGISTRY-JSON-COMPARE | Removed repeated two-stage alias false positives from registry validation
+- Action: Traced the repeated Bathroom auto-repair during safe-candidate reload to bytewise comparison of semantically equal `_two_stage_meta.json` files in `validate_and_repair_room_registry_state()`, added a regression test for formatting-only drift, changed registry artifact comparison to use semantic JSON equality, reran the registry suite, and refreshed the safe-candidate load-sanity artifact.
+- Code change: .worktrees/jessica-confidence-architecture/backend/ml/legacy/registry.py, .worktrees/jessica-confidence-architecture/backend/tests/test_registry.py, .worktrees/jessica-confidence-architecture/docs/reviews/2026-03-10-beta6-bedroom-livingroom-retrain-blockers.md, .worktrees/jessica-confidence-architecture/tmp/jessica_17dec_eval_candidate_safev36_20260310T141724Z/load_sanity.json, dev_history.log
+- Testing:
+  - Red test:
+    - `pytest .worktrees/jessica-confidence-architecture/backend/tests/test_registry.py -q -k semantically_equal_two_stage_meta` -> failed (`report["repaired"]` was `True`)
+  - Green verification:
+    - `pytest .worktrees/jessica-confidence-architecture/backend/tests/test_registry.py -q -k semantically_equal_two_stage_meta` -> 1 passed
+    - `pytest .worktrees/jessica-confidence-architecture/backend/tests/test_registry.py -q` -> 30 passed
+  - Fresh-load sanity rerun:
+    - `load_models_for_elder()` on `HK0011_jessica_candidate_safev36_20260310T141724Z` loaded all five rooms with Bathroom `35`, Bedroom `36`, Entrance `26`, Kitchen `27`, and LivingRoom `40`
+    - `platform.two_stage_core_models` contained `Bathroom` and `LivingRoom`
+    - no registry auto-repair was needed on the post-fix load; refreshed `load_sanity.json` records `registry_repair_required=false`
+  - Post-fix replay benchmark rerun:
+    - `python3 tmp/jessica_activity_confidence_benchmark.py --elder-id HK0011_jessica_candidate_safev36_20260310T141724Z --source-file "/Users/dickson/DT/DT_development/Development/New training files/Jessica (sleep and out fixed)/HK0011_jessica_train_17dec2025.xlsx" --output-dir .worktrees/jessica-confidence-architecture/tmp/jessica_17dec_eval_candidate_safev36_20260310T141724Z/final` -> exit 0
+    - safe-candidate metrics were unchanged after the registry fix: overall final accuracy `0.7944`, overall final macro-F1 `0.3974`, Bedroom final macro-F1 `0.2723`, LivingRoom final macro-F1 `0.4340`
+- Decision: The safe candidate is now clean under repeated fresh loads, so it remains the fail-closed promotion-grade candidate for this branch.
+2026-03-10 14:57:37 UTC | TASK-BETA6-JESSICA-INTEGRATION-BRANCH | Created and pushed a clean Jessica integration checkpoint branch
+- Action: Created a clean linked worktree at `.worktrees/jessica-safe-integration` from `6794c6c`, transferred the verified Jessica confidence/runtime, retrain, registry, and review-doc change set from `.worktrees/jessica-confidence-architecture`, verified the isolated branch, committed `6c381e1` (`fix: freeze jessica confidence integration checkpoint`), and pushed `codex/jessica-safe-integration` to `origin`.
+- Code change: GitHub branch `codex/jessica-safe-integration` now freezes the validated code-and-doc checkpoint for the Jessica confidence architecture, safe mixed candidate (`Bedroom_v36` + `LivingRoom_v40`), registry semantic-JSON compare fix, and supporting test/doc coverage. Candidate model namespaces remain referenced by artifact paths in docs and were not promoted to the live `HK0011_jessica` namespace in this step.
+- Testing:
+  - Clean baseline before transfer:
+    - `pytest backend/tests/test_registry.py -q` (in `.worktrees/jessica-safe-integration` before transfer) -> 25 passed
+  - Integration-branch verification after transfer:
+    - `pytest backend/tests/test_policy_config.py backend/tests/test_beta6_policy_config_schemas.py -q` -> 32 passed
+    - `pytest backend/tests/test_training.py -q` -> 107 passed
+    - `pytest backend/tests/test_registry.py -q` -> 30 passed
+    - `pytest backend/tests/test_prediction.py backend/tests/test_beta6_unknown_calibration.py backend/tests/test_beta6_activity_confidence.py -q` -> 26 passed
+- Decision: Freeze the current verified Jessica state in GitHub before any further Bedroom experimentation. Continue Bedroom work in a fresh follow-up branch/worktree starting from `6c381e1`, with the primary model-improvement goal being to make `Bedroom_v37` promotable without requiring a support-gate exception.
+2026-03-10 15:37:12 UTC | TASK-BETA6-BEDROOM-SUPPORT-FIX | Removed the false leakage-free support-gate override and replayed the promotable mixed candidate
+- Action: Created follow-up worktree `.worktrees/jessica-bedroom-support-fix` from the frozen integration checkpoint `6c381e1`, traced the remaining Bedroom support blocker to `train_room_with_leakage_free_scaling()` overriding the authoritative post-training statistical-validity result with a second row-level calibration check, removed that duplicate override, propagated the real post-training gate payload from `post_training_result.gate_stack`, added a regression test, cloned the benchmark-leading candidate namespace into `HK0011_jessica_candidate_supportfix_20260310T2312Z`, reran `Bedroom` on the corrected Dec 4-10 plus Dec 17 workbook pack, replayed the Dec 17 mixed benchmark, and verified the new namespace through a fresh load.
+- Code change: `.worktrees/jessica-bedroom-support-fix/backend/ml/training.py`, `.worktrees/jessica-bedroom-support-fix/backend/tests/test_training.py`, `.worktrees/jessica-bedroom-support-fix/docs/reviews/2026-03-10-beta6-bedroom-livingroom-retrain-blockers.md`
+- Testing:
+  - Red regression proof:
+    - `pytest backend/tests/test_training.py -q -k leakage_free_wrapper_preserves_authoritative_statistical_gate` -> failed on the frozen baseline because the wrapper replaced a passing authoritative gate with `Insufficient minority class support: class 0 has 2 < 30 samples`
+  - Green verification after the fix:
+    - `pytest backend/tests/test_training.py -q -k leakage_free_wrapper_preserves_authoritative_statistical_gate` -> 1 passed
+    - `pytest backend/tests/test_training.py backend/tests/test_gate_integration.py -q` -> 112 passed
+  - Bedroom rerun:
+    - `UnifiedPipeline.train_from_files(... rooms={'Bedroom'} ...)` against `/Users/dickson/DT/DT_development/Development/New training files/Jessica (sleep and out fixed)/HK0011_jessica_train_10dec2025.xlsx` and `/Users/dickson/DT/DT_development/Development/New training files/Jessica (sleep and out fixed)/HK0011_jessica_train_17dec2025.xlsx` -> promoted `Bedroom_v38` in `HK0011_jessica_candidate_supportfix_20260310T2312Z`
+    - authoritative `Bedroom_v38` support gate passed with class support `0=257`, `1=937`, `2=1653`; holdout macro-F1 `0.6257`
+  - Mixed benchmark replay:
+    - `PYTHONPATH=.:backend python3 tmp/jessica_activity_confidence_benchmark.py --elder-id HK0011_jessica_candidate_supportfix_20260310T2312Z --source-file "/Users/dickson/DT/DT_development/Development/New training files/Jessica (sleep and out fixed)/HK0011_jessica_train_17dec2025.xlsx" --output-dir tmp/jessica_17dec_eval_candidate_supportfix_20260310T2312Z/final` -> exit 0
+    - replay metrics matched the earlier benchmark leader exactly: overall final accuracy `0.8048`, overall final macro-F1 `0.4486`, Bedroom final macro-F1 `0.3511`, LivingRoom final macro-F1 `0.4340`
+  - Fresh-load sanity:
+    - `load_models_for_elder()` on `HK0011_jessica_candidate_supportfix_20260310T2312Z` loaded Bathroom `35`, Bedroom `38`, Entrance `26`, Kitchen `27`, and LivingRoom `40`; `platform.two_stage_core_models` contained Bathroom, Bedroom, and LivingRoom
+- Decision: The remaining Bedroom support blocker was a training-path evidence bug, not missing support in the corrected workbook pack. Treat `HK0011_jessica_candidate_supportfix_20260310T2312Z` as the new promotion-grade benchmark candidate; keep `HK0011_jessica_candidate_safev36_20260310T141724Z` only as the conservative fallback if the older Bedroom `v36` posture is still desired.
+2026-03-10 23:04:53 UTC | TASK-BETA6-JESSICA-LIVE-PROMOTION-DEEP-DIVE | Promoted Jessica live to Bedroom v38 + LivingRoom v40 and narrowed the residual model risk
+- Action: Created follow-up worktree `.worktrees/jessica-promotion-deepdive` from `codex/jessica-bedroom-support-fix`, documented the promotion design/plan, added a tested room-wise namespace promotion helper (`backend/scripts/promote_room_versions_from_namespace.py`), backed up the live namespace to `/tmp/hk0011_jessica_live_backup_20260310T225829Z`, copied `HK0011_jessica_candidate_supportfix_20260310T2312Z` into the main workspace `backend/models/`, promoted Bedroom `v38` and LivingRoom `v40` into live `HK0011_jessica` while preserving older room versions, corrected an initial import-path mistake that used the older main-workspace registry code and missed activity-confidence alias materialization, reran the promotion from the worktree code path, replayed the corrected Dec 17 benchmark against live, and wrote a LivingRoom seed-instability review note.
+- Code change: `.worktrees/jessica-promotion-deepdive/docs/plans/2026-03-11-beta6-jessica-promotion-deepdive-design.md`, `.worktrees/jessica-promotion-deepdive/docs/plans/2026-03-11-beta6-jessica-promotion-deepdive.md`, `.worktrees/jessica-promotion-deepdive/backend/scripts/promote_room_versions_from_namespace.py`, `.worktrees/jessica-promotion-deepdive/backend/tests/test_promote_room_versions_from_namespace.py`, `.worktrees/jessica-promotion-deepdive/docs/reviews/2026-03-11-beta6-jessica-live-promotion-and-livingroom-seed-deep-dive.md`, live artifacts under `backend/models/HK0011_jessica/*`, copied candidate namespace `backend/models/HK0011_jessica_candidate_supportfix_20260310T2312Z/*`
+- Testing:
+  - Worktree baseline:
+    - `pytest backend/tests/test_training.py backend/tests/test_registry.py -q` (in `.worktrees/jessica-promotion-deepdive`) -> 138 passed
+  - New helper red-green:
+    - `pytest backend/tests/test_promote_room_versions_from_namespace.py -q` -> red failure before helper existed (`ModuleNotFoundError`)
+    - `pytest backend/tests/test_promote_room_versions_from_namespace.py -q` -> 1 passed after helper implementation
+    - `pytest backend/tests/test_registry.py backend/tests/test_promote_room_versions_from_namespace.py -q` -> 31 passed
+  - Dry run:
+    - promoted copied Jessica namespaces inside `/tmp/beta6_jessica_promo_rehearsal/` and confirmed Bedroom `38` / LivingRoom `40` while preserving older target versions
+  - Live promotion verification:
+    - `load_models_for_elder()` on promoted live `HK0011_jessica` under the worktree code path loaded Bathroom `35`, Bedroom `38`, Entrance `26`, Kitchen `27`, and LivingRoom `40`
+    - `platform.activity_confidence_artifacts` contained all five rooms
+    - `platform.two_stage_core_models` contained Bathroom, Bedroom, and LivingRoom
+    - `PYTHONPATH=.:backend python3 .../jessica_activity_confidence_benchmark.py --elder-id HK0011_jessica --source-file "/Users/dickson/DT/DT_development/Development/New training files/Jessica (sleep and out fixed)/HK0011_jessica_train_17dec2025.xlsx" --output-dir tmp/jessica_17dec_eval_live_promoted_20260310T230119Z/final` -> exit 0
+    - live replay matched the support-fix candidate exactly: overall final accuracy `0.8048`, overall final macro-F1 `0.4486`, Bedroom final macro-F1 `0.3511`, LivingRoom final macro-F1 `0.4340`
+  - Deep-dive finding:
+    - LivingRoom `v39..v43` shared the same sampled prior drift (`~3.97` pp), but only `v40` reached a passing holdout regime; neighboring seeds collapsed into active-heavy holdout distributions and `no_regress_macro_f1_fallback`
+- Decision: Live `HK0011_jessica` should now be treated as promoted to Bedroom `v38` + LivingRoom `v40`. The next model-side thread should stay narrow and focus on LivingRoom optimizer/checkpoint stability under the no-downsample policy; do not reopen the older support-gating or downsample-policy threads unless new evidence appears.
+2026-03-11 11:18:50 UTC | TASK-BETA6-BEDROOM-UPSTREAM-LINEAGE-FIRST-DIVERGENCE | Isolated the first upstream Bedroom divergence to raw source-workbook selection
+- Action: Read the new upstream-root-cause handoff, reconciled the conflicting `Bedroom_v38` training-pack descriptions against the precise `dev_history.log` command record, reconstructed raw Bedroom source populations from the corrected Jessica workbooks via `utils.data_loader.load_sensor_data(..., resample=False)`, compared them with the saved `Bedroom_v38` / `Bedroom_v40` decision-trace pre-sampling counts, and wrote the forensic note `.worktrees/jessica-livingroom-seed-forensic/docs/reviews/2026-03-11-beta6-bedroom-upstream-lineage-first-divergence.md`.
+- Code change: Added `.worktrees/jessica-livingroom-seed-forensic/docs/reviews/2026-03-11-beta6-bedroom-upstream-lineage-first-divergence.md`; appended this investigation entry to `dev_history.log`. No production code changed.
+- Verification:
+  - `dev_history.log` command evidence for `Bedroom_v38` shows `UnifiedPipeline.train_from_files(... rooms={'Bedroom'} ...)` against only `HK0011_jessica_train_10dec2025.xlsx` and `HK0011_jessica_train_17dec2025.xlsx`
+  - `.worktrees/jessica-livingroom-seed-forensic/docs/plans/2026-03-11-beta6-bedroom-separation-retrain.md` and `.worktrees/jessica-livingroom-seed-forensic/tmp/jessica_bedroom_sepfix_20260311T041856Z/build_combined_corrected_pack.py` show `Bedroom_v40` used the corrected Dec 4-10 plus Dec 17 pack
+  - reconstructed raw Bedroom rows:
+    - `v38` source pair (`10dec + 17dec`): `14,604` rows with label share `bedroom_normal_use=8.74%`, `sleep=40.93%`, `unoccupied=50.34%`
+    - `v40` eight-file pack (`4-10 + 17dec`): `61,552` rows with label share `bedroom_normal_use=14.70%`, `sleep=31.89%`, `unoccupied=53.41%`
+  - saved pre-sampling traces preserve the same regime shift:
+    - `Bedroom_v38`: `1288 / 5808 / 7159` (`9.04% / 40.74% / 50.22%`)
+    - `Bedroom_v40`: `8954 / 17437 / 28951` (`16.18% / 31.51% / 52.31%`)
+- Decision: Treat the first strong / irreversible divergence as a source-lineage split before sequence generation and before sampling/calibration. The next narrow experiment should match source lineage across `v38` and `v40` policy postures before proposing any permanent Bedroom training-policy change. Also note a tooling gap: room-level source manifests should be persisted in saved training metadata so future forensic work does not rely on conflicting narrative summaries.
+2026-03-11 11:33:44 UTC | TASK-BETA6-CORRECTION-STUDIO-PROPOSAL-REVIEW | Hardened the new proposal-review UI against DB/render failures after live smoke testing
+- Action: Smoke-tested `backend/export_dashboard.py` under Streamlit and found the new `Proposed Label Review` section could crash the training-file page when the proposal-review DB path raised during render. Added a safe snapshot loader in `backend/services/label_proposal_service.py`, switched the UI to consume that snapshot, and verified the page now degrades to a warning banner instead of crashing while still rendering the import/review controls.
+- Code change: Updated `.worktrees/jessica-livingroom-seed-forensic/backend/services/label_proposal_service.py` with `load_label_review_snapshot(...)`; updated `.worktrees/jessica-livingroom-seed-forensic/backend/export_dashboard.py` to use the guarded loader; extended `.worktrees/jessica-livingroom-seed-forensic/backend/tests/test_label_proposal_service.py` with a DB-failure regression test.
+- Verification:
+  - `python3 -m py_compile backend/export_dashboard.py backend/services/label_proposal_service.py` -> exit 0
+  - `pytest backend/tests/test_label_proposal_service.py -q -k snapshot_degrades_gracefully_on_db_errors` -> 1 passed
+  - `pytest backend/tests/test_label_proposal_service.py backend/tests/test_ui_services.py -q` -> 30 passed
+  - Streamlit AppTest loaded the training-file flow, rendered `4. Proposed Label Review`, and showed `Proposal review is temporarily unavailable: ...` instead of aborting the page when DB access failed in this environment
+- Decision: Keep the proposal-review feature scoped for commit, but preserve the fail-soft DB behavior as part of the baseline so ops can still reach the training-file correction UI even when the proposal DB connection is unavailable.
+2026-03-11 12:11:15 UTC | TASK-BETA6-LIVINGROOM-LABEL-TIMESTAMP-FORENSIC | Narrowed LivingRoom label-side opportunity to four ops-review segments and produced an importable proposal pack
+- Action: Rejoined the corrected Jessica LivingRoom source labels to the `v46`, `v50`, and `v52` cross-date replay outputs at the timestamp level, inspected the Dec 4 / Dec 17 exemplar blocks against raw sensor continuity, rejected those exemplar reversals as model-side rather than label-side, and distilled a precision-first proposal pack around four narrower boundary/island conflicts on Dec 5, Dec 7, and Dec 10. Wrote the reproducible script `.worktrees/jessica-livingroom-seed-forensic/tmp/livingroom_label_timestamp_forensic.py`, generated ops artifacts under `.worktrees/jessica-livingroom-seed-forensic/tmp/livingroom_label_timestamp_forensic_20260311T120957Z/`, and documented the result in `.worktrees/jessica-livingroom-seed-forensic/docs/reviews/2026-03-11-beta6-livingroom-label-timestamp-forensic.md`.
+- Code change: Added `.worktrees/jessica-livingroom-seed-forensic/tmp/livingroom_label_timestamp_forensic.py`; added `.worktrees/jessica-livingroom-seed-forensic/docs/reviews/2026-03-11-beta6-livingroom-label-timestamp-forensic.md`; generated `ops_review.csv`, `proposed_timestamp_set.csv`, `proposal_pack.json`, and `summary.json` in the new timestamp-forensic output directory.
+- Verification:
+  - `python3 -m py_compile tmp/livingroom_label_timestamp_forensic.py` -> exit 0
+  - `PYTHONPATH='.:backend' python3 tmp/livingroom_label_timestamp_forensic.py` -> generated `4` segment proposals and `63` timestamp rows
+  - `PYTHONPATH='.:backend' python3 -c "... _normalize_proposals_df(pd.DataFrame(payload['items']), ...) ..."` -> normalized cleanly to `67` proposal rows (`4` segment, `63` timestamp), all `review_status=proposed`
+  - Manual inspection confirmed:
+    - Dec 4 `00:35-00:42`, `05:22-05:29`, `07:20-07:25` stay model-side, not relabel candidates
+    - Dec 17 `14:36-14:45` and `15:47-15:52` stay model-side recovery wins for `v52`, not relabel candidates
+    - strongest label-side conflict is the Dec 7 `21:18:50-21:22:00` boundary oscillation where truth flips twice while all three models form a cleaner occupied-then-unoccupied split
+- Decision: Treat LivingRoom label improvement as a narrow ops-review path, not a broad explanation for the cross-date failure. Use the generated proposal pack for human review in Correction Studio, but keep the main root-cause verdict unchanged: Dec 4-17 instability is still dominated by model-shape brittleness.
+2026-03-11 12:06:51 UTC | TASK-BETA6-BEDROOM-MATCHED-LINEAGE-V38-POLICY-REPLAY | Ran the full-pack Bedroom replay with v38-style sampling posture and confirmed the source-lineage regime shift
+- Action: Built a corrected combined Jessica training pack for Dec 4-10 plus Dec 17, cloned the live Jessica namespace into `HK0011_jessica_candidate_bedroom_lineagev38_20260311T113038Z`, retrained only Bedroom under current branch defaults that restore the old Bedroom transition-focus / minority multipliers, activated the new `Bedroom_v39`, replayed Dec 17, and wrote the forensic note `.worktrees/jessica-livingroom-seed-forensic/docs/reviews/2026-03-11-beta6-bedroom-matched-lineage-v38-policy-replay.md`.
+- Code change: Added `.worktrees/jessica-livingroom-seed-forensic/docs/reviews/2026-03-11-beta6-bedroom-matched-lineage-v38-policy-replay.md`; appended this investigation entry to `dev_history.log`. No production code changed.
+- Verification:
+  - replay workspace artifacts:
+    - `tmp/jessica_bedroom_lineagev38_20260311T113038Z/combined_corrected_pack.parquet`
+    - `tmp/jessica_bedroom_lineagev38_20260311T113038Z/train_metrics.json`
+    - `tmp/jessica_bedroom_lineagev38_20260311T113038Z/load_sanity.json`
+    - `tmp/jessica_17dec_eval_candidate_bedroom_lineagev38_20260311T113038Z/final/comparison/summary.json`
+  - Bedroom policy posture comparison from saved decision traces:
+    - live `v38`: transition-focus max multiplier `3`, minority max multiplier `6`
+    - candidate `v40`: transition-focus effectively disabled with multiplier `1`, minority max multiplier `1`
+    - matched-lineage replay `v39`: transition-focus max multiplier `3`, minority max multiplier `6`
+  - replay holdout result:
+    - saved `Bedroom_v39`, policy hash `8e24355aa6eb14636b14adea6fdb13dabcc8dfa801355a1c5d2bb33ed54a54e2`
+    - gate pass `false`
+    - best holdout macro-F1 `0.5685497591261085` vs no-regress floor `0.5757134795187449`
+    - critical recall: `bedroom_normal_use=0.1053`, `sleep=0.6196`, `unoccupied=0.9598`
+  - replay training support:
+    - pre-sampling counts exactly matched the full `v40` eight-file pack: `8954 / 17437 / 28951`
+    - post-sampling counts became `17073 / 17525 / 37059`
+  - Dec 17 Bedroom replay comparison:
+    - live `v38`: final macro-F1 `0.3511`, predicted share `42.06% / 39.99% / 17.83%`, rewrites `16`
+    - candidate `v40`: final macro-F1 `0.3932`, predicted share `6.23% / 23.27% / 70.50%`, rewrites `0`
+    - matched-lineage replay `v39`: final macro-F1 `0.3205`, predicted share `20.63% / 22.17% / 57.06%`, rewrites `32`
+  - Bedroom confusion signatures:
+    - live `v38`: `unoccupied -> bedroom_normal_use = 2849`
+    - candidate `v40`: `sleep -> unoccupied = 1468`, `bedroom_normal_use -> unoccupied = 548`
+    - matched-lineage replay `v39`: `sleep -> unoccupied = 1496`, `unoccupied -> bedroom_normal_use = 1381`, `bedroom_normal_use -> unoccupied = 303`
+- Decision: Treat the expanded Dec 4-10 plus Dec 17 source lineage as sufficient to move Bedroom out of the old `v38` regime even when the Bedroom-specific sampling posture is restored. The later `v40` rollback policy still changes the trade-off shape, but it no longer looks like the earliest or dominant cause. If one more isolation run is needed, use the inverse control: apply the `v40` rollback posture to the small `10dec + 17dec` source pair.
+2026-03-11 13:07:49 UTC | TASK-BETA6-BEDROOM-ROOT-FIX-PROGRAM-PLAN | Wrote the Bedroom-first root-fix design and execution plan
+- Action: Converted the agreed direction into a formal design and implementation plan that keeps the deep forensic work on `Bedroom` first, reserves only lightweight cross-room observability until the root cause is proven, and defines the explicit branch point between a Bedroom data fix and a Bedroom regime-shift robustness fix.
+- Code change: Added `.worktrees/jessica-livingroom-seed-forensic/docs/plans/2026-03-11-beta6-bedroom-root-fix-program-design.md` and `.worktrees/jessica-livingroom-seed-forensic/docs/plans/2026-03-11-beta6-bedroom-root-fix-program.md`; appended this planning entry to `dev_history.log`. No production code changed.
+- Verification:
+  - design scope revalidated against the latest forensic notes:
+    - `.worktrees/jessica-livingroom-seed-forensic/docs/reviews/2026-03-11-beta6-bedroom-upstream-root-cause-handoff.md`
+    - `.worktrees/jessica-livingroom-seed-forensic/docs/reviews/2026-03-11-beta6-bedroom-upstream-lineage-first-divergence.md`
+    - `.worktrees/jessica-livingroom-seed-forensic/docs/reviews/2026-03-11-beta6-bedroom-matched-lineage-v38-policy-replay.md`
+  - plan scope fixed the decision rule explicitly:
+    - `Bedroom` gets the deep ablation / segment audit / root-fix program
+    - other rooms get only source-lineage observability until Bedroom evidence proves wider applicability
+  - the execution plan includes the final decision gate:
+    - Branch A: harmful slices are bad data -> Bedroom-specific data correction / exclusion
+    - Branch B: harmful slices are valid alternate regime -> Bedroom robustness / promotion hardening first, then only later consider broader rollout
+- Decision: Do not widen this thread into an all-room forensic program yet. Execute the Bedroom-first plan, and only generalize the fix after the Bedroom evidence proves whether the mechanism is data-specific or systemic.
+2026-03-11 16:21:37 UTC | TASK-3 bedroom-root-fix-tighten | Reconciled the Task 3 checkpoint artifacts, closed the minimum cumulative gap, and made the root log canonical for this branch handoff.
+- Artifact fixes:
+  - updated `.worktrees/jessica-livingroom-seed-forensic/backend/scripts/run_bedroom_root_cause_matrix.py` so manifest `status` reflects experiment outcome, `execution_status` stays separate, and `holdout_bedroom_normal_use_recall` comes from checkpoint-selection metrics
+  - updated `.worktrees/jessica-livingroom-seed-forensic/backend/tests/test_run_bedroom_root_cause_matrix.py`; `pytest backend/tests/test_run_bedroom_root_cause_matrix.py -q` -> `4 passed`
+  - regenerated the dry-run manifest and repaired the saved tighten manifest at `.worktrees/jessica-livingroom-seed-forensic/tmp/bedroom_root_cause_matrix_tighten_20260311T153500Z/manifest.json`
+- Evidence:
+  - fresh tighten rerun executed `anchor`, `add_2025-12-04`, `add_2025-12-05`, and `cumulative_through_2025-12-05`
+  - earliest harmful single-day target stayed `2025-12-05`
+  - `cumulative_through_2025-12-05` was also harmful on Dec 17 replay, so cumulative interaction is not required for the break to appear, but cumulative amplification remains possible
+- Logging reconciliation:
+  - Task 1-3 branch-local execution history remains in `.worktrees/jessica-livingroom-seed-forensic/dev_history.log`
+  - `/Users/dickson/DT/DT_development/Development/Beta_6/dev_history.log` is now the canonical handoff log going forward for this Bedroom root-fix thread
+2026-03-11 16:21:37 UTC | TASK-4 bedroom-root-fix | Started the harmful-day segment audit with a Bedroom-only tool and bounded references.
+- Code changes:
+  - added `.worktrees/jessica-livingroom-seed-forensic/backend/scripts/bedroom_day_segment_audit.py`
+  - added `.worktrees/jessica-livingroom-seed-forensic/backend/tests/test_bedroom_day_segment_audit.py`
+  - updated `.worktrees/jessica-livingroom-seed-forensic/docs/reviews/2026-03-11-beta6-bedroom-date-ablation-matrix.md` with the tightened Task 3 conclusion and Task 4 carry-forward target
+- Verification:
+  - `pytest backend/tests/test_bedroom_day_segment_audit.py -q` -> initial red phase `4 failed` because the script did not exist, then pass after implementation: `4 passed`
+  - `PYTHONPATH=.:backend python3 backend/scripts/bedroom_day_segment_audit.py --input-file '.../HK0011_jessica_train_5dec2025.xlsx' --reference-file '.../HK0011_jessica_train_4dec2025.xlsx' --reference-file '.../HK0011_jessica_train_10dec2025.xlsx' --output-dir .worktrees/jessica-livingroom-seed-forensic/tmp/bedroom_day_segment_audit_20260311T0018Z` -> wrote `summary.json` and `blocks.parquet`
+- Early audit signal:
+  - the strongest reference deltas for `2025-12-05` appear at `12:00-14:00`, `10:00-12:00`, and `20:00-22:00`
+  - no obvious sparsity or missingness anomaly was flagged in those standout blocks, so Task 5 should treat them first as candidate regime-shift slices rather than obvious bad-data gaps
+2026-03-11 16:24:08 UTC | TASK-5 bedroom-root-fix | Classified the harmful `2025-12-05` Bedroom segments and reached the branch decision gate.
+- Verification artifacts:
+  - reran the Bedroom-only segment audit at 60-minute resolution into `.worktrees/jessica-livingroom-seed-forensic/tmp/bedroom_day_segment_audit_20260312T60m/summary.json`
+  - strongest 60-minute blocks were `12:00-13:00`, `20:00-21:00`, `13:00-14:00`, `10:00-11:00`, and `11:00-12:00`
+  - all blocks had full density, `largest_gap_seconds=10`, and zero sparsity / missingness flags
+- Classification:
+  - midday (`10:00-14:00`) and evening (`20:00-21:00`) standout blocks show long coherent `bedroom_normal_use` runs where the good references are mostly `unoccupied`
+  - dawn (`05:00-06:00`) shows a coherent all-`unoccupied` slice relative to mostly-sleep references, but still without corruption indicators
+  - evidence therefore supports Branch B: valid alternate regime, not obviously bad / inconsistent data
+- Documentation:
+  - wrote `.worktrees/jessica-livingroom-seed-forensic/docs/reviews/2026-03-11-beta6-bedroom-harmful-day-segment-audit.md`
+2026-03-11 22:39:14 UTC | TASK-6B bedroom-root-fix | Hardened Bedroom promotion review against valid alternate-regime instability and verified the saved evidence on a fresh harmful-target rerun.
+- Code and tests:
+  - updated `.worktrees/jessica-livingroom-seed-forensic/backend/ml/training.py` to compute Bedroom-only grouped-by-date stability summaries and promotion-time drift summaries, and to emit explicit Bedroom instability watch reasons
+  - updated `.worktrees/jessica-livingroom-seed-forensic/backend/ml/legacy/registry.py` to persist grouped-date stability and promotion-time drift summaries in saved version metadata
+  - updated `.worktrees/jessica-livingroom-seed-forensic/backend/tests/test_training.py` and `.worktrees/jessica-livingroom-seed-forensic/backend/tests/test_registry.py`
+  - red/green verification:
+    - `pytest backend/tests/test_training.py -q -k grouped_date_stability` -> red first, then `2 passed`
+    - `pytest backend/tests/test_registry.py -q -k grouped_date_stability` -> red first, then `1 passed`
+    - `pytest backend/tests/test_training.py backend/tests/test_registry.py -q` -> `150 passed`
+- Fresh Bedroom candidate rerun:
+  - `PYTHONPATH=.:backend python3 backend/scripts/run_bedroom_root_cause_matrix.py --output-dir tmp/bedroom_root_cause_matrix_task6b_20260312T002900Z --variant-name add_2025-12-05` -> completed and wrote `.worktrees/jessica-livingroom-seed-forensic/tmp/bedroom_root_cause_matrix_task6b_20260312T002900Z/manifest.json`
+  - candidate namespace: `HK0011_jessica_candidate_bedroom_rootmatrix_bedroom_root_cause_matrix_task6b_20260312T002900Z_01_add_2025-12-05`
+  - holdout macro-F1 / `bedroom_normal_use` recall: `0.66987038118556` / `0.4990791896869245`
+  - Dec 17 replay final macro-F1: `0.7231961200695896`
+- New saved instability evidence:
+  - grouped-by-date stability now persists in the candidate decision trace and version history
+  - `unstable_across_dates=true`, `worst_date=2025-12-17`, `macro_f1_range=0.2184746569435445`, `bedroom_normal_use` recall range `0.8427375318529304`
+  - explicit risk markers now appear in saved metadata: `promotion_risk_flags=['unstable_date_slices:bedroom']` and `gate_watch_reasons=['grouped_date_stability_watch:bedroom:worst_date=2025-12-17:macro_range=0.218']`
+  - promotion-time drift summary marks the Bedroom candidate `risk_level=high` and preserves pre-sampling label-share differences that expose the alternate regime at review time
+- Documentation:
+  - wrote `.worktrees/jessica-livingroom-seed-forensic/docs/reviews/2026-03-11-beta6-bedroom-regime-shift-hardening.md`
+- Caveat:
+  - local PostgreSQL auth still blocked historical-corrections access; Task 6B verification is within the no-corrections replay environment
+2026-03-11 23:08:40 UTC | TASK-6B bedroom-root-fix-followup | Exposed the saved Bedroom instability payload in the matrix manifest and made the Bedroom promotion policy explicit.
+- Policy decision:
+  - Bedroom instability is now blocking, not watch-only, when saved candidate metadata shows `promotion_time_drift_summary.risk_level=high`, grouped-date instability, and `promotion_risk_flags=['unstable_date_slices:bedroom']`
+  - rationale: the Bedroom-first plan/design says unstable valid regime shifts must be rejected before promotion, and the Dec 17 replay alone (`macro_f1=0.7231961200695896`) was not sufficient to surface the risk
+- Code and tests:
+  - updated `.worktrees/jessica-livingroom-seed-forensic/backend/scripts/run_bedroom_root_cause_matrix.py` to propagate `grouped_date_stability`, `promotion_time_drift_summary`, `promotion_risk_flags`, `gate_watch_reasons`, and `gate_reasons` into each manifest variant
+  - updated `.worktrees/jessica-livingroom-seed-forensic/backend/ml/training.py` to block Bedroom promotion on the explicit high-risk unstable-date-slice condition
+  - updated `.worktrees/jessica-livingroom-seed-forensic/backend/tests/test_run_bedroom_root_cause_matrix.py` and `.worktrees/jessica-livingroom-seed-forensic/backend/tests/test_training.py`
+  - verification:
+    - `pytest backend/tests/test_run_bedroom_root_cause_matrix.py -q -k variant_review_surface` -> red first, then `1 passed`
+    - `pytest backend/tests/test_training.py -q -k high_risk_bedroom_regime_instability` -> red first, then `1 passed`
+    - `pytest backend/tests/test_run_bedroom_root_cause_matrix.py backend/tests/test_training.py backend/tests/test_registry.py -q` -> `156 passed`
+    - `python3 -m py_compile backend/scripts/run_bedroom_root_cause_matrix.py backend/ml/training.py` -> passed
+- Fresh Bedroom rerun:
+  - `PYTHONPATH=.:backend python3 backend/scripts/run_bedroom_root_cause_matrix.py --output-dir tmp/bedroom_root_cause_matrix_policy_20260311T225135Z --variant-name add_2025-12-05` -> completed and wrote `.worktrees/jessica-livingroom-seed-forensic/tmp/bedroom_root_cause_matrix_policy_20260311T225135Z/manifest.json`
+  - the fresh manifest now exposes the saved Bedroom instability payload directly and shows `status=gate_fail`, `gate_pass=false`, and `gate_reasons=['regime_instability_failed:bedroom:high_risk_unstable_date_slices:worst_date=2025-12-17']`
+- Documentation:
+  - wrote `.worktrees/jessica-livingroom-seed-forensic/docs/reviews/2026-03-11-beta6-bedroom-instability-promotion-policy.md`
+- Caveat:
+  - local PostgreSQL auth still blocked historical-corrections access; this follow-up is verified within the no-corrections replay environment
+2026-03-11 23:24:11 UTC | TASK-7 bedroom-root-fix | Generalized lightweight lineage observability across rooms without widening Bedroom-specific gating.
+- Code and tests:
+  - updated `.worktrees/jessica-livingroom-seed-forensic/backend/ml/training.py` to persist all-room `source_manifest`, `source_fingerprint`, `pre_sampling_label_counts_by_date`, and compact `source_lineage_review_summary`
+  - updated `.worktrees/jessica-livingroom-seed-forensic/backend/tests/test_training.py`
+  - kept `grouped_date_stability`, `promotion_time_drift_summary`, and instability gating Bedroom-only
+  - red/green verification:
+    - `pytest backend/tests/test_training.py -q -k room_lineage_observability` -> red first on missing top-level review fields, then `1 passed`
+    - `pytest backend/tests/test_training.py backend/tests/test_registry.py -q` -> `152 passed`
+    - `python3 -m py_compile backend/ml/training.py` -> passed
+- Direct readback:
+  - `PYTHONPATH=.:backend python3 - <<'PY' ...` on `LivingRoom` returned a populated `source_lineage_review_summary` with normalized `source_class_share_by_date` and left `promotion_time_drift_summary` at `room_not_targeted`
+- Documentation:
+  - wrote `.worktrees/jessica-livingroom-seed-forensic/docs/reviews/2026-03-11-beta6-room-lineage-observability.md`
+- Boundary:
+  - no all-room promotion blocking or watch logic was added in this task
+- Caveat:
+  - local PostgreSQL auth remains unavailable, but Task 7 verification did not depend on historical-corrections access
+2026-03-11 23:38:46 UTC | TASK-8 bedroom-root-fix | Wrote the final decision-grade root-fix note after re-checking the original success criteria against fresh test output and saved artifacts.
+- Success-criteria verdict:
+  - proved the root-cause branch: valid alternate regime, not obvious bad data
+  - implemented the matching production-safety fix: Bedroom instability is now explicit and blocking at promotion time
+  - validated the artifact chain and regression coverage with fresh command output
+  - completed the lightweight all-room lineage observability boundary without widening all-room gating
+- Fresh verification:
+  - `pytest backend/tests/test_run_bedroom_root_cause_matrix.py backend/tests/test_bedroom_day_segment_audit.py backend/tests/test_training.py backend/tests/test_registry.py -q` -> `161 passed`
+  - fresh artifact readback confirmed:
+    - earliest harmful target remains `2025-12-05`
+    - `add_2025-12-05` and `cumulative_through_2025-12-05` are both harmful versus the anchor on Dec 17 replay
+    - harmful-day audit standout blocks remain coherent and unflagged
+    - Bedroom policy manifest still shows `status=gate_fail`, `risk_level=high`, and `regime_instability_failed:bedroom:high_risk_unstable_date_slices:worst_date=2025-12-17`
+    - all-room lineage observability exists while non-Bedroom drift/gating remains `room_not_targeted`
+- Final decision:
+  - the root fix solved promotion safety and provenance visibility
+  - it did not claim to solve Bedroom model robustness across both regimes, which remains future improvement work
+- Documentation:
+  - wrote `.worktrees/jessica-livingroom-seed-forensic/docs/reviews/2026-03-11-beta6-bedroom-root-fix-final.md`
+- Caveat:
+  - local PostgreSQL auth still blocked historical-corrections access, so the final note remains scoped to the no-corrections replay environment
+2026-03-12 01:02:14 UTC | TASK-9 jessica-pre-final-testing | Wrote the deep room-by-room pre-final testing checklist for the consolidated Jessica testing branch.
+- Scope:
+  - target branch/worktree: `codex/jessica-pre-final-testing`
+  - target candidate namespace: `HK0011_jessica_candidate_supportfix_20260310T2312Z`
+  - expected room set: `Bathroom_v35`, `Bedroom_v38`, `Entrance_v26`, `Kitchen_v27`, `LivingRoom_v40`
+- Documentation:
+  - wrote `.worktrees/jessica-pre-final-testing/docs/plans/2026-03-12-beta6-jessica-pre-final-testing-checklist.md`
+- Checklist design:
+  - shared preflight plus room-specific sign-off blocks for `Bathroom`, `Bedroom`, `Kitchen`, and `LivingRoom`
+  - keeps `Bedroom` caveat explicit: operational anchor is acceptable for pre-final testing, but structural mixed-regime robustness remains open future work
+- Rationale:
+  - user requested deeper validation by room instead of a fast release-confidence pass
+2026-03-12 01:16:28 UTC | TASK-10 jessica-pre-final-testing | Added an execution sheet template and locked the required workbook scope for the new-thread pre-final run.
+- Documentation:
+  - wrote `.worktrees/jessica-pre-final-testing/docs/plans/2026-03-12-beta6-jessica-pre-final-testing-execution-sheet.md`
+- File-scope decision:
+  - primary required pre-final replay file is corrected `HK0011_jessica_train_17dec2025.xlsx`
+  - corrected `2025-12-04..2025-12-10` workbooks remain optional auxiliary files for provenance or room-specific follow-up only
+- Rationale:
+  - this thread is validating an already-assembled candidate namespace, not starting a new full-pack retrain
+2026-03-12 02:12:09 UTC | TASK-11 jessica-pre-final-signoff | Finalized the Jessica pre-final sign-off package after the verified Dec 17 replay and room-by-room review.
+- Documentation:
+  - wrote `.worktrees/jessica-pre-final-testing/docs/reviews/2026-03-12-beta6-jessica-pre-final-signoff.md`
+  - updated `.worktrees/jessica-pre-final-testing/docs/plans/2026-03-12-beta6-jessica-pre-final-testing-checklist.md` to remove the stale expectation that Bedroom must appear in `platform.two_stage_core_models`
+  - retained the completed execution record in `.worktrees/jessica-pre-final-testing/docs/plans/2026-03-12-beta6-jessica-pre-final-testing-execution-sheet.md`
+- Decision:
+  - Jessica pre-final status is `GO`
+  - `Bathroom`, `Kitchen`, and `LivingRoom` are `pass`
+  - `Bedroom` is `conditional` under the frozen `Bedroom_v38` fail-closed operating choice
+- Caveats carried forward:
+  - Bedroom remains structurally unstable across valid alternate regimes and is not fully solved
+  - the no-historical-corrections PostgreSQL caveat remains
+  - first-load alias self-heal was recorded as a runtime note for possible small cleanup later
+2026-03-12 01:27:00 UTC | TASK-11 jessica-pre-final-testing | Started Jessica pre-final validation in .worktrees/jessica-pre-final-testing on branch codex/jessica-pre-final-testing targeting candidate HK0011_jessica_candidate_supportfix_20260310T2312Z.
+- Planned checks: focused regression suite, syntax sanity, clean candidate load sanity, Dec 17 replay, room-by-room sign-off, and final GO/NO-GO decision.
+2026-03-12 01:29:05 UTC | TASK-11 jessica-pre-final-testing | Completed checklist preflight regression and syntax gates in .worktrees/jessica-pre-final-testing.
+- Verification: pytest backend/tests/test_run_bedroom_root_cause_matrix.py backend/tests/test_bedroom_day_segment_audit.py backend/tests/test_training.py backend/tests/test_registry.py -q -> 161 passed, 3 warnings in 3.04s.
+- Verification: python3 -m py_compile backend/ml/pipeline.py backend/ml/training.py backend/ml/legacy/registry.py backend/scripts/run_bedroom_root_cause_matrix.py backend/scripts/bedroom_day_segment_audit.py -> passed.
+2026-03-12 01:38:17 UTC | TASK-11 jessica-pre-final-testing | Completed Jessica pre-final validation for HK0011_jessica_candidate_supportfix_20260310T2312Z.
+- Regression/syntax: pytest target suite -> 161 passed; py_compile target files -> passed.
+- Load sanity: loaded Bathroom/Bedroom/Entrance/Kitchen/LivingRoom with versions 35/38/26/27/40; first load self-healed alias drift, recheck stable; two_stage_core_models=Bathroom,LivingRoom; Bedroom_v38 runtime_enabled=false so Bedroom is single-stage fallback by design after the runtime root fix.
+- Dec 17 replay: overall accuracy=0.8417598841689825, overall macro_f1=0.4663352546942085, summary=/Users/dickson/DT/DT_development/Development/Beta_6/.worktrees/jessica-pre-final-testing/tmp/jessica_17dec_eval_candidate_supportfix_prefinal_20260312T0935Z/final/comparison/summary.json.
+- Room verdicts: Bathroom=pass, Bedroom=conditional, Kitchen=pass, LivingRoom=pass.
+- Final decision: GO for pre-final testing with Bedroom explicitly fail-closed/conditional and the stale checklist expectation about Bedroom in two_stage_core_models called out for follow-up.
 2026-03-12 04:25:00 UTC | TASK-12 beta61-beta62-doc-refresh | Updated Beta 6.1 / Beta 6.2 source-of-truth planning docs to reflect Jessica pre-final GO evidence, Bedroom conditional fragility and saved-topology runtime caveat, LivingRoom/Bedroom replay diagnostics, governed intake/quarantine, grouped date/user robustness, and certification tracking for PostgreSQL/historical-corrections availability.
 - Documentation:
   - updated `docs/plans/2026-03-09-beta61-beta62-reliable-activity-timeline-design.md`
@@ -37,3 +423,14 @@
 - Scope constraints:
   - docs-only change; no production code modified in this task
   - preserved unrelated local worktree changes outside the staged planning docs
+2026-03-12 21:05:11 UTC | TASK-13 beta62-activity-confidence-integration | Completed the next execution task by wiring activity-confidence artifacts through training policy/config, runtime low-confidence gating, unknown-hook confidence input, and save/load persistence paths used by the current branch.
+- Code updates:
+  - added `activity_confidence` defaults and env parsing in `backend/config/beta6_policy_defaults.yaml` and `backend/ml/policy_config.py`
+  - integrated training-side artifact production and trace/metrics emission in `backend/ml/training.py`
+  - integrated runtime calibrated-confidence thresholding and unknown-hook confidence forwarding in `backend/ml/legacy/prediction.py`
+- Test updates:
+  - expanded coverage in `backend/tests/test_policy_config.py`, `backend/tests/test_training.py`, and `backend/tests/test_prediction.py`
+- Verification:
+  - `pytest backend/tests/test_beta6_activity_confidence.py backend/tests/test_prediction.py backend/tests/test_training.py backend/tests/test_registry.py backend/tests/test_beta6_policy_config_schemas.py backend/tests/test_policy_config.py -q` -> `173 passed`
+  - `pytest backend/tests/test_beta6_unknown_calibration.py backend/tests/test_prediction_beta6_runtime_hook_parity.py -q` -> `7 passed`
+  - `python3 -m py_compile backend/ml/training.py backend/ml/legacy/prediction.py backend/ml/legacy/registry.py backend/ml/beta6/serving/prediction.py backend/ml/beta6/serving/runtime_hooks.py backend/ml/policy_config.py` -> passed

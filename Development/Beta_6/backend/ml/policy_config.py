@@ -8,6 +8,12 @@ from typing import Any, Mapping
 
 from elderlycare_v1_16.preprocessing.gap_policy import resolve_max_ffill_gap_seconds
 from ml.policy_defaults import (
+    get_activity_confidence_calibration_method_default,
+    get_activity_confidence_enabled_default,
+    get_activity_confidence_fallback_threshold_default,
+    get_activity_confidence_max_near_threshold_fraction_default,
+    get_activity_confidence_min_support_per_class_default,
+    get_activity_confidence_threshold_band_width_default,
     get_calibration_precision_targets_by_label,
     get_calibration_recall_floors_by_label,
     get_clinical_priority_multipliers_by_label,
@@ -356,6 +362,18 @@ class CalibrationPolicy:
 
 
 @dataclass
+class ActivityConfidencePolicy:
+    enabled: bool = field(default_factory=get_activity_confidence_enabled_default)
+    calibration_method: str = field(default_factory=get_activity_confidence_calibration_method_default)
+    min_support_per_class: int = field(default_factory=get_activity_confidence_min_support_per_class_default)
+    threshold_band_width: float = field(default_factory=get_activity_confidence_threshold_band_width_default)
+    max_near_threshold_fraction: float = field(
+        default_factory=get_activity_confidence_max_near_threshold_fraction_default
+    )
+    fallback_threshold: float = field(default_factory=get_activity_confidence_fallback_threshold_default)
+
+
+@dataclass
 class ReleaseGatePolicy:
     evidence_profile: str = "production"
     allow_gate_config_fallback_pass: bool = True
@@ -482,6 +500,7 @@ class TrainingPolicy:
     unoccupied_downsample: UnoccupiedDownsamplePolicy = field(default_factory=UnoccupiedDownsamplePolicy)
     minority_sampling: MinoritySamplingPolicy = field(default_factory=MinoritySamplingPolicy)
     calibration: CalibrationPolicy = field(default_factory=CalibrationPolicy)
+    activity_confidence: ActivityConfidencePolicy = field(default_factory=ActivityConfidencePolicy)
     release_gate: ReleaseGatePolicy = field(default_factory=ReleaseGatePolicy)
     resampling: ResamplingPolicy = field(default_factory=ResamplingPolicy)
     data_viability: DataViabilityPolicy = field(default_factory=DataViabilityPolicy)
@@ -688,6 +707,44 @@ def load_policy_from_env(environ: Mapping[str, str] | None = None) -> TrainingPo
                 calib.recall_floors_by_label[label] = float(min(max(float(value), 0.0), 1.0))
             except (TypeError, ValueError):
                 continue
+
+    activity_conf = policy.activity_confidence
+    activity_conf.enabled = _is_truthy(
+        env.get("ENABLE_ACTIVITY_CONFIDENCE", str(activity_conf.enabled))
+    )
+    method = str(
+        env.get("ACTIVITY_CONFIDENCE_CALIBRATION_METHOD", activity_conf.calibration_method)
+    ).strip().lower()
+    if method not in {"identity", "isotonic"}:
+        method = activity_conf.calibration_method
+    activity_conf.calibration_method = method
+    activity_conf.min_support_per_class = _read_int_env(
+        env,
+        "ACTIVITY_CONFIDENCE_MIN_SUPPORT_PER_CLASS",
+        activity_conf.min_support_per_class,
+        minimum=1,
+    )
+    activity_conf.threshold_band_width = _read_float_env(
+        env,
+        "ACTIVITY_CONFIDENCE_THRESHOLD_BAND_WIDTH",
+        activity_conf.threshold_band_width,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    activity_conf.max_near_threshold_fraction = _read_float_env(
+        env,
+        "ACTIVITY_CONFIDENCE_MAX_NEAR_THRESHOLD_FRACTION",
+        activity_conf.max_near_threshold_fraction,
+        minimum=0.0,
+        maximum=1.0,
+    )
+    activity_conf.fallback_threshold = _read_float_env(
+        env,
+        "ACTIVITY_CONFIDENCE_FALLBACK_THRESHOLD",
+        activity_conf.fallback_threshold,
+        minimum=0.0,
+        maximum=1.0,
+    )
 
     # Resampling policy.
     default_gap = policy.resampling.max_ffill_gap_seconds

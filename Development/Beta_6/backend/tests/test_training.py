@@ -91,6 +91,39 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertGreater(float(debug.get("transition_count", 0)), 0.0)
         self.assertGreater(float(np.max(weights)), 1.0)
 
+    def test_calibrate_class_thresholds_builds_activity_confidence_artifact(self):
+        self.mock_platform.label_encoders["room1"].classes_ = ["walking", "sitting"]
+        model = MagicMock()
+        model.predict.return_value = np.asarray(
+            [
+                [0.92, 0.08],
+                [0.85, 0.15],
+                [0.72, 0.28],
+                [0.60, 0.40],
+                [0.58, 0.42],
+                [0.52, 0.48],
+                [0.30, 0.70],
+                [0.12, 0.88],
+            ],
+            dtype=np.float32,
+        )
+        X_calib = np.zeros((8, 5, 3), dtype=np.float32)
+        y_calib = np.asarray([0, 0, 0, 0, 0, 0, 1, 1], dtype=np.int32)
+
+        thresholds = self.pipeline._calibrate_class_thresholds(
+            model=model,
+            X_calib=X_calib,
+            y_calib=y_calib,
+            room_name="room1",
+        )
+
+        artifact = self.pipeline._last_activity_confidence_artifact
+        self.assertIsInstance(artifact, dict)
+        self.assertEqual(artifact["schema_version"], "beta6.activity_confidence.v1")
+        self.assertIn("walking", artifact["thresholds_by_label"])
+        self.assertAlmostEqual(float(thresholds[0]), float(artifact["thresholds_by_label"]["walking"]), places=6)
+        self.assertTrue(any(str(entry.get("label")) == "walking" for entry in self.pipeline._last_calibration_debug))
+
     @patch("ml.training.precision_recall_curve")
     def test_calibrate_two_stage_stage_a_threshold_uses_stage_a_bounds(self, mock_pr_curve):
         n = 80

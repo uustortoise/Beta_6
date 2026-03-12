@@ -35,6 +35,7 @@ class TestPredictionPipeline(unittest.TestCase):
         self.mock_platform.room_models = {'room1': MagicMock()}
         # Keep thresholds deterministic; MagicMock auto-attrs can create false calibrated paths.
         self.mock_platform.class_thresholds = {}
+        self.mock_platform.activity_confidence_artifacts = {}
         
         # Mock create_sequences
         self.mock_platform.create_sequences.return_value = np.zeros((2, 5, 2))
@@ -216,6 +217,104 @@ class TestPredictionPipeline(unittest.TestCase):
         self.assertTrue((pred_df['predicted_activity'] == 'walking').all())
         stage_a_model.predict.assert_called_once()
         self.mock_platform.room_models['room1'].predict.assert_not_called()
+
+    @patch('ml.prediction.normalize_room_name', side_effect=lambda x: x)
+    @patch('ml.prediction.calculate_sequence_length')
+    def test_run_prediction_uses_activity_confidence_artifact_for_low_confidence_gate(self, mock_calc_seq, mock_norm):
+        mock_calc_seq.return_value = 5
+        probs = np.array([[0.52, 0.48]] * 6)
+        self.mock_platform.room_models['room1'].predict.return_value = probs
+        self.mock_platform.label_encoders['room1'].inverse_transform.return_value = ['walking'] * 6
+        self.mock_platform.create_sequences.return_value = np.zeros((6, 5, 2))
+        self.mock_platform.activity_confidence_artifacts = {
+            'room1': {
+                'schema_version': 'beta6.activity_confidence.v1',
+                'room': 'room1',
+                'default_threshold': 0.60,
+                'thresholds_by_label': {'walking': 0.70},
+                'calibrators_by_label': {
+                    'walking': {
+                        'method': 'isotonic',
+                        'x': [0.0, 0.52, 1.0],
+                        'y': [0.0, 0.72, 1.0],
+                    }
+                },
+                'debug': {},
+            }
+        }
+
+        sensor_data = {
+            'room1': pd.DataFrame({
+                'timestamp': pd.date_range('2023-01-01', periods=10, freq='10s'),
+                's1': np.random.randn(10),
+                's2': np.random.randn(10),
+            })
+        }
+        self.mock_platform.preprocess_with_resampling.return_value = sensor_data['room1']
+
+        predictions = self.pipeline.run_prediction(sensor_data=sensor_data, loaded_rooms=['room1'], seq_length=5)
+        pred_df = predictions['room1']
+
+        self.assertTrue((pred_df['predicted_activity'] == 'walking').all())
+        self.assertAlmostEqual(float(pred_df.iloc[0]['confidence']), 0.72, places=6)
+        self.assertAlmostEqual(float(pred_df.iloc[0]['low_confidence_threshold']), 0.70, places=6)
+        self.assertAlmostEqual(float(pred_df.iloc[0]['confidence_raw']), 0.52, places=6)
+
+    @patch.dict('os.environ', {'ENABLE_BETA6_UNKNOWN_ABSTAIN_RUNTIME': 'true'}, clear=False)
+    @patch('ml.prediction.normalize_room_name', side_effect=lambda x: x)
+    @patch('ml.prediction.calculate_sequence_length')
+    @patch('ml.prediction.load_unknown_policy')
+    @patch('ml.prediction.infer_with_unknown_path')
+    def test_run_prediction_passes_calibrated_confidence_to_beta6_unknown_runtime_hook(
+        self, mock_infer_unknown, mock_load_policy, mock_calc_seq, mock_norm
+    ):
+        mock_calc_seq.return_value = 5
+        mock_load_policy.return_value = MagicMock()
+        probs = np.array([[0.52, 0.48]] * 6)
+        self.mock_platform.room_models['room1'].predict.return_value = probs
+        self.mock_platform.label_encoders['room1'].inverse_transform.return_value = ['walking'] * 6
+        self.mock_platform.create_sequences.return_value = np.zeros((6, 5, 2))
+        self.mock_platform.activity_confidence_artifacts = {
+            'room1': {
+                'schema_version': 'beta6.activity_confidence.v1',
+                'room': 'room1',
+                'default_threshold': 0.60,
+                'thresholds_by_label': {'walking': 0.70},
+                'calibrators_by_label': {
+                    'walking': {
+                        'method': 'isotonic',
+                        'x': [0.0, 0.52, 1.0],
+                        'y': [0.0, 0.72, 1.0],
+                    }
+                },
+                'debug': {},
+            }
+        }
+        mock_infer_unknown.return_value = {
+            "labels": ["walking"] * 6,
+            "uncertainty_states": [None] * 6,
+            "confidence": [0.72] * 6,
+            "entropy": [0.1] * 6,
+            "abstain_rate": 0.0,
+        }
+
+        sensor_data = {
+            'room1': pd.DataFrame({
+                'timestamp': pd.date_range('2023-01-01', periods=10, freq='10s'),
+                's1': np.random.randn(10),
+                's2': np.random.randn(10),
+            })
+        }
+        self.mock_platform.preprocess_with_resampling.return_value = sensor_data['room1']
+
+        predictions = self.pipeline.run_prediction(sensor_data=sensor_data, loaded_rooms=['room1'], seq_length=5)
+        pred_df = predictions['room1']
+
+        np.testing.assert_allclose(
+            np.asarray(mock_infer_unknown.call_args.kwargs["confidence_scores"], dtype=float),
+            np.asarray([0.72] * 6, dtype=float),
+        )
+        self.assertAlmostEqual(float(pred_df.iloc[0]['confidence']), 0.72, places=6)
 
     @patch.dict(
         'os.environ',

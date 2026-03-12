@@ -24,6 +24,9 @@ def test_load_policy_defaults_match_legacy_knobs():
     assert policy.reproducibility.random_seed == 42
     assert policy.reproducibility.skip_if_same_data_and_policy is True
     assert policy.promotion_eligibility.min_training_days_with_champion == 7.0
+    assert policy.activity_confidence.enabled is True
+    assert policy.activity_confidence.calibration_method == "isotonic"
+    assert policy.activity_confidence.min_support_per_class == 30
 
 
 def test_load_policy_env_overrides_unoccupied_and_minority():
@@ -143,6 +146,26 @@ def test_release_gate_and_reproducibility_env_overrides():
     assert policy.reproducibility.skip_if_same_data_and_policy is False
     assert policy.release_gate.allow_gate_config_fallback_pass is False
     assert policy.promotion_eligibility.min_training_days_with_champion == 9.0
+
+
+def test_activity_confidence_env_overrides():
+    policy = load_policy_from_env(
+        {
+            "ENABLE_ACTIVITY_CONFIDENCE": "false",
+            "ACTIVITY_CONFIDENCE_CALIBRATION_METHOD": "identity",
+            "ACTIVITY_CONFIDENCE_MIN_SUPPORT_PER_CLASS": "12",
+            "ACTIVITY_CONFIDENCE_THRESHOLD_BAND_WIDTH": "0.05",
+            "ACTIVITY_CONFIDENCE_MAX_NEAR_THRESHOLD_FRACTION": "0.22",
+            "ACTIVITY_CONFIDENCE_FALLBACK_THRESHOLD": "0.49",
+        }
+    )
+
+    assert policy.activity_confidence.enabled is False
+    assert policy.activity_confidence.calibration_method == "identity"
+    assert policy.activity_confidence.min_support_per_class == 12
+    assert policy.activity_confidence.threshold_band_width == 0.05
+    assert policy.activity_confidence.max_near_threshold_fraction == 0.22
+    assert policy.activity_confidence.fallback_threshold == 0.49
 
 
 def test_release_gate_evidence_profile_pilot_stage_a_defaults():

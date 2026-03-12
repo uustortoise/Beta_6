@@ -7,6 +7,7 @@ import filecmp
 import math
 import tempfile
 import tensorflow as tf
+import copy
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
@@ -1478,12 +1479,21 @@ class ModelRegistry:
             
             # Update version info
             info = self._load_version_info(elder_id, room_name)
+            grouped_date_stability = None
+            promotion_time_drift_summary = None
+            if isinstance(metrics, dict):
+                if metrics.get("grouped_date_stability") is not None:
+                    grouped_date_stability = copy.deepcopy(metrics.get("grouped_date_stability"))
+                if metrics.get("promotion_time_drift_summary") is not None:
+                    promotion_time_drift_summary = copy.deepcopy(metrics.get("promotion_time_drift_summary"))
             info["versions"].append({
                 "version": version,
                 "created_at": datetime.now().isoformat(),
                 "accuracy": accuracy,
                 "samples": samples,
                 "metrics": metrics or {},
+                "grouped_date_stability": grouped_date_stability,
+                "promotion_time_drift_summary": promotion_time_drift_summary,
                 "model_identity": model_identity or {},
                 "adapter_weights_path": adapter_saved_path.name if adapter_saved_path else None,
                 "backbone_weights_path": backbone_saved_path.name if backbone_saved_path else None,

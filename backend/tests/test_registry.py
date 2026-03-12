@@ -184,6 +184,90 @@ class TestModelRegistry(unittest.TestCase):
             "activity_acceptance_score_v1",
         )
 
+    def test_source_lineage_metadata_survives_save_load_and_alias_promotion(self):
+        mock_model = MagicMock()
+        mock_model.save.side_effect = lambda path: Path(path).write_text("dummy-model")
+        mock_scaler = {"scale": 1}
+        encoder = _DummyEncoder(np.array(["bedroom_normal_use", "sleep", "unoccupied"], dtype=object))
+        source_lineage = {
+            "room": "Bedroom",
+            "source_manifest": [
+                {
+                    "path": "/tmp/HK0011_jessica_train_10dec2025.xlsx",
+                    "source_order": 0,
+                },
+                {
+                    "path": "/tmp/HK0011_jessica_train_17dec2025.xlsx",
+                    "source_order": 1,
+                },
+            ],
+            "source_fingerprint": "abc123def456",
+            "pre_sampling_label_counts_by_date": {
+                "2025-12-10": {"sleep": 12, "bedroom_normal_use": 8},
+                "2025-12-17": {"sleep": 18, "bedroom_normal_use": 6},
+            },
+        }
+
+        version = self.registry.save_model_artifacts(
+            self.elder_id,
+            "Bedroom",
+            mock_model,
+            mock_scaler,
+            encoder,
+            metrics={"source_lineage": source_lineage},
+            promote_to_latest=False,
+        )
+
+        info = self.registry._load_version_info(self.elder_id, "Bedroom")
+        self.assertEqual(info["versions"][0]["metrics"]["source_lineage"], source_lineage)
+
+        models_dir = self.registry.get_models_dir(self.elder_id)
+        versioned_trace = models_dir / f"Bedroom_v{version}_decision_trace.json"
+        versioned_trace.write_text(
+            json.dumps({"room": "Bedroom", "source_lineage": source_lineage}, indent=2),
+            encoding="utf-8",
+        )
+
+        self.registry._ensure_latest_aliases_match_current(self.elder_id, "Bedroom", version)
+
+        latest_trace = json.loads((models_dir / "Bedroom_decision_trace.json").read_text())
+        self.assertEqual(latest_trace["source_lineage"], source_lineage)
+
+    def test_grouped_date_stability_metadata_survives_save_load_for_promotion_review(self):
+        mock_model = MagicMock()
+        mock_model.save.side_effect = lambda path: Path(path).write_text("dummy-model")
+        mock_scaler = {"scale": 1}
+        encoder = _DummyEncoder(np.array(["bedroom_normal_use", "sleep", "unoccupied"], dtype=object))
+        grouped_date_stability = {
+            "available": True,
+            "unstable_across_dates": True,
+            "worst_date": "2025-12-05",
+            "risk_reasons": ["macro_f1_range:0.400>0.150"],
+        }
+        promotion_time_drift_summary = {
+            "available": True,
+            "risk_level": "high",
+            "unstable_across_dates": True,
+        }
+
+        self.registry.save_model_artifacts(
+            self.elder_id,
+            "Bedroom",
+            mock_model,
+            mock_scaler,
+            encoder,
+            metrics={
+                "grouped_date_stability": grouped_date_stability,
+                "promotion_time_drift_summary": promotion_time_drift_summary,
+            },
+            promote_to_latest=False,
+        )
+
+        info = self.registry._load_version_info(self.elder_id, "Bedroom")
+        version_meta = info["versions"][0]
+        self.assertEqual(version_meta["grouped_date_stability"], grouped_date_stability)
+        self.assertEqual(version_meta["promotion_time_drift_summary"], promotion_time_drift_summary)
+
     def test_rollback_to_version(self):
         """Test rolling back to a previous version."""
         # Create dummy version info

@@ -1286,6 +1286,234 @@ class TrainingPipeline:
         )
         return result
 
+    def _summarize_grouped_date_stability(
+        self,
+        *,
+        room_name: str,
+        y_true: Any,
+        y_pred_probs: Any,
+        seq_timestamps: Any,
+    ) -> Dict[str, Any]:
+        room_key = normalize_room_name(room_name)
+        result: Dict[str, Any] = {
+            "available": False,
+            "room": str(room_name),
+            "grouped_by_date": {},
+            "date_count": 0,
+            "unstable_across_dates": False,
+            "risk_reasons": [],
+        }
+        if room_key != "bedroom":
+            result["reason"] = "room_not_targeted"
+            return result
+
+        y_true_arr = np.asarray(y_true, dtype=np.int32)
+        y_pred_arr = np.asarray(y_pred_probs, dtype=np.float32)
+        timestamps = pd.to_datetime(np.asarray(seq_timestamps), errors="coerce")
+        if y_pred_arr.ndim != 2 or int(y_pred_arr.shape[0]) != int(len(y_true_arr)):
+            result["reason"] = f"unexpected_prediction_shape:{getattr(y_pred_arr, 'shape', None)}"
+            return result
+        if int(len(timestamps)) != int(len(y_true_arr)):
+            result["reason"] = f"timestamp_length_mismatch:{int(len(timestamps))}!={int(len(y_true_arr))}"
+            return result
+
+        valid_mask = ~pd.isna(timestamps)
+        if not bool(np.any(valid_mask)):
+            result["reason"] = "missing_seq_timestamps"
+            return result
+
+        y_true_arr = y_true_arr[valid_mask]
+        y_pred_arr = y_pred_arr[valid_mask]
+        timestamps = timestamps[valid_mask]
+        date_labels = pd.Series(timestamps).dt.strftime("%Y-%m-%d")
+        pooled_summary = self._summarize_gate_aligned_validation(
+            room_name=room_name,
+            y_true=y_true_arr,
+            y_pred_probs=y_pred_arr,
+        )
+
+        grouped_by_date: Dict[str, Dict[str, Any]] = {}
+        macro_by_date: Dict[str, float] = {}
+        for date_label in sorted(date_labels.unique()):
+            date_mask = date_labels == date_label
+            if not bool(np.any(date_mask)):
+                continue
+            date_summary = self._summarize_gate_aligned_validation(
+                room_name=room_name,
+                y_true=y_true_arr[date_mask],
+                y_pred_probs=y_pred_arr[date_mask],
+            )
+            date_summary["sample_count"] = int(np.sum(date_mask))
+            grouped_by_date[str(date_label)] = date_summary
+            macro_by_date[str(date_label)] = float(date_summary.get("macro_f1", 0.0) or 0.0)
+
+        result["available"] = True
+        result["grouped_by_date"] = grouped_by_date
+        result["date_count"] = int(len(grouped_by_date))
+        result["pooled_summary"] = pooled_summary
+        if len(grouped_by_date) <= 0:
+            return result
+
+        sorted_by_macro = sorted(macro_by_date.items(), key=lambda item: (float(item[1]), item[0]))
+        result["worst_date"] = str(sorted_by_macro[0][0])
+        result["best_date"] = str(sorted_by_macro[-1][0])
+        result["macro_f1_range"] = float(max(macro_by_date.values()) - min(macro_by_date.values()))
+
+        critical_label = "bedroom_normal_use"
+        pooled_recall = float(
+            ((pooled_summary.get("per_label_recall") or {}).get(critical_label, 0.0) or 0.0)
+        )
+        recall_by_date = {
+            date: float(
+                ((summary.get("per_label_recall") or {}).get(critical_label, 0.0) or 0.0)
+            )
+            for date, summary in grouped_by_date.items()
+        }
+        result["critical_label"] = critical_label
+        result["critical_label_pooled_recall"] = float(pooled_recall)
+        result["critical_label_recall_range"] = float(
+            max(recall_by_date.values()) - min(recall_by_date.values())
+        ) if recall_by_date else 0.0
+
+        risk_reasons: List[str] = []
+        unstable_dates: List[str] = []
+        macro_range_threshold = 0.15
+        recall_range_threshold = 0.25
+        pooled_drop_threshold = 0.10
+        if float(result["macro_f1_range"]) > float(macro_range_threshold):
+            risk_reasons.append(
+                f"macro_f1_range:{float(result['macro_f1_range']):.3f}>{float(macro_range_threshold):.3f}"
+            )
+        if float(result["critical_label_recall_range"]) > float(recall_range_threshold):
+            risk_reasons.append(
+                f"{critical_label}_recall_range:{float(result['critical_label_recall_range']):.3f}>"
+                f"{float(recall_range_threshold):.3f}"
+            )
+        pooled_macro = float(pooled_summary.get("macro_f1", 0.0) or 0.0)
+        for date_label, date_summary in grouped_by_date.items():
+            date_macro = float(date_summary.get("macro_f1", 0.0) or 0.0)
+            macro_drop = float(pooled_macro - date_macro)
+            date_summary["macro_f1_vs_pooled"] = float(date_macro - pooled_macro)
+            date_recall = float(((date_summary.get("per_label_recall") or {}).get(critical_label, 0.0) or 0.0))
+            recall_drop = float(pooled_recall - date_recall)
+            date_summary[f"{critical_label}_recall_vs_pooled"] = float(date_recall - pooled_recall)
+            if macro_drop > float(pooled_drop_threshold) or recall_drop > float(recall_range_threshold):
+                unstable_dates.append(str(date_label))
+        result["unstable_dates"] = sorted(set(unstable_dates))
+        result["risk_reasons"] = risk_reasons
+        result["unstable_across_dates"] = bool(risk_reasons or unstable_dates)
+        return result
+
+    def _build_source_lineage_review_summary(
+        self,
+        *,
+        room_name: str,
+        source_lineage: Optional[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        summary: Dict[str, Any] = {
+            "available": False,
+            "room": str(room_name),
+            "reason": "no_source_lineage",
+        }
+        if not isinstance(source_lineage, Mapping):
+            return summary
+
+        source_manifest = list(source_lineage.get("source_manifest") or [])
+        source_counts_by_date = dict(source_lineage.get("pre_sampling_label_counts_by_date") or {})
+        source_class_share_by_date: Dict[str, Dict[str, float]] = {}
+        dominant_label_by_date: Dict[str, Optional[str]] = {}
+
+        for date_label, counts in sorted(source_counts_by_date.items()):
+            date_key = str(date_label)
+            normalized_counts = {
+                str(label): int(value or 0)
+                for label, value in sorted((counts or {}).items())
+            }
+            total = float(sum(normalized_counts.values()))
+            source_class_share_by_date[date_key] = {
+                str(label): (float(count) / total if total > 0 else 0.0)
+                for label, count in normalized_counts.items()
+            }
+            if normalized_counts:
+                dominant_label_by_date[date_key] = max(
+                    normalized_counts.items(),
+                    key=lambda item: (int(item[1]), str(item[0])),
+                )[0]
+            else:
+                dominant_label_by_date[date_key] = None
+
+        summary.update(
+            {
+                "available": True,
+                "source_fingerprint": source_lineage.get("source_fingerprint"),
+                "source_manifest_count": len(source_manifest),
+                "source_dates": sorted(str(date_label) for date_label in source_counts_by_date.keys()),
+                "source_class_share_by_date": source_class_share_by_date,
+                "dominant_label_by_date": dominant_label_by_date,
+            }
+        )
+        summary.pop("reason", None)
+        return summary
+
+    def _build_promotion_time_drift_summary(
+        self,
+        *,
+        room_name: str,
+        grouped_date_stability: Mapping[str, Any],
+        source_lineage: Optional[Mapping[str, Any]],
+    ) -> Dict[str, Any]:
+        room_key = normalize_room_name(room_name)
+        summary: Dict[str, Any] = {
+            "available": False,
+            "room": str(room_name),
+            "risk_level": "unknown",
+            "unstable_across_dates": False,
+        }
+        if room_key != "bedroom":
+            summary["reason"] = "room_not_targeted"
+            return summary
+        if not bool((grouped_date_stability or {}).get("available")):
+            summary["reason"] = "grouped_date_stability_unavailable"
+            return summary
+
+        source_counts_by_date = {}
+        if isinstance(source_lineage, Mapping):
+            source_counts_by_date = dict(source_lineage.get("pre_sampling_label_counts_by_date") or {})
+
+        source_class_share_by_date: Dict[str, Dict[str, float]] = {}
+        for date_label, counts in sorted(source_counts_by_date.items()):
+            total = float(sum(int(value or 0) for value in (counts or {}).values()))
+            source_class_share_by_date[str(date_label)] = {
+                str(label): (float(int(value or 0)) / total if total > 0 else 0.0)
+                for label, value in sorted((counts or {}).items())
+            }
+
+        risk_reasons = list((grouped_date_stability or {}).get("risk_reasons") or [])
+        unstable_dates = list((grouped_date_stability or {}).get("unstable_dates") or [])
+        summary.update(
+            {
+                "available": True,
+                "risk_level": "high" if bool(risk_reasons or unstable_dates) else "low",
+                "unstable_across_dates": bool((grouped_date_stability or {}).get("unstable_across_dates", False)),
+                "worst_date": (grouped_date_stability or {}).get("worst_date"),
+                "best_date": (grouped_date_stability or {}).get("best_date"),
+                "macro_f1_range": float((grouped_date_stability or {}).get("macro_f1_range", 0.0) or 0.0),
+                "critical_label": (grouped_date_stability or {}).get("critical_label"),
+                "critical_label_recall_range": float(
+                    (grouped_date_stability or {}).get("critical_label_recall_range", 0.0) or 0.0
+                ),
+                "unstable_dates": unstable_dates,
+                "risk_reasons": risk_reasons,
+                "source_class_share_by_date": source_class_share_by_date,
+                "source_fingerprint": (
+                    (source_lineage or {}).get("source_fingerprint")
+                    if isinstance(source_lineage, Mapping)
+                    else None
+                ),
+            }
+        )
+        return summary
+
     def _resolve_no_regress_macro_f1_floor(
         self,
         *,
@@ -1909,6 +2137,7 @@ class TrainingPipeline:
         defer_promotion: bool = False,
         gate_evaluation_result: Optional[Dict[str, Any]] = None,
         event_first_shadow: Optional[bool] = None,
+        source_lineage: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         repro = self._active_policy().reproducibility
         seeds = [int(seed) for seed in repro.multi_seed_candidate_seeds] or [int(repro.random_seed)]
@@ -1932,6 +2161,7 @@ class TrainingPipeline:
                     defer_promotion=True,
                     gate_evaluation_result=gate_evaluation_result,
                     event_first_shadow=event_first_shadow,
+                    source_lineage=source_lineage,
                 )
             summary, no_regress_ok = self._build_seed_panel_candidate_summary(
                 room_name,
@@ -2354,6 +2584,21 @@ class TrainingPipeline:
         prior_drift_max = max(0.0, self._read_float_env("RELEASE_GATE_MAX_CLASS_PRIOR_DRIFT", 0.10))
         class_prior_drift = self._compute_class_prior_drift(candidate_metrics)
         candidate_metrics["class_prior_drift"] = class_prior_drift
+        promotion_risk_flags = {
+            str(flag).strip().lower()
+            for flag in (candidate_metrics.get("promotion_risk_flags") or [])
+            if str(flag).strip()
+        }
+        grouped_date_stability = (
+            candidate_metrics.get("grouped_date_stability")
+            if isinstance(candidate_metrics.get("grouped_date_stability"), Mapping)
+            else {}
+        )
+        promotion_time_drift_summary = (
+            candidate_metrics.get("promotion_time_drift_summary")
+            if isinstance(candidate_metrics.get("promotion_time_drift_summary"), Mapping)
+            else {}
+        )
 
         if isinstance(data_viability, dict) and not bool(data_viability.get("pass", True)):
             _add_blocking(f"data_viability_failed:{room_key}")
@@ -2425,6 +2670,26 @@ class TrainingPipeline:
                 _add_watch(
                     f"class_prior_drift_sampled_watch:{room_key}:{sampled_max_class}:"
                     f"{float(sampled_max_abs_drift):.3f}>{float(prior_drift_max):.3f}"
+                )
+        if room_key == "bedroom":
+            drift_risk_level = str(promotion_time_drift_summary.get("risk_level") or "").strip().lower()
+            unstable_across_dates = bool(
+                promotion_time_drift_summary.get("unstable_across_dates")
+                or grouped_date_stability.get("unstable_across_dates")
+            )
+            if (
+                drift_risk_level == "high"
+                and unstable_across_dates
+                and "unstable_date_slices:bedroom" in promotion_risk_flags
+            ):
+                worst_date = (
+                    promotion_time_drift_summary.get("worst_date")
+                    or grouped_date_stability.get("worst_date")
+                    or "unknown"
+                )
+                _add_blocking(
+                    "regime_instability_failed:"
+                    f"{room_key}:high_risk_unstable_date_slices:worst_date={worst_date}"
                 )
         for key, threshold in effective_label_recall_by_room_label.items():
             key_txt = str(key).strip().lower()
@@ -5838,6 +6103,7 @@ class TrainingPipeline:
         defer_promotion: bool = False,
         gate_evaluation_result: Optional[Dict[str, Any]] = None,
         event_first_shadow: Optional[bool] = None,
+        source_lineage: Optional[Dict[str, Any]] = None,
         validation_split: float = 0.2,
     ) -> Dict[str, Any]:
         """
@@ -5932,6 +6198,11 @@ class TrainingPipeline:
             defer_promotion=defer_promotion,
             gate_evaluation_result=gate_evaluation_result,
             event_first_shadow=event_first_shadow,
+            source_lineage=copy.deepcopy(
+                source_lineage
+                if source_lineage is not None
+                else raw_df.attrs.get("source_lineage")
+            ) if hasattr(raw_df, "attrs") else source_lineage,
         )
         
         if metrics is None:
@@ -5951,7 +6222,8 @@ class TrainingPipeline:
                    training_mode: str = "full_retrain",
                    defer_promotion: bool = False,
                    gate_evaluation_result: Optional[Dict[str, Any]] = None,
-                   event_first_shadow: Optional[bool] = None) -> Dict[str, Any]:
+                   event_first_shadow: Optional[bool] = None,
+                   source_lineage: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Train a model for a specific room.
         
@@ -5981,6 +6253,7 @@ class TrainingPipeline:
                     defer_promotion=defer_promotion,
                     gate_evaluation_result=gate_evaluation_result,
                     event_first_shadow=event_first_shadow,
+                    source_lineage=source_lineage,
                 )
             training_mode = (training_mode or "full_retrain").strip().lower()
             is_correction_fine_tune = training_mode == "correction_fine_tune"
@@ -5990,6 +6263,11 @@ class TrainingPipeline:
             calibration_policy = active_policy.calibration
             training_strategy = self._resolve_training_strategy(room_name)
             self._set_training_random_seed(active_policy.reproducibility.random_seed)
+            source_lineage_payload = copy.deepcopy(
+                source_lineage
+                if source_lineage is not None
+                else getattr(processed_df, "attrs", {}).get("source_lineage")
+            )
             fine_tune_params = self._get_fine_tuning_params() if is_correction_fine_tune else {}
             event_first_shadow_enabled = bool(
                 active_policy.event_first.shadow if event_first_shadow is None else event_first_shadow
@@ -7172,6 +7450,67 @@ class TrainingPipeline:
                 except Exception:
                     training_days = 0.0
             metrics['training_days'] = training_days
+            metrics["promotion_risk_flags"] = []
+            metrics["source_manifest"] = []
+            metrics["source_fingerprint"] = None
+            metrics["pre_sampling_label_counts_by_date"] = {}
+            metrics["source_lineage_review_summary"] = self._build_source_lineage_review_summary(
+                room_name=room_name,
+                source_lineage=source_lineage_payload,
+            )
+            if isinstance(source_lineage_payload, Mapping):
+                metrics["source_manifest"] = copy.deepcopy(source_lineage_payload.get("source_manifest") or [])
+                metrics["source_fingerprint"] = source_lineage_payload.get("source_fingerprint")
+                metrics["pre_sampling_label_counts_by_date"] = copy.deepcopy(
+                    source_lineage_payload.get("pre_sampling_label_counts_by_date") or {}
+                )
+
+            grouped_date_stability: Dict[str, Any] = {
+                "available": False,
+                "room": room_name,
+                "reason": "room_not_targeted",
+            }
+            promotion_time_drift_summary: Dict[str, Any] = {
+                "available": False,
+                "room": room_name,
+                "reason": "room_not_targeted",
+            }
+            if normalize_room_name(room_name) == "bedroom":
+                grouped_metric_source = "single_stage_runtime"
+                try:
+                    grouped_probs = self._predict_activity_probabilities(
+                        model=model,
+                        X=np.asarray(X_seq, dtype=np.float32),
+                        timeline_multitask_enabled=bool(timeline_multitask_enabled),
+                    )
+                    if bool((metrics.get("two_stage_core") or {}).get("runtime_use_two_stage", False)):
+                        grouped_probs = self._predict_two_stage_core_probabilities(
+                            two_stage_result=two_stage_result,
+                            X=np.asarray(X_seq, dtype=np.float32),
+                        )
+                        grouped_metric_source = "two_stage_runtime"
+                    grouped_date_stability = self._summarize_grouped_date_stability(
+                        room_name=room_name,
+                        y_true=y_seq,
+                        y_pred_probs=grouped_probs,
+                        seq_timestamps=seq_timestamps,
+                    )
+                    grouped_date_stability["metric_source"] = grouped_metric_source
+                except Exception as e:
+                    grouped_date_stability = {
+                        "available": False,
+                        "room": room_name,
+                        "reason": f"grouped_date_stability_error:{type(e).__name__}:{e}",
+                    }
+                promotion_time_drift_summary = self._build_promotion_time_drift_summary(
+                    room_name=room_name,
+                    grouped_date_stability=grouped_date_stability,
+                    source_lineage=source_lineage_payload,
+                )
+                if bool(grouped_date_stability.get("unstable_across_dates", False)):
+                    metrics["promotion_risk_flags"].append("unstable_date_slices:bedroom")
+            metrics["grouped_date_stability"] = grouped_date_stability
+            metrics["promotion_time_drift_summary"] = promotion_time_drift_summary
 
             # PR-2: Post-training gate evaluation (StatisticalValidityGate)
             calibration_support = {}
@@ -7265,6 +7604,14 @@ class TrainingPipeline:
             gate_watch_reasons = list(
                 dict.fromkeys(str(r) for r in (self._last_release_gate_watch_reasons or []) if str(r).strip())
             )
+            if bool((metrics.get("grouped_date_stability") or {}).get("unstable_across_dates", False)):
+                grouped_payload = metrics.get("grouped_date_stability") or {}
+                gate_watch_reasons.append(
+                    "grouped_date_stability_watch:"
+                    f"{normalize_room_name(room_name)}:"
+                    f"worst_date={grouped_payload.get('worst_date') or 'unknown'}:"
+                    f"macro_range={float(grouped_payload.get('macro_f1_range', 0.0) or 0.0):.3f}"
+                )
 
             # Lane B: Event gate hardening on per-label holdout metrics.
             lane_b_gate_pass, lane_b_reasons, lane_b_gate_report = self._evaluate_lane_b_event_gates(
@@ -7313,6 +7660,8 @@ class TrainingPipeline:
             metrics['gate_watch_reasons'] = gate_watch_reasons
             metrics['gate_blocking_reasons'] = list(gate_reasons)
             metrics['parent_version_id'] = parent_version_id
+            if source_lineage_payload is not None:
+                metrics["source_lineage"] = copy.deepcopy(source_lineage_payload)
             model_identity = self._resolve_model_identity(
                 elder_id=elder_id,
                 room_name=room_name,
@@ -7530,6 +7879,8 @@ class TrainingPipeline:
                 "model_identity": model_identity,
                 "metrics": metrics,
             }
+            if source_lineage_payload is not None:
+                decision_trace_payload["source_lineage"] = copy.deepcopy(source_lineage_payload)
             decision_trace_paths = self._write_decision_trace(
                 elder_id=elder_id,
                 room_name=room_name,

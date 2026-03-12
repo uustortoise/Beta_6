@@ -3,6 +3,7 @@ import sys
 import logging
 import sqlite3
 import json
+import hashlib
 import re
 from contextlib import contextmanager
 import pandas as pd
@@ -168,6 +169,112 @@ class UnifiedPipeline:
             active_logger.warning(f"Beta6 fallback-state read failed; skipping auto runtime bridge: {e}")
             return True
         return False
+
+    @staticmethod
+    def _normalize_lineage_label(value) -> str:
+        if pd.isna(value):
+            return "__missing__"
+        text = str(value).strip()
+        return text or "__empty__"
+
+    @classmethod
+    def _build_pre_sampling_label_counts_by_date(cls, df: pd.DataFrame) -> dict[str, dict[str, int]]:
+        if df is None or df.empty or "timestamp" not in df.columns or "activity" not in df.columns:
+            return {}
+        timestamps = pd.to_datetime(df["timestamp"], errors="coerce")
+        if timestamps.isna().all():
+            return {}
+        labels = df["activity"].map(cls._normalize_lineage_label)
+        summary: dict[str, dict[str, int]] = {}
+        summary_df = pd.DataFrame({
+            "date": timestamps.dt.strftime("%Y-%m-%d"),
+            "label": labels,
+        }).dropna(subset=["date"])
+        if summary_df.empty:
+            return {}
+        grouped = (
+            summary_df.groupby(["date", "label"], dropna=False)
+            .size()
+            .reset_index(name="count")
+            .sort_values(["date", "label"], kind="stable")
+        )
+        for row in grouped.itertuples(index=False):
+            day = str(row.date)
+            label = str(row.label)
+            summary.setdefault(day, {})[label] = int(row.count)
+        return summary
+
+    @classmethod
+    def _build_label_counts(cls, df: pd.DataFrame) -> dict[str, int]:
+        if df is None or df.empty or "activity" not in df.columns:
+            return {}
+        counts = (
+            df["activity"]
+            .map(cls._normalize_lineage_label)
+            .value_counts(dropna=False)
+            .sort_index()
+        )
+        return {str(label): int(count) for label, count in counts.items()}
+
+    @classmethod
+    def _build_room_source_lineage(
+        cls,
+        *,
+        room_name: str,
+        source_entries: list[dict],
+        combined_df: pd.DataFrame,
+    ) -> dict[str, object]:
+        manifest: list[dict[str, object]] = []
+        for entry in source_entries:
+            path = Path(entry["file_path"]).expanduser().resolve()
+            try:
+                stats = path.stat()
+            except OSError:
+                stats = None
+            source_df = entry.get("df")
+            source_dates: list[str] = []
+            if isinstance(source_df, pd.DataFrame) and not source_df.empty and "timestamp" in source_df.columns:
+                ts = pd.to_datetime(source_df["timestamp"], errors="coerce").dropna()
+                if not ts.empty:
+                    source_dates = sorted({str(value.date()) for value in ts})
+            manifest.append(
+                {
+                    "path": str(path),
+                    "source_order": int(entry.get("source_order", 0)),
+                    "rows_for_room": int(len(source_df)) if isinstance(source_df, pd.DataFrame) else 0,
+                    "file_size_bytes": int(stats.st_size) if stats is not None else None,
+                    "file_mtime_ns": int(stats.st_mtime_ns) if stats is not None else None,
+                    "observed_dates": source_dates,
+                    "label_counts": cls._build_label_counts(source_df),
+                }
+            )
+        manifest = sorted(manifest, key=lambda item: (int(item["source_order"]), str(item["path"])))
+        fingerprint_basis = {
+            "room": str(room_name),
+            "source_manifest": [
+                {
+                    "path": str(entry["path"]),
+                    "source_order": int(entry["source_order"]),
+                    "rows_for_room": int(entry["rows_for_room"]),
+                    "file_size_bytes": entry["file_size_bytes"],
+                    "file_mtime_ns": entry["file_mtime_ns"],
+                }
+                for entry in manifest
+            ],
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(fingerprint_basis, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        pre_sampling_by_date = cls._build_pre_sampling_label_counts_by_date(combined_df)
+        observed_dates = sorted(pre_sampling_by_date.keys())
+        return {
+            "room": str(room_name),
+            "source_manifest": manifest,
+            "source_fingerprint": fingerprint,
+            "pre_sampling_label_counts_by_date": pre_sampling_by_date,
+            "pre_sampling_label_counts_total": cls._build_label_counts(combined_df),
+            "observed_dates": observed_dates,
+        }
 
     @contextmanager
     def _beta6_phase4_runtime_prediction_context(self, elder_id: str, loaded_rooms: list[str]):
@@ -873,6 +980,7 @@ class UnifiedPipeline:
         
         # 1. Load and aggregate data from all files
         aggregated_data = {}  # {room: [dataframes]}
+        room_source_entries = {}  # {room: [{file_path, source_order, df}]}
         
         if progress_callback: progress_callback(5, f"Loading {len(file_paths)} files for aggregated training...")
         max_gap = self._resolve_resample_gap_policy()
@@ -896,7 +1004,16 @@ class UnifiedPipeline:
                     df["__source_file_name"] = Path(file_path).name
                     if room_name not in aggregated_data:
                         aggregated_data[room_name] = []
+                    if room_name not in room_source_entries:
+                        room_source_entries[room_name] = []
                     aggregated_data[room_name].append(df)
+                    room_source_entries[room_name].append(
+                        {
+                            "file_path": str(Path(file_path).expanduser().resolve()),
+                            "source_order": int(i),
+                            "df": df.copy(),
+                        }
+                    )
                     logger.info(f"  Loaded {len(df)} rows from {Path(file_path).name} ({room_name})")
             except Exception as e:
                 logger.critical(f"ALERT: failed to load/resample training file {file_path}: {e}", exc_info=True)
@@ -907,6 +1024,7 @@ class UnifiedPipeline:
         
         # 2. Combine dataframes per room
         combined_data = {}
+        room_source_lineage = {}
         for room_name, dfs in aggregated_data.items():
             combined = pd.concat(dfs, ignore_index=True)
             # Ensure timestamps are datetime before sorting (fixes mixed str/Timestamp type error)
@@ -930,6 +1048,11 @@ class UnifiedPipeline:
             if drop_cols:
                 combined = combined.drop(columns=drop_cols)
             combined_data[room_name] = combined
+            room_source_lineage[room_name] = self._build_room_source_lineage(
+                room_name=room_name,
+                source_entries=room_source_entries.get(room_name, []),
+                combined_df=combined,
+            )
             logger.info(f"  Combined {room_name}: {len(combined)} total rows")
         
         # 3. Setup
@@ -1036,6 +1159,7 @@ class UnifiedPipeline:
                     defer_promotion=defer_promotion,
                     gate_evaluation_result=gate_result,
                     event_first_shadow=event_first_shadow,
+                    source_lineage=room_source_lineage.get(room_name),
                     validation_split=DEFAULT_VALIDATION_SPLIT,
                 )
                 

@@ -658,6 +658,319 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertEqual(metrics["model_identity"]["family"], "per_resident_full_model")
         self.assertIsNone(metrics["model_identity"]["backbone_id"])
 
+    @patch('ml.training.TrainingPipeline.augment_training_data')
+    @patch('ml.training.build_transformer_model')
+    @patch('ml.training.get_room_config')
+    def test_train_room_source_lineage_metadata(self, mock_get_config, mock_build_model, mock_augment):
+        mock_config = MagicMock()
+        mock_config.get_sequence_window.return_value = 60
+        mock_config.get_data_interval.return_value = 10
+        mock_get_config.return_value = mock_config
+
+        mock_augment.return_value = (np.zeros((10, 5, 3)), np.zeros(10))
+
+        mock_model = MagicMock()
+        mock_model.fit.return_value.history = {'accuracy': [0.95]}
+        mock_model.predict.return_value = np.tile(np.array([[0.7, 0.3]], dtype=np.float32), (10, 1))
+        mock_build_model.return_value = mock_model
+
+        self.mock_platform.label_encoders['room1'].classes_ = np.array(
+            ['bedroom_normal_use', 'sleep'],
+            dtype=object,
+        )
+
+        processed_df = pd.DataFrame({
+            's1': np.random.randn(100),
+            's2': np.random.randn(100),
+            's3': np.random.randn(100),
+            'activity_encoded': np.random.randint(0, 2, 100),
+            'timestamp': pd.date_range(start='2025-12-10', periods=100, freq='10s')
+        })
+        source_lineage = {
+            "room": "room1",
+            "source_manifest": [
+                {
+                    "path": "/tmp/HK0011_jessica_train_10dec2025.xlsx",
+                    "source_order": 0,
+                },
+                {
+                    "path": "/tmp/HK0011_jessica_train_17dec2025.xlsx",
+                    "source_order": 1,
+                },
+            ],
+            "source_fingerprint": "abc123def456",
+            "pre_sampling_label_counts_by_date": {
+                "2025-12-10": {"sleep": 12, "bedroom_normal_use": 8},
+                "2025-12-17": {"sleep": 18, "bedroom_normal_use": 6},
+            },
+        }
+
+        with patch.object(
+            self.pipeline,
+            "_write_decision_trace",
+            return_value={"versioned": "/tmp/trace-v1.json", "latest": "/tmp/trace.json"},
+        ) as mock_write_trace:
+            metrics = self.pipeline.train_room(
+                room_name='room1',
+                processed_df=processed_df,
+                seq_length=5,
+                elder_id='elder1',
+                source_lineage=source_lineage,
+            )
+
+        _, kwargs = self.mock_registry.save_model_artifacts.call_args
+        self.assertEqual(kwargs["metrics"]["source_lineage"], source_lineage)
+        self.assertEqual(metrics["source_lineage"], source_lineage)
+        self.assertEqual(
+            mock_write_trace.call_args.kwargs["payload"]["source_lineage"],
+            source_lineage,
+        )
+
+    @patch('ml.training.TrainingPipeline.augment_training_data')
+    @patch('ml.training.build_transformer_model')
+    @patch('ml.training.get_room_config')
+    def test_train_room_persists_room_lineage_observability_for_non_bedroom(
+        self,
+        mock_get_config,
+        mock_build_model,
+        mock_augment,
+    ):
+        mock_config = MagicMock()
+        mock_config.get_sequence_window.return_value = 60
+        mock_config.get_data_interval.return_value = 10
+        mock_get_config.return_value = mock_config
+
+        mock_augment.return_value = (np.zeros((10, 5, 3)), np.zeros(10))
+
+        mock_model = MagicMock()
+        mock_model.fit.return_value.history = {'accuracy': [0.95]}
+        mock_model.predict.return_value = np.tile(np.array([[0.7, 0.3]], dtype=np.float32), (10, 1))
+        mock_build_model.return_value = mock_model
+
+        self.mock_platform.label_encoders['room1'].classes_ = np.array(
+            ['bedroom_normal_use', 'sleep'],
+            dtype=object,
+        )
+
+        processed_df = pd.DataFrame({
+            's1': np.random.randn(100),
+            's2': np.random.randn(100),
+            's3': np.random.randn(100),
+            'activity_encoded': np.random.randint(0, 2, 100),
+            'timestamp': pd.date_range(start='2025-12-10', periods=100, freq='10s')
+        })
+        source_lineage = {
+            "room": "room1",
+            "source_manifest": [
+                {
+                    "path": "/tmp/HK0011_jessica_train_10dec2025.xlsx",
+                    "source_order": 0,
+                },
+                {
+                    "path": "/tmp/HK0011_jessica_train_17dec2025.xlsx",
+                    "source_order": 1,
+                },
+            ],
+            "source_fingerprint": "abc123def456",
+            "pre_sampling_label_counts_by_date": {
+                "2025-12-10": {"sleep": 12, "bedroom_normal_use": 8},
+                "2025-12-17": {"sleep": 18, "bedroom_normal_use": 6},
+            },
+        }
+
+        with patch.object(
+            self.pipeline,
+            "_write_decision_trace",
+            return_value={"versioned": "/tmp/trace-v1.json", "latest": "/tmp/trace.json"},
+        ) as mock_write_trace:
+            metrics = self.pipeline.train_room(
+                room_name='room1',
+                processed_df=processed_df,
+                seq_length=5,
+                elder_id='elder1',
+                source_lineage=source_lineage,
+            )
+
+        expected_summary = {
+            "available": True,
+            "room": "room1",
+            "source_fingerprint": "abc123def456",
+            "source_manifest_count": 2,
+            "source_dates": ["2025-12-10", "2025-12-17"],
+            "source_class_share_by_date": {
+                "2025-12-10": {"sleep": 0.6, "bedroom_normal_use": 0.4},
+                "2025-12-17": {"sleep": 0.75, "bedroom_normal_use": 0.25},
+            },
+            "dominant_label_by_date": {
+                "2025-12-10": "sleep",
+                "2025-12-17": "sleep",
+            },
+        }
+
+        _, kwargs = self.mock_registry.save_model_artifacts.call_args
+        self.assertEqual(kwargs["metrics"]["source_manifest"], source_lineage["source_manifest"])
+        self.assertEqual(kwargs["metrics"]["source_fingerprint"], source_lineage["source_fingerprint"])
+        self.assertEqual(
+            kwargs["metrics"]["pre_sampling_label_counts_by_date"],
+            source_lineage["pre_sampling_label_counts_by_date"],
+        )
+        self.assertEqual(kwargs["metrics"]["source_lineage_review_summary"], expected_summary)
+        self.assertEqual(metrics["source_lineage_review_summary"], expected_summary)
+        self.assertEqual(
+            mock_write_trace.call_args.kwargs["payload"]["metrics"]["source_lineage_review_summary"],
+            expected_summary,
+        )
+        self.assertEqual(metrics["grouped_date_stability"]["reason"], "room_not_targeted")
+        self.assertEqual(metrics["promotion_time_drift_summary"]["reason"], "room_not_targeted")
+        self.assertFalse(any("regime_instability_failed:room1" in reason for reason in metrics["gate_reasons"]))
+        self.assertFalse(
+            any("grouped_date_stability_watch:room1" in reason for reason in metrics["gate_watch_reasons"])
+        )
+
+    def test_grouped_date_stability_surfaces_unstable_bedroom_date_slices(self):
+        self.mock_platform.label_encoders["Bedroom"] = MagicMock()
+        self.mock_platform.label_encoders["Bedroom"].classes_ = np.array(
+            ["bedroom_normal_use", "sleep"],
+            dtype=object,
+        )
+
+        y_true = np.array([0, 0, 1, 1, 0, 0, 1, 1], dtype=np.int32)
+        y_pred_probs = np.array(
+            [
+                [0.95, 0.05],
+                [0.92, 0.08],
+                [0.05, 0.95],
+                [0.08, 0.92],
+                [0.10, 0.90],
+                [0.15, 0.85],
+                [0.88, 0.12],
+                [0.91, 0.09],
+            ],
+            dtype=np.float32,
+        )
+        seq_timestamps = pd.to_datetime(
+            [
+                "2025-12-04 10:00:00",
+                "2025-12-04 10:00:10",
+                "2025-12-04 10:00:20",
+                "2025-12-04 10:00:30",
+                "2025-12-05 10:00:00",
+                "2025-12-05 10:00:10",
+                "2025-12-05 10:00:20",
+                "2025-12-05 10:00:30",
+            ]
+        )
+
+        summary = self.pipeline._summarize_grouped_date_stability(
+            room_name="Bedroom",
+            y_true=y_true,
+            y_pred_probs=y_pred_probs,
+            seq_timestamps=seq_timestamps,
+        )
+
+        self.assertTrue(summary["available"])
+        self.assertTrue(summary["unstable_across_dates"])
+        self.assertEqual(summary["worst_date"], "2025-12-05")
+        self.assertAlmostEqual(float(summary["macro_f1_range"]), 1.0, places=6)
+        self.assertIn("macro_f1_range", " ".join(summary["risk_reasons"]))
+
+    @patch('ml.training.TrainingPipeline.augment_training_data')
+    @patch('ml.training.build_transformer_model')
+    @patch('ml.training.get_room_config')
+    def test_train_room_persists_grouped_date_stability_metadata_for_bedroom(
+        self,
+        mock_get_config,
+        mock_build_model,
+        mock_augment,
+    ):
+        mock_config = MagicMock()
+        mock_config.get_sequence_window.return_value = 60
+        mock_config.get_data_interval.return_value = 10
+        mock_get_config.return_value = mock_config
+
+        mock_augment.return_value = (np.zeros((10, 5, 3)), np.zeros(10))
+
+        mock_model = MagicMock()
+        mock_model.fit.return_value.history = {'accuracy': [0.95]}
+        mock_build_model.return_value = mock_model
+
+        self.mock_platform.label_encoders['Bedroom'] = MagicMock()
+        self.mock_platform.label_encoders['Bedroom'].classes_ = np.array(
+            ['bedroom_normal_use', 'sleep'],
+            dtype=object,
+        )
+        self.mock_platform.scalers['Bedroom'] = MagicMock()
+
+        processed_df = pd.DataFrame({
+            's1': np.random.randn(100),
+            's2': np.random.randn(100),
+            's3': np.random.randn(100),
+            'activity_encoded': np.random.randint(0, 2, 100),
+            'timestamp': pd.date_range(start='2025-12-10', periods=100, freq='10s')
+        })
+        source_lineage = {
+            "room": "Bedroom",
+            "source_manifest": [
+                {"path": "/tmp/HK0011_jessica_train_5dec2025.xlsx", "source_order": 0},
+                {"path": "/tmp/HK0011_jessica_train_10dec2025.xlsx", "source_order": 1},
+            ],
+            "source_fingerprint": "abc123def456",
+            "pre_sampling_label_counts_by_date": {
+                "2025-12-05": {"bedroom_normal_use": 20, "sleep": 10},
+                "2025-12-10": {"bedroom_normal_use": 5, "sleep": 25},
+            },
+        }
+        grouped_summary = {
+            "available": True,
+            "unstable_across_dates": True,
+            "worst_date": "2025-12-05",
+            "risk_reasons": ["macro_f1_range:0.400>0.150"],
+        }
+        drift_summary = {
+            "available": True,
+            "risk_level": "high",
+            "unstable_across_dates": True,
+        }
+
+        with patch.object(
+            self.pipeline,
+            "_summarize_grouped_date_stability",
+            return_value=grouped_summary,
+            create=True,
+        ) as mock_grouped, patch.object(
+            self.pipeline,
+            "_build_promotion_time_drift_summary",
+            return_value=drift_summary,
+            create=True,
+        ) as mock_drift, patch.object(
+            self.pipeline,
+            "_write_decision_trace",
+            return_value={"versioned": "/tmp/trace-v1.json", "latest": "/tmp/trace.json"},
+        ) as mock_write_trace:
+            metrics = self.pipeline.train_room(
+                room_name='Bedroom',
+                processed_df=processed_df,
+                seq_length=5,
+                elder_id='elder1',
+                source_lineage=source_lineage,
+            )
+
+        _, kwargs = self.mock_registry.save_model_artifacts.call_args
+        self.assertEqual(kwargs["metrics"]["grouped_date_stability"], grouped_summary)
+        self.assertEqual(kwargs["metrics"]["promotion_time_drift_summary"], drift_summary)
+        self.assertEqual(metrics["grouped_date_stability"], grouped_summary)
+        self.assertEqual(metrics["promotion_time_drift_summary"], drift_summary)
+        self.assertEqual(
+            mock_write_trace.call_args.kwargs["payload"]["metrics"]["grouped_date_stability"],
+            grouped_summary,
+        )
+        self.assertEqual(
+            mock_write_trace.call_args.kwargs["payload"]["metrics"]["promotion_time_drift_summary"],
+            drift_summary,
+        )
+        mock_grouped.assert_called_once()
+        mock_drift.assert_called_once()
+
     @patch('ml.training.score_activity_confidence')
     @patch('ml.training.fit_activity_confidence_calibrator')
     def test_calibrate_class_thresholds_records_activity_confidence_artifact_for_timeline_room(
@@ -3104,6 +3417,60 @@ class TestTrainingPipeline(unittest.TestCase):
         )
         self.assertFalse(gate_pass)
         self.assertTrue(any(r.startswith("class_prior_drift_failed:room1:") for r in reasons))
+
+    @patch('ml.training.get_release_gates_config')
+    def test_evaluate_release_gate_blocks_high_risk_bedroom_regime_instability(self, mock_get_policy):
+        mock_get_policy.return_value = {
+            "release_gates": {
+                "rooms": {
+                    "bedroom": {
+                        "schedule": [{"min_days": 1, "max_days": None, "min_value": 0.2}]
+                    }
+                },
+                "no_regress": {"max_drop_from_champion": 0.2, "exempt_rooms": []},
+            }
+        }
+        gate_pass, reasons = self.pipeline._evaluate_release_gate(
+            room_name="Bedroom",
+            candidate_metrics={
+                "macro_f1": 0.8,
+                "training_days": 8.0,
+                "samples": 2000,
+                "observed_day_count": 5,
+                "metric_source": "holdout_validation",
+                "validation_min_class_support": 100,
+                "required_minority_support": 5,
+                "per_label_recall": {
+                    "bedroom_normal_use": 0.61,
+                    "sleep": 0.93,
+                    "unoccupied": 0.92,
+                },
+                "per_label_support": {
+                    "bedroom_normal_use": 120,
+                    "sleep": 200,
+                    "unoccupied": 220,
+                },
+                "promotion_risk_flags": ["unstable_date_slices:bedroom"],
+                "grouped_date_stability": {
+                    "available": True,
+                    "unstable_across_dates": True,
+                    "worst_date": "2025-12-17",
+                },
+                "promotion_time_drift_summary": {
+                    "available": True,
+                    "risk_level": "high",
+                    "unstable_across_dates": True,
+                    "worst_date": "2025-12-17",
+                },
+            },
+            champion_meta=None,
+        )
+        self.assertFalse(gate_pass)
+        self.assertIn(
+            "regime_instability_failed:bedroom:high_risk_unstable_date_slices:worst_date=2025-12-17",
+            reasons,
+        )
+        self.assertEqual(self.pipeline._last_release_gate_watch_reasons, [])
 
     @patch('ml.training.get_release_gates_config')
     @patch.dict(os.environ, {"RELEASE_GATE_MAX_CLASS_PRIOR_DRIFT": "0.10"}, clear=False)

@@ -90,3 +90,17 @@
   - `PYTHONPATH=backend python3 -m pytest backend/tests/test_run_daily_analysis_beta6_authority.py backend/tests/test_health_server.py -q -k "postgres_preflight or authority_contract or readiness_requires_postgres"` -> 6 passed
   - `PYTHONPATH=backend python3 -m pytest backend/tests/test_run_daily_analysis_beta6_authority.py backend/tests/test_run_daily_analysis_thresholds.py backend/tests/test_health_server.py -q` -> 86 passed, 3 warnings
   - `bash -n start.sh && bash -n ops_start.sh` -> passed
+2026-03-12 20:46:23 UTC | TASK-16 beta61-authority-helper-dedup | Removed the duplicated Beta 6 authority PostgreSQL preflight implementation by extracting a shared helper module and wiring both runtime preflight and readiness checks through it.
+- Code change:
+  - `backend/utils/beta6_authority_contract.py`
+  - `backend/run_daily_analysis.py`
+  - `backend/utils/health_check.py`
+  - `backend/tests/test_beta6_authority_contract.py`
+  - `backend/tests/test_run_daily_analysis_beta6_authority.py`
+  - `backend/tests/test_health_server.py`
+- Task outcome:
+  - direct PostgreSQL authority probing now has a single shared implementation
+  - `run_daily_analysis` and `HealthChecker` both delegate to the same helper, reducing contract drift risk
+  - added a dedicated helper test surface plus caller delegation checks
+- Verification:
+  - `pytest backend/tests/test_beta6_authority_contract.py backend/tests/test_run_daily_analysis_beta6_authority.py backend/tests/test_health_server.py -q` -> 47 passed, 3 warnings

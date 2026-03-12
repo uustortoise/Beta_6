@@ -223,6 +223,22 @@ def test_health_readiness_requires_postgres_when_authority_enabled(monkeypatch):
     assert "connection refused" in out["components"]["authority_contract"]["message"]
 
 
+def test_health_checker_postgres_preflight_delegates_to_shared_helper(monkeypatch):
+    from backend.utils import beta6_authority_contract as authority_contract
+
+    checker = HealthChecker(check_postgresql=True)
+    monkeypatch.setattr(
+        authority_contract,
+        "check_postgresql_preflight",
+        lambda: (False, {"error": "shared-helper"}),
+    )
+
+    ok, details = checker.check_postgresql_preflight()
+
+    assert ok is False
+    assert details == {"error": "shared-helper"}
+
+
 def test_read_runtime_fallback_by_room_reads_registry_state(tmp_path, monkeypatch):
     root = tmp_path / "models_beta6_registry_v2"
     elder_id = "elder_123"

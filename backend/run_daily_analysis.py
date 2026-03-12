@@ -39,9 +39,8 @@ logger = logging.getLogger("DailyAutomation_Beta3")
 # Load Env
 load_dotenv()
 
-from elderlycare_v1_16.config.settings import RAW_DATA_DIR, ARCHIVE_DATA_DIR, USE_POSTGRESQL
+from elderlycare_v1_16.config.settings import RAW_DATA_DIR, ARCHIVE_DATA_DIR
 from config import get_release_gates_config
-from db.database import db as dual_write_db
 from ml.pipeline import UnifiedPipeline
 from ml.release_gates import resolve_scheduled_threshold
 from ml.registry import ModelRegistry
@@ -78,6 +77,7 @@ from process_data import process_file, get_elder_id_from_filename, archive_file
 from ml.household_analyzer import HouseholdAnalyzer
 from utils.segment_utils import regenerate_segments
 from utils.data_loader import load_sensor_data
+from utils import beta6_authority_contract
 from utils.room_utils import normalize_room_name
 from utils.elder_id_utils import (
     choose_canonical_elder_id as _choose_canonical_elder_id_impl,
@@ -367,29 +367,7 @@ def _ensure_beta6_authority_evidence_profile_default() -> None:
 
 
 def _check_beta6_authority_postgres_preflight() -> tuple[bool, dict]:
-    if not bool(USE_POSTGRESQL):
-        return False, {"error": "USE_POSTGRESQL=false"}
-
-    pg_db = None
-    conn = None
-    try:
-        pg_db = getattr(dual_write_db, "pg_db", None)
-        if pg_db is None:
-            return False, {"error": "PostgreSQL unavailable or failed to initialize"}
-
-        conn = pg_db.get_raw_connection()
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT 1")
-            cursor.fetchone()
-        return True, {"status": "ok"}
-    except Exception as exc:
-        return False, {"error": f"{type(exc).__name__}: {exc}"}
-    finally:
-        if pg_db is not None and conn is not None:
-            try:
-                pg_db.return_connection(conn)
-            except Exception:
-                pass
+    return beta6_authority_contract.check_postgresql_preflight()
 
 
 def _validate_beta6_authority_env_preflight() -> tuple[bool, dict]:

@@ -389,26 +389,28 @@ def test_beta6_training_preflight_reports_postgres_unavailable(monkeypatch, tmp_
 
 
 def test_beta6_postgres_preflight_fails_when_postgres_feature_disabled(monkeypatch):
-    monkeypatch.setattr(run_daily_analysis, "USE_POSTGRESQL", False)
+    from backend.utils import beta6_authority_contract as authority_contract
+
+    monkeypatch.setattr(authority_contract, "USE_POSTGRESQL", False)
     ok, details = run_daily_analysis._check_beta6_authority_postgres_preflight()
     assert ok is False
     assert "USE_POSTGRESQL=false" in str(details.get("error", ""))
 
 
 def test_beta6_postgres_preflight_fails_when_pg_db_missing(monkeypatch):
-    monkeypatch.setattr(run_daily_analysis, "USE_POSTGRESQL", True)
-    monkeypatch.setattr(
-        run_daily_analysis,
-        "dual_write_db",
-        SimpleNamespace(pg_db=None),
-    )
+    from backend.utils import beta6_authority_contract as authority_contract
+
+    monkeypatch.setattr(authority_contract, "USE_POSTGRESQL", True)
+    monkeypatch.setattr(authority_contract, "dual_write_db", SimpleNamespace(pg_db=None))
     ok, details = run_daily_analysis._check_beta6_authority_postgres_preflight()
     assert ok is False
     assert "PostgreSQL unavailable" in str(details.get("error", ""))
 
 
 def test_beta6_postgres_preflight_passes_with_direct_pg_connection(monkeypatch):
-    monkeypatch.setattr(run_daily_analysis, "USE_POSTGRESQL", True)
+    from backend.utils import beta6_authority_contract as authority_contract
+
+    monkeypatch.setattr(authority_contract, "USE_POSTGRESQL", True)
 
     class _Cursor:
         def __enter__(self):
@@ -436,7 +438,7 @@ def test_beta6_postgres_preflight_passes_with_direct_pg_connection(monkeypatch):
         def return_connection(self, conn):  # noqa: ARG002
             returned["called"] = True
 
-    monkeypatch.setattr(run_daily_analysis, "dual_write_db", SimpleNamespace(pg_db=_Pg()))
+    monkeypatch.setattr(authority_contract, "dual_write_db", SimpleNamespace(pg_db=_Pg()))
     ok, details = run_daily_analysis._check_beta6_authority_postgres_preflight()
     assert ok is True
     assert details.get("status") == "ok"
@@ -444,7 +446,9 @@ def test_beta6_postgres_preflight_passes_with_direct_pg_connection(monkeypatch):
 
 
 def test_beta6_postgres_preflight_reports_connection_errors(monkeypatch):
-    monkeypatch.setattr(run_daily_analysis, "USE_POSTGRESQL", True)
+    from backend.utils import beta6_authority_contract as authority_contract
+
+    monkeypatch.setattr(authority_contract, "USE_POSTGRESQL", True)
 
     class _BoomPg:
         def get_raw_connection(self):
@@ -453,10 +457,25 @@ def test_beta6_postgres_preflight_reports_connection_errors(monkeypatch):
         def return_connection(self, conn):  # noqa: ARG002
             return None
 
-    monkeypatch.setattr(run_daily_analysis, "dual_write_db", SimpleNamespace(pg_db=_BoomPg()))
+    monkeypatch.setattr(authority_contract, "dual_write_db", SimpleNamespace(pg_db=_BoomPg()))
     ok, details = run_daily_analysis._check_beta6_authority_postgres_preflight()
     assert ok is False
     assert "RuntimeError" in str(details.get("error", ""))
+
+
+def test_beta6_postgres_preflight_delegates_to_shared_helper(monkeypatch):
+    from backend.utils import beta6_authority_contract as authority_contract
+
+    monkeypatch.setattr(
+        authority_contract,
+        "check_postgresql_preflight",
+        lambda: (False, {"error": "shared-helper"}),
+    )
+
+    ok, details = run_daily_analysis._check_beta6_authority_postgres_preflight()
+
+    assert ok is False
+    assert details == {"error": "shared-helper"}
 
 
 def test_beta6_authority_live_run_persists_phase4_artifacts(monkeypatch, tmp_path: Path):

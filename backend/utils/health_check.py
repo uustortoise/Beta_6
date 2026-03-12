@@ -13,6 +13,8 @@ from typing import Dict, Any, List
 from dataclasses import dataclass, asdict
 from enum import Enum
 
+from . import beta6_authority_contract
+
 logger = logging.getLogger(__name__)
 
 
@@ -98,45 +100,11 @@ class HealthChecker:
         return self.check_database()
 
     def _env_truthy(self, name: str, default: bool = False) -> bool:
-        raw = os.getenv(name)
-        if raw is None:
-            return bool(default)
-        return str(raw).strip().lower() in {"1", "true", "yes", "y", "on", "enabled"}
+        return beta6_authority_contract.env_truthy(name, default=default)
 
     def check_postgresql_preflight(self) -> tuple[bool, Dict[str, Any]]:
-        """
-        Direct PostgreSQL probe used by Beta 6 authority readiness checks.
-        """
-        conn = None
-        pg_db = None
-        try:
-            try:
-                from backend.elderlycare_v1_16.config.settings import USE_POSTGRESQL
-                from backend.db.database import db as dual_write_db
-            except Exception:
-                from elderlycare_v1_16.config.settings import USE_POSTGRESQL
-                from db.database import db as dual_write_db
-
-            if not bool(USE_POSTGRESQL):
-                return False, {"error": "USE_POSTGRESQL=false"}
-
-            pg_db = getattr(dual_write_db, "pg_db", None)
-            if pg_db is None:
-                return False, {"error": "PostgreSQL unavailable or failed to initialize"}
-
-            conn = pg_db.get_raw_connection()
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT 1")
-                cursor.fetchone()
-            return True, {"status": "ok"}
-        except Exception as e:
-            return False, {"error": f"{type(e).__name__}: {e}"}
-        finally:
-            if pg_db is not None and conn is not None:
-                try:
-                    pg_db.return_connection(conn)
-                except Exception:
-                    pass
+        """Direct PostgreSQL probe used by Beta 6 authority readiness checks."""
+        return beta6_authority_contract.check_postgresql_preflight()
     
     def check_models(self) -> ComponentHealth:
         """Check ML models availability."""

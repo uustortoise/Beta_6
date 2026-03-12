@@ -46,7 +46,8 @@ Complete these before any room-level sign-off:
   - `python3 -m py_compile backend/ml/pipeline.py backend/ml/training.py backend/ml/legacy/registry.py backend/scripts/run_bedroom_root_cause_matrix.py backend/scripts/bedroom_day_segment_audit.py`
 - [ ] Run clean candidate load check:
   - verify `load_models_for_elder()` loads all expected rooms
-  - verify `platform.two_stage_core_models` contains `Bathroom`, `Bedroom`, and `LivingRoom`
+  - verify `platform.two_stage_core_models` contains the rooms whose saved runtime contract enables two-stage runtime
+  - for `Bedroom`, verify the saved runtime contract directly and do not require inclusion in `platform.two_stage_core_models` when `Bedroom_v38_two_stage_meta.json` has `runtime_enabled=false`
 - [ ] Replay corrected `HK0011_jessica_train_17dec2025.xlsx` through the candidate namespace and save the fresh summary path
 - [ ] Record the exact artifact paths reviewed for the sign-off round
 
@@ -174,4 +175,5 @@ Final release decision:
 - `Bedroom` root-cause work concluded the harmful added day was `2025-12-05`, and the issue is a valid alternate regime rather than obvious bad data.
 - Bedroom instability is now explicitly surfaced and blocked in the training/promotion path, but that does not by itself make mixed-regime Bedroom retrains safe.
 - All-room lightweight lineage observability now exists; only Bedroom has the added instability gate.
+- Bedroom runtime is intentionally single-stage fallback in the current accepted candidate path when `Bedroom_v38_two_stage_meta.json` has `runtime_enabled=false`; do not treat absence from `platform.two_stage_core_models` as a pre-final failure in that case.
 - Historical-corrections access through local PostgreSQL remained unavailable during the Bedroom root-fix program, so that caveat should be carried into any final risk call.

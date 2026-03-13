@@ -600,6 +600,33 @@ class TestTrainingPipeline(unittest.TestCase):
             "block",
         )
 
+    def test_non_fragile_room_ignores_grouped_regime_failures(self):
+        grouped_gate = self.pipeline._evaluate_grouped_regime_gate(
+            room_name="LivingRoom",
+            grouped_fragility={
+                "grouped_by_date": {
+                    "worst_slice": "2026-03-07",
+                    "worst_slice_macro_f1": 0.12,
+                },
+                "stability_gate": {
+                    "fragile_floor": 0.20,
+                    "pass": False,
+                    "failures": [
+                        {
+                            "regime": "grouped_by_date",
+                            "worst_slice": "2026-03-07",
+                            "worst_slice_macro_f1": 0.12,
+                            "floor": 0.20,
+                        }
+                    ],
+                },
+            },
+        )
+
+        self.assertTrue(bool(grouped_gate["pass"]))
+        self.assertEqual(grouped_gate["blocking_reasons"], [])
+        self.assertEqual(grouped_gate["failures"], [])
+
     def test_bedroom_runtime_expectation_uses_saved_runtime_enabled_flag(self):
         with TemporaryDirectory() as tmp:
             models_dir = Path(tmp)

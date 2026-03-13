@@ -154,6 +154,7 @@ training:
     livingroom_policy_sensitivity:
       room: livingroom
       grouped_regime: grouped_by_date
+      training_gate: false
       typed_policy_fields:
         - two_stage_core.gate_mode
         - training_profile.post_split_shuffle_rooms
@@ -162,6 +163,7 @@ training:
     bedroom_grouped_fragility:
       room: bedroom
       grouped_regime: grouped_by_date
+      training_gate: true
       typed_policy_fields:
         - training_profile.transition_focus_room_labels
         - training_profile.transition_focus_radius_steps_by_room

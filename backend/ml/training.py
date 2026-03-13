@@ -2810,17 +2810,21 @@ class TrainingPipeline:
             return "conditional"
         return "pass"
 
-    @staticmethod
     def _evaluate_grouped_regime_gate(
+        self,
         *,
         room_name: str,
         grouped_fragility: Mapping[str, Any] | None,
+        policy: Optional[TrainingPolicy] = None,
     ) -> Dict[str, Any]:
         gate_report: Dict[str, Any] = {
             "pass": True,
             "blocking_reasons": [],
             "failures": [],
         }
+        active_policy = policy if isinstance(policy, TrainingPolicy) else self.policy
+        if not active_policy.training_profile.room_uses_grouped_fragility_gate(room_name):
+            return gate_report
         payload = grouped_fragility if isinstance(grouped_fragility, Mapping) else {}
         stability_gate = payload.get("stability_gate")
         if not isinstance(stability_gate, Mapping):
@@ -6778,6 +6782,7 @@ class TrainingPipeline:
             grouped_regime_gate = self._evaluate_grouped_regime_gate(
                 room_name=room_name,
                 grouped_fragility=metrics.get("grouped_fragility"),
+                policy=active_policy,
             )
             metrics["grouped_regime_gate"] = dict(grouped_regime_gate)
             if not bool(grouped_regime_gate.get("pass", True)):

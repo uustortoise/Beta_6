@@ -346,9 +346,11 @@ def test_policy_defaults_can_emit_named_room_diagnostic_profiles():
 
     livingroom_profile = profiles["livingroom_policy_sensitivity"]
     assert livingroom_profile["room"] == "livingroom"
+    assert livingroom_profile["training_gate"] is False
     assert "typed_policy_fields" in livingroom_profile
     assert "two_stage_core.gate_mode" in livingroom_profile["typed_policy_fields"]
 
     bedroom_profile = profiles["bedroom_grouped_fragility"]
     assert bedroom_profile["room"] == "bedroom"
     assert bedroom_profile["grouped_regime"] == "grouped_by_date"
+    assert bedroom_profile["training_gate"] is True

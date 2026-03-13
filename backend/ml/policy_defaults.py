@@ -331,6 +331,7 @@ def get_training_room_diagnostic_profiles_default() -> dict[str, dict[str, Any]]
             continue
         room_name = str(payload.get("room", "")).strip().lower()
         grouped_regime = str(payload.get("grouped_regime", "")).strip().lower()
+        training_gate = bool(payload.get("training_gate", False))
         typed_policy_fields = payload.get("typed_policy_fields", [])
         if not isinstance(typed_policy_fields, (list, tuple)):
             typed_policy_fields = []
@@ -340,6 +341,7 @@ def get_training_room_diagnostic_profiles_default() -> dict[str, dict[str, Any]]
         profiles[profile_key] = {
             "room": room_name,
             "grouped_regime": grouped_regime,
+            "training_gate": training_gate,
             "typed_policy_fields": [
                 str(field).strip()
                 for field in typed_policy_fields

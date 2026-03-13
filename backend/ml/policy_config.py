@@ -642,11 +642,13 @@ class TrainingProfilePolicy:
             return {}
         room = normalize_room_name(payload.get("room"))
         grouped_regime = str(payload.get("grouped_regime", "")).strip().lower()
+        training_gate = bool(payload.get("training_gate", False))
         typed_policy_fields = payload.get("typed_policy_fields", [])
         env_overrides = payload.get("env_overrides", {})
         return {
             "room": room,
             "grouped_regime": grouped_regime,
+            "training_gate": training_gate,
             "typed_policy_fields": [
                 str(field).strip()
                 for field in (typed_policy_fields if isinstance(typed_policy_fields, list) else [])
@@ -658,6 +660,21 @@ class TrainingProfilePolicy:
                 if str(k).strip()
             },
         }
+
+    def room_uses_grouped_fragility_gate(self, room_name: str) -> bool:
+        room_key = normalize_room_name(room_name)
+        if not room_key:
+            return False
+        for payload in self.room_diagnostic_profiles.values():
+            if not isinstance(payload, Mapping):
+                continue
+            if normalize_room_name(payload.get("room")) != room_key:
+                continue
+            if not bool(payload.get("training_gate", False)):
+                continue
+            if str(payload.get("grouped_regime", "")).strip().lower():
+                return True
+        return False
 
 
 @dataclass

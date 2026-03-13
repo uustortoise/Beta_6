@@ -289,6 +289,25 @@
   - green phase: `PYTHONPATH=backend pytest backend/tests/test_training.py backend/tests/test_run_room_experiments.py -q` -> 113 passed, 3 warnings
   - regression sweep: `PYTHONPATH=backend pytest backend/tests/test_run_room_experiments.py backend/tests/test_training.py backend/tests/test_timeline_metrics.py -q` -> 135 passed, 3 warnings
   - syntax: `python3 -m py_compile backend/ml/timeline_metrics.py backend/ml/room_experiments.py backend/scripts/run_room_experiments.py backend/ml/training.py backend/tests/test_run_room_experiments.py backend/tests/test_training.py` -> passed
+2026-03-13 10:32:57 UTC | TASK-24 | Fix Task 10 review finding by scoping grouped-regime blocking to explicit fragile-room profiles
+- Context: review of `824c673` found that grouped worst-slice blocking in `TrainingPipeline._evaluate_grouped_regime_gate(...)` was payload-driven only; once wired, any room with grouped fragility diagnostics could be blocked. The intended behavior was to affect only explicitly configured fragile-room profiles.
+- Files changed:
+  - `backend/config/beta6_policy_defaults.yaml`
+  - `backend/ml/policy_defaults.py`
+  - `backend/ml/policy_config.py`
+  - `backend/ml/training.py`
+  - `backend/tests/test_policy_config.py`
+  - `backend/tests/test_training.py`
+- Actions:
+  - added an explicit `training_gate` opt-in to room diagnostic profile defaults, with `bedroom_grouped_fragility=true` and `livingroom_policy_sensitivity=false`
+  - extended policy default loading and typed policy accessors to preserve the new `training_gate` field and expose a `room_uses_grouped_fragility_gate(...)` helper
+  - changed grouped-regime evaluation to consult the active policy before emitting blocking reasons, so non-fragile rooms ignore grouped worst-slice payloads while Bedroom-style fragile rooms still block
+  - added regressions proving the Bedroom grouped fragility profile still blocks and that LivingRoom does not block on the same payload without explicit opt-in
+- Verification:
+  - red phase: `PYTHONPATH=backend pytest backend/tests/test_training.py backend/tests/test_policy_config.py -q -k "non_fragile_room_ignores_grouped_regime_failures or policy_defaults_can_emit_named_room_diagnostic_profiles or fragile_room_gates_can_block_on_worst_slice_instability"` -> 2 failed, 1 passed, 3 warnings
+  - green phase: same command -> 3 passed, 122 deselected, 3 warnings
+  - regression sweep: `PYTHONPATH=backend pytest backend/tests/test_run_room_experiments.py backend/tests/test_training.py backend/tests/test_timeline_metrics.py backend/tests/test_policy_config.py -q` -> 153 passed, 3 warnings
+  - syntax: `python3 -m py_compile backend/ml/training.py backend/ml/policy_config.py backend/ml/policy_defaults.py backend/tests/test_training.py backend/tests/test_policy_config.py` -> passed
 2026-03-13 09:17:33 UTC | TASK-22 | Fix Task 7 review regressions in registry alias strictness and certification-status visibility
 - Context: review of `dcc4789` found two follow-up issues: registry repair was treating missing latest `*_decision_trace.json` aliases as mandatory and skipping otherwise loadable rooms, and the new `rejected_by_beta61_certification` training status was not counted or rendered consistently in ops/health/dashboard summaries.
 - Files changed:

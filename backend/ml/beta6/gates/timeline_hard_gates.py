@@ -1,4 +1,4 @@
-"""Timeline hard-gate checks for Beta 6 room decisions."""
+"""Authoritative Beta 6.2 timeline hard-gate entrypoint."""
 
 from __future__ import annotations
 
@@ -7,6 +7,11 @@ from typing import Any, Dict, Mapping, Optional
 
 from ..serving.capability_profiles import CapabilityProfile
 from ..contracts.decisions import ReasonCode
+
+
+BETA62_SURFACE_NAME = "timeline_hard_gates"
+BETA62_CANONICAL_IMPORT = "ml.beta6.gates.timeline_hard_gates"
+BETA62_COMPAT_SHIMS = ("ml.beta6.timeline_hard_gates",)
 
 
 @dataclass(frozen=True)

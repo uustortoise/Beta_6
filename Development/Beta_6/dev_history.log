@@ -212,6 +212,26 @@
   - green phase: `PYTHONPATH=backend pytest backend/tests/test_training.py -k 'write_decision_trace' backend/tests/test_registry.py -k 'decision_trace or deactivate_current_version or rollback_to_version' -q` -> 6 passed, 3 warnings
   - focused sweep: `PYTHONPATH=backend pytest backend/tests/test_registry.py backend/tests/test_run_daily_analysis_beta6_authority.py backend/tests/test_training.py -k 'write_decision_trace or beta61_certification_entry or rollback_to_version or deactivate_current_version or save_model_artifacts_reconciles_single_promoted_version or cleanup_preserves_current_champion_even_if_old or cleanup_resets_stale_current_version_reference' -q` -> 12 passed, 3 warnings
   - artifact repair check: `PYTHONPATH=backend python3 -c "from pathlib import Path; from ml.registry import ModelRegistry; r=ModelRegistry(Path('/Users/dickson/DT/DT_development/Development/Beta_6/.worktrees/beta61-beta62-execution/backend')); print(r.validate_and_repair_room_registry_state('HK0011_jessica','LivingRoom'))"` -> `{'valid': True, 'repaired': True, 'issues': ['Alias mismatch detected for current_version 2; syncing aliases']}`
+2026-03-13 09:25:38 UTC | TASK-22 | Establish Beta 6.2 SSOT namespace surfaces before intake work
+- Context: Task 8 on `codex/beta61-beta62-execution` is the Beta 6.2 namespace cleanup step, not the intake subsystem. The branch already had compatibility shims, but the authoritative trainer/registry/gate entrypoints were not encoded as an explicit contract or protected by dedicated import-boundary tests.
+- Files changed:
+  - `backend/ml/beta6/training/beta6_trainer.py`
+  - `backend/ml/beta6/registry/registry_v2.py`
+  - `backend/ml/beta6/gates/timeline_hard_gates.py`
+  - `backend/ml/beta6/beta6_trainer.py`
+  - `backend/ml/beta6/registry_v2.py`
+  - `backend/ml/beta6/timeline_hard_gates.py`
+  - `backend/tests/test_beta6_import_boundaries.py`
+- Actions:
+  - selected the canonical Beta 6.2 module surfaces as `ml.beta6.training.beta6_trainer`, `ml.beta6.registry.registry_v2`, and `ml.beta6.gates.timeline_hard_gates`
+  - added explicit SSOT metadata to each canonical module: surface name, canonical import path, and allowed compatibility-shim imports
+  - tightened the deprecated shim modules so their purpose is documented as compatibility-only while preserving bit-equivalent runtime behavior through `sys.modules[__name__] = _impl`
+  - extended `test_beta6_import_boundaries.py` with dedicated Task 8 coverage that asserts a single authoritative entrypoint exists and that duplicate paths are explicit shims rather than ambiguous alternate implementations
+- Verification:
+  - red phase: `PYTHONPATH=backend pytest backend/tests/test_beta6_import_boundaries.py -q` -> 2 failed, 1 passed (expected missing `BETA62_SURFACE_NAME` / SSOT metadata before implementation)
+  - green phase: `PYTHONPATH=backend pytest backend/tests/test_beta6_import_boundaries.py -q` -> 3 passed, 3 warnings
+  - regression sweep: `PYTHONPATH=backend pytest backend/tests/test_beta6_import_boundaries.py backend/tests/test_beta6_shim_import_guard.py backend/tests/test_beta6_registry_v2.py backend/tests/test_beta6_timeline_hard_gates.py backend/tests/test_beta6_trainer_intake_gate.py -q` -> 27 passed, 3 warnings
+  - syntax: `python3 -m py_compile backend/ml/beta6/beta6_trainer.py backend/ml/beta6/training/beta6_trainer.py backend/ml/beta6/registry_v2.py backend/ml/beta6/registry/registry_v2.py backend/ml/beta6/timeline_hard_gates.py backend/ml/beta6/gates/timeline_hard_gates.py backend/tests/test_beta6_import_boundaries.py` -> passed
 2026-03-13 09:17:33 UTC | TASK-22 | Fix Task 7 review regressions in registry alias strictness and certification-status visibility
 - Context: review of `dcc4789` found two follow-up issues: registry repair was treating missing latest `*_decision_trace.json` aliases as mandatory and skipping otherwise loadable rooms, and the new `rejected_by_beta61_certification` training status was not counted or rendered consistently in ops/health/dashboard summaries.
 - Files changed:

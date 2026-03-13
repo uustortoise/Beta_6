@@ -1,4 +1,4 @@
-"""Registry v2: append-only events with atomic champion pointers."""
+"""Authoritative Beta 6.2 registry v2 entrypoint."""
 
 from __future__ import annotations
 
@@ -10,6 +10,11 @@ from typing import Any, Dict, List, Mapping, Optional
 from ..contracts.decisions import ReasonCode
 from ..contracts.events import DecisionEvent, EventType
 from .registry_events import event_to_record
+
+
+BETA62_SURFACE_NAME = "registry_v2"
+BETA62_CANONICAL_IMPORT = "ml.beta6.registry.registry_v2"
+BETA62_COMPAT_SHIMS = ("ml.beta6.registry_v2",)
 
 
 class RegistryV2:

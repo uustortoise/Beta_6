@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """
+Authoritative Beta 6.2 training entrypoint.
+
 Beta 6 Universal Backbone Trainer.
 
 This module provides the training pipeline for the Universal Backbone model,
@@ -17,6 +19,10 @@ Architecture:
     
 The trained backbone can be frozen and used with resident-specific heads in production.
 """
+
+BETA62_SURFACE_NAME = "trainer"
+BETA62_CANONICAL_IMPORT = "ml.beta6.training.beta6_trainer"
+BETA62_COMPAT_SHIMS = ("ml.beta6.beta6_trainer",)
 
 import argparse
 import json

@@ -288,6 +288,36 @@ def test_ops_service_sample_collection_target_respects_env_override(test_db, mon
     assert samples.get("target") == 9
 
 
+def test_ops_service_model_update_monitor_counts_beta61_certification_rejection_as_gate_fail(test_db):
+    elder = "OPS_BETA61_GATE"
+    metadata = {
+        "run_failure_stage": "beta61_certification_failed",
+        "metrics": [
+            {"room": "Bedroom", "gate_pass": False},
+        ],
+    }
+    with test_db.get_connection() as conn:
+        conn.execute("INSERT INTO elders (elder_id, full_name) VALUES (?, ?)", (elder, "Ops Beta61"))
+        conn.execute(
+            """
+            INSERT INTO training_history (elder_id, training_date, model_type, status, accuracy, metadata)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                elder,
+                "2026-03-08 09:00:00",
+                "baseline",
+                "rejected_by_beta61_certification",
+                0.88,
+                json.dumps(metadata),
+            ),
+        )
+        conn.commit()
+
+    monitor = ops_service.get_model_update_monitor(elder, days=30, limit=10)
+    assert monitor["production_counters"]["gate_fail"] == 1
+
+
 def test_ops_service_hard_negative_last_run_falls_back_to_training(test_db):
     elder = "OPS_HN_1"
     with test_db.get_connection() as conn:

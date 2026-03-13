@@ -212,3 +212,23 @@
   - green phase: `PYTHONPATH=backend pytest backend/tests/test_training.py -k 'write_decision_trace' backend/tests/test_registry.py -k 'decision_trace or deactivate_current_version or rollback_to_version' -q` -> 6 passed, 3 warnings
   - focused sweep: `PYTHONPATH=backend pytest backend/tests/test_registry.py backend/tests/test_run_daily_analysis_beta6_authority.py backend/tests/test_training.py -k 'write_decision_trace or beta61_certification_entry or rollback_to_version or deactivate_current_version or save_model_artifacts_reconciles_single_promoted_version or cleanup_preserves_current_champion_even_if_old or cleanup_resets_stale_current_version_reference' -q` -> 12 passed, 3 warnings
   - artifact repair check: `PYTHONPATH=backend python3 -c "from pathlib import Path; from ml.registry import ModelRegistry; r=ModelRegistry(Path('/Users/dickson/DT/DT_development/Development/Beta_6/.worktrees/beta61-beta62-execution/backend')); print(r.validate_and_repair_room_registry_state('HK0011_jessica','LivingRoom'))"` -> `{'valid': True, 'repaired': True, 'issues': ['Alias mismatch detected for current_version 2; syncing aliases']}`
+2026-03-13 09:17:33 UTC | TASK-22 | Fix Task 7 review regressions in registry alias strictness and certification-status visibility
+- Context: review of `dcc4789` found two follow-up issues: registry repair was treating missing latest `*_decision_trace.json` aliases as mandatory and skipping otherwise loadable rooms, and the new `rejected_by_beta61_certification` training status was not counted or rendered consistently in ops/health/dashboard summaries.
+- Files changed:
+  - `backend/ml/legacy/registry.py`
+  - `backend/services/ops_service.py`
+  - `backend/export_dashboard.py`
+  - `backend/health_server.py`
+  - `backend/tests/test_ui_services.py`
+  - `backend/tests/test_health_server.py`
+- Actions:
+  - narrowed registry alias postconditions so decision traces remain syncable/repairable but optional for model loading, while keeping rollback/deactivation alias repair for real champion traces
+  - taught ops summary counters to treat `rejected_by_beta61_certification` and `beta61_certification_failed` as gate failures
+  - added dashboard-friendly labeling for `rejected_by_beta61_certification`
+  - extended promotion-gate reporting to surface `rejected_by_beta61_certification_runs`, include certification entry details in `latest_run`, and degrade summary status when certification rejections are present
+  - added regressions covering ops gate-fail counting and promotion-gate summary visibility for Beta 6.1 certification rejections
+- Verification:
+  - red phase: `PYTHONPATH=backend pytest backend/tests/test_registry.py backend/tests/test_ui_services.py -k 'beta61_certification or validate_and_repair_skips_sync_when_aliases_already_match or load_models_for_elder' backend/tests/test_health_server.py -k 'beta61_certification or promotion_gate' -q` -> 2 failed (expected gate-fail/status visibility regressions before implementation)
+  - green phase: `PYTHONPATH=backend pytest backend/tests/test_registry.py backend/tests/test_ui_services.py -k 'beta61_certification or validate_and_repair_skips_sync_when_aliases_already_match or load_models_for_elder' backend/tests/test_health_server.py -k 'beta61_certification or promotion_gate' -q` -> 4 passed, 79 deselected, 4 warnings
+  - focused suites: `PYTHONPATH=backend pytest backend/tests/test_registry.py backend/tests/test_run_daily_analysis_beta6_authority.py backend/tests/test_ui_services.py backend/tests/test_health_server.py -q` -> 109 passed, 40 warnings
+  - syntax: `python3 -m py_compile backend/ml/legacy/registry.py backend/services/ops_service.py backend/export_dashboard.py backend/health_server.py backend/tests/test_ui_services.py backend/tests/test_health_server.py` -> passed

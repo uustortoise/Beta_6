@@ -185,6 +185,7 @@ def _friendly_run_status(status: str) -> str:
         "success": "Completed",
         "rejected_by_walk_forward_gate": "Paused by safety checks",
         "rejected_by_global_gate": "Paused by overall quality check",
+        "rejected_by_beta61_certification": "Paused by Beta 6.1 certification checks",
         "failed": "Run failed",
     }
     return status_map.get(key, status or "Unknown")
@@ -1864,10 +1865,18 @@ def fetch_promotion_gate_monitor(elder_id: str, days: int = 30, limit: int = 60)
                 production_counters["viability_fail"] += 1
             elif run_failure_stage == "statistical_validity_failed":
                 production_counters["statistical_validity_fail"] += 1
-            elif run_failure_stage in {"global_gate_failed", "walk_forward_failed"}:
+            elif run_failure_stage in {
+                "global_gate_failed",
+                "walk_forward_failed",
+                "beta61_certification_failed",
+            }:
                 gate_failed = True
         status_lower = run_status.strip().lower()
-        if status_lower in {"rejected_by_global_gate", "rejected_by_walk_forward_gate"}:
+        if status_lower in {
+            "rejected_by_global_gate",
+            "rejected_by_walk_forward_gate",
+            "rejected_by_beta61_certification",
+        }:
             gate_failed = True
         if gate_failed:
             production_counters["gate_fail"] += 1

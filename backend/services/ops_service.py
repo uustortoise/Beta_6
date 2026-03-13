@@ -31,6 +31,13 @@ from utils.elder_id_utils import apply_canonical_alias_map, parse_elder_id_from_
 logger = logging.getLogger(__name__)
 
 
+_GATE_REJECTED_STATUSES = {
+    "rejected_by_global_gate",
+    "rejected_by_walk_forward_gate",
+    "rejected_by_beta61_certification",
+}
+
+
 def _to_float_or_none(value):
     try:
         parsed = float(value)
@@ -322,10 +329,14 @@ def get_model_update_monitor(elder_id: str, days: int = 30, limit: int = 60) -> 
                 production_counters["viability_fail"] += 1
             elif run_failure_stage == "statistical_validity_failed":
                 production_counters["statistical_validity_fail"] += 1
-            elif run_failure_stage in {"global_gate_failed", "walk_forward_failed"}:
+            elif run_failure_stage in {
+                "global_gate_failed",
+                "walk_forward_failed",
+                "beta61_certification_failed",
+            }:
                 gate_failed = True
         status_lower = run_status.strip().lower()
-        if status_lower in {"rejected_by_global_gate", "rejected_by_walk_forward_gate"}:
+        if status_lower in _GATE_REJECTED_STATUSES:
             gate_failed = True
         if gate_failed:
             production_counters["gate_fail"] += 1

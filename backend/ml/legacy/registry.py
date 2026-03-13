@@ -340,16 +340,21 @@ class ModelRegistry:
 
             # 2. Alias Consistency
             models_dir = self.get_models_dir(elder_id)
-            suffixes = [
+            mandatory = [
                 "_model.keras",
                 "_scaler.pkl",
                 "_label_encoder.pkl",
-                "_decision_trace.json",
             ]
+            optional = [
+                "_decision_trace.json",
+                "_thresholds.json",
+                "_adapter_weights.pkl",
+            ]
+            alias_suffixes = mandatory + optional
             
             if current == 0:
                 # Verify no unversioned aliases exist
-                for suffix in suffixes:
+                for suffix in alias_suffixes:
                     alias_path = models_dir / f"{room_name}{suffix}"
                     if alias_path.exists():
                         report["issues"].append(f"Orphan alias found while current_version=0: {alias_path.name}")
@@ -357,12 +362,6 @@ class ModelRegistry:
                         report["repaired"] = True
             else:
                 # Verify aliases are bit-consistent with current champion artifacts.
-                mandatory = ["_model.keras", "_scaler.pkl", "_label_encoder.pkl"]
-                optional = [
-                    "_thresholds.json",
-                    "_adapter_weights.pkl",
-                    "_decision_trace.json",
-                ]
                 missing_versioned_mandatory: list[str] = []
                 needs_sync = False
 
@@ -429,7 +428,7 @@ class ModelRegistry:
 
                 # Post-condition: mandatory aliases must exist when current_version > 0.
                 unresolved_aliases = [
-                    suffix for suffix in suffixes
+                    suffix for suffix in mandatory
                     if not (models_dir / f"{room_name}{suffix}").exists()
                 ]
                 if unresolved_aliases:

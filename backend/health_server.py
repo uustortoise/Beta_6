@@ -808,6 +808,12 @@ _POLICY_SENSITIVE_REASON_CODES = {
     "routed_review_queue_uncertainty",
 }
 
+_PROMOTION_GATE_REJECTED_STATUSES = {
+    "rejected_by_walk_forward_gate",
+    "rejected_by_global_gate",
+    "rejected_by_beta61_certification",
+}
+
 
 def _normalize_authority_state(raw_status: object) -> str:
     status = str(raw_status or "").strip().lower()
@@ -1573,6 +1579,7 @@ def build_promotion_gate_report(elder_id: str, limit: int = 20) -> tuple[dict, i
         wf_pass_runs = 0
         wf_fail_runs = 0
         global_gate_fail_runs = 0
+        beta61_certification_fail_runs = 0
         success_runs = 0
         rejected_walk_forward_runs = 0
         accuracies: list[float] = []
@@ -1593,6 +1600,7 @@ def build_promotion_gate_report(elder_id: str, limit: int = 20) -> tuple[dict, i
                     "accuracy": float(accuracy_raw) if accuracy_raw is not None else None,
                     "walk_forward_gate": metadata.get("walk_forward_gate", {}),
                     "global_gate": metadata.get("global_gate", {}),
+                    "beta61_certification_entry": metadata.get("beta61_certification_entry", {}),
                 }
 
             if accuracy_raw is not None:
@@ -1607,6 +1615,8 @@ def build_promotion_gate_report(elder_id: str, limit: int = 20) -> tuple[dict, i
                 rejected_walk_forward_runs += 1
             if run_status == "rejected_by_global_gate":
                 global_gate_fail_runs += 1
+            if run_status == "rejected_by_beta61_certification":
+                beta61_certification_fail_runs += 1
 
             wf = metadata.get("walk_forward_gate", {}) if isinstance(metadata, dict) else {}
             if isinstance(wf, dict) and wf.get("reason") not in (None, "disabled"):
@@ -1669,7 +1679,11 @@ def build_promotion_gate_report(elder_id: str, limit: int = 20) -> tuple[dict, i
         room_trends = sorted(room_trends, key=lambda x: x["room"])
 
         overall_status = "healthy"
-        if wf_enabled_runs > 0 and wf_fail_runs > 0:
+        if (
+            wf_fail_runs > 0
+            or global_gate_fail_runs > 0
+            or beta61_certification_fail_runs > 0
+        ):
             overall_status = "degraded"
 
         return {
@@ -1681,6 +1695,7 @@ def build_promotion_gate_report(elder_id: str, limit: int = 20) -> tuple[dict, i
                 "success_runs": success_runs,
                 "rejected_by_walk_forward_gate_runs": rejected_walk_forward_runs,
                 "rejected_by_global_gate_runs": global_gate_fail_runs,
+                "rejected_by_beta61_certification_runs": beta61_certification_fail_runs,
                 "walk_forward_enabled_runs": wf_enabled_runs,
                 "walk_forward_pass_runs": wf_pass_runs,
                 "walk_forward_fail_runs": wf_fail_runs,
@@ -1737,6 +1752,12 @@ def render_promotion_gate_prometheus_metrics(report: dict) -> str:
         (
             f'beta_promotion_gate_rejected_runs{{elder_id="{_esc(elder_id)}"}} '
             f'{int(summary.get("rejected_by_walk_forward_gate_runs", 0) or 0)}'
+        ),
+        "# HELP beta_promotion_gate_beta61_certification_rejected_runs Rejected runs by Beta 6.1 certification checks in window",
+        "# TYPE beta_promotion_gate_beta61_certification_rejected_runs gauge",
+        (
+            f'beta_promotion_gate_beta61_certification_rejected_runs{{elder_id="{_esc(elder_id)}"}} '
+            f'{int(summary.get("rejected_by_beta61_certification_runs", 0) or 0)}'
         ),
         "# HELP beta_promotion_gate_room_latest_candidate_f1 Latest candidate macro-F1 mean per room",
         "# TYPE beta_promotion_gate_room_latest_candidate_f1 gauge",

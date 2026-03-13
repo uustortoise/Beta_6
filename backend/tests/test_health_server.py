@@ -341,6 +341,62 @@ def test_build_promotion_gate_report_summarizes_recent_runs(monkeypatch):
     assert report["room_trends"][0]["delta_vs_previous"] == pytest.approx(0.06, abs=1e-6)
 
 
+def test_build_promotion_gate_report_counts_beta61_certification_rejections(monkeypatch):
+    class _FakeCursor:
+        def execute(self, query, params):
+            self.query = query
+            self.params = params
+
+        def fetchall(self):
+            return [
+                {
+                    "training_date": "2026-02-13 10:00:00",
+                    "status": "rejected_by_beta61_certification",
+                    "accuracy": 0.89,
+                    "metadata": {
+                        "walk_forward_gate": {
+                            "pass": True,
+                            "reason": "all_rooms_passed",
+                            "room_reports": [
+                                {
+                                    "room": "Bedroom",
+                                    "pass": True,
+                                    "candidate_summary": {"macro_f1_mean": 0.80},
+                                    "champion_macro_f1_mean": 0.77,
+                                    "reasons": [],
+                                }
+                            ],
+                        },
+                        "beta61_certification_entry": {
+                            "pass": False,
+                            "reason": "runtime_topology_matches_saved_artifacts",
+                        },
+                    },
+                }
+            ]
+
+    class _FakeConn:
+        def cursor(self):
+            return _FakeCursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class _FakeAdapter:
+        def get_connection(self):
+            return _FakeConn()
+
+    monkeypatch.setattr("backend.health_server.adapter", _FakeAdapter())
+
+    report, status = build_promotion_gate_report(elder_id="elder_123", limit=20)
+    assert status == 200
+    assert report["status"] == "degraded"
+    assert report["summary"]["rejected_by_beta61_certification_runs"] == 1
+
+
 def test_render_promotion_gate_prometheus_metrics():
     report = {
         "status": "degraded",

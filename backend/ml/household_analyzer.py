@@ -12,6 +12,10 @@ from ml.home_empty_fusion import ResidentHomeContext
 from config import DB_PATH
 logger = logging.getLogger(__name__)
 
+
+def _has_context_value(value: Any) -> bool:
+    return value not in (None, "", {}, [])
+
 class HouseholdAnalyzer:
     def __init__(self, db_path=None):
         # Use shared intelligence DB utility
@@ -85,18 +89,26 @@ class HouseholdAnalyzer:
         Return explicit typed resident/home context and missing-field diagnostics.
         """
         profile = profile_context if isinstance(profile_context, Mapping) else {}
+        stored_profile = self._load_profile_resident_home_context(elder_id)
+        stored_record = self._load_resident_home_context_record(elder_id)
         config = self.get_config()
 
         payload: dict[str, Any] = {}
         sources: dict[str, str] = {}
         for field in ("household_type", "helper_presence", "layout_topology"):
-            profile_value = profile.get(field)
-            if profile_value not in (None, "", {}, []):
-                payload[field] = profile_value
-                sources[field] = "profile"
+            for candidate, source_name in (
+                (profile.get(field), "profile"),
+                (stored_profile.get(field), "profile_store"),
+                (stored_record.get(field), "resident_home_context"),
+                (config.get(field), "household_config"),
+            ):
+                if _has_context_value(candidate):
+                    payload[field] = candidate
+                    sources[field] = source_name
+                    break
             else:
-                payload[field] = config.get(field)
-                sources[field] = "household_config"
+                payload[field] = None
+                sources[field] = "missing"
 
         context = ResidentHomeContext.from_payload(payload)
         missing = list(context.missing_required_fields)
@@ -118,6 +130,60 @@ class HouseholdAnalyzer:
             "missing_required_fields": missing,
             "message": message,
             "source": sources,
+        }
+
+    def _load_profile_resident_home_context(self, elder_id: str | None) -> dict[str, Any]:
+        elder = str(elder_id or "").strip()
+        if not elder:
+            return {}
+        try:
+            from elderlycare_v1_16.config.settings import DATA_ROOT
+            try:
+                from backend.processors.profile_processor import ProfileProcessor
+            except Exception:
+                from processors.profile_processor import ProfileProcessor
+
+            profile = ProfileProcessor(Path(DATA_ROOT)).load_profile(elder)
+        except Exception:
+            return {}
+        if not isinstance(profile, dict):
+            return {}
+        context = profile.get("resident_home_context")
+        return context if isinstance(context, Mapping) else {}
+
+    def _load_resident_home_context_record(self, elder_id: str | None) -> dict[str, Any]:
+        elder = str(elder_id or "").strip()
+        if not elder:
+            return {}
+        try:
+            with self._get_connection() as conn:
+                df = self._query_to_dataframe(
+                    conn,
+                    """
+                    SELECT household_type, helper_presence, layout_topology
+                    FROM resident_home_context
+                    WHERE elder_id = ?
+                    LIMIT 1
+                    """,
+                    (elder,),
+                )
+        except Exception:
+            return {}
+        if df.empty:
+            return {}
+        row = df.iloc[0].to_dict()
+        layout = row.get("layout_topology")
+        if isinstance(layout, str):
+            try:
+                layout = json.loads(layout)
+            except Exception:
+                layout = {}
+        if not isinstance(layout, dict):
+            layout = {}
+        return {
+            "household_type": row.get("household_type"),
+            "helper_presence": row.get("helper_presence"),
+            "layout_topology": layout,
         }
 
     def apply_conflict_resolution(self, df_min: pd.DataFrame) -> pd.DataFrame:

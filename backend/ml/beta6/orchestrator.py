@@ -330,6 +330,8 @@ class Beta6Orchestrator:
         labels: Sequence[str],
         duration_policy_path: str | Path | None = None,
         disallowed_pairs: Optional[Sequence[tuple[str, str]]] = None,
+        room_name: str | None = None,
+        resident_home_context: Optional[Mapping[str, Any]] = None,
     ) -> Phase4HMMResult:
         duration_policy = load_duration_prior_policy(duration_policy_path)
         allowed_map = build_allowed_transition_map(
@@ -340,12 +342,16 @@ class Beta6Orchestrator:
             labels,
             allowed_map=allowed_map,
             policy=duration_policy.transition,
+            room_name=room_name,
+            resident_home_context=resident_home_context,
         )
         result = decode_hmm_with_duration_priors(
             observation_log_probs=observation_log_probs,
             labels=labels,
             transition_log_matrix=transition_matrix,
             duration_policy=duration_policy,
+            room_name=room_name,
+            resident_home_context=resident_home_context,
         )
         return Phase4HMMResult(
             labels=result.labels,
@@ -479,6 +485,8 @@ class Beta6Orchestrator:
         duration_policy_path: str | Path | None = None,
         disallowed_pairs: Optional[Sequence[tuple[str, str]]] = None,
         label_sequences_for_fit: Optional[Sequence[Sequence[str]]] = None,
+        room_name: str | None = None,
+        resident_home_context: Optional[Mapping[str, Any]] = None,
     ) -> Phase5CRFABResult:
         duration_policy = load_duration_prior_policy(duration_policy_path)
         allowed_map = build_allowed_transition_map(
@@ -489,12 +497,16 @@ class Beta6Orchestrator:
             labels,
             allowed_map=allowed_map,
             policy=duration_policy.transition,
+            room_name=room_name,
+            resident_home_context=resident_home_context,
         )
         hmm = decode_hmm_with_duration_priors(
             observation_log_probs=observation_log_probs,
             labels=labels,
             transition_log_matrix=transition_matrix,
             duration_policy=duration_policy,
+            room_name=room_name,
+            resident_home_context=resident_home_context,
         )
         crf = decode_crf_with_duration_priors(
             observation_log_probs=observation_log_probs,
@@ -503,6 +515,8 @@ class Beta6Orchestrator:
             transition_log_matrix=None,
             label_sequences_for_fit=label_sequences_for_fit,
             disallowed_pairs=disallowed_pairs,
+            room_name=room_name,
+            resident_home_context=resident_home_context,
         )
 
         hmm_accuracy: Optional[float] = None

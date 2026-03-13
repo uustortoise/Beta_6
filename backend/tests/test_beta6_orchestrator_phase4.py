@@ -47,6 +47,36 @@ def test_orchestrator_phase4_hmm_baseline():
     assert forbidden == []
 
 
+def test_orchestrator_phase4_hmm_baseline_passes_room_context_to_transition_builder(monkeypatch):
+    captured = {}
+
+    def _fake_build_transition_log_matrix(labels, *, allowed_map=None, policy=None, room_name=None, resident_home_context=None):
+        captured["room_name"] = room_name
+        captured["resident_home_context"] = resident_home_context
+        return np.zeros((len(labels), len(labels)), dtype=np.float64)
+
+    monkeypatch.setattr(
+        "ml.beta6.orchestrator.build_transition_log_matrix",
+        _fake_build_transition_log_matrix,
+    )
+
+    obs = np.array([[0.0, -1.0], [-1.0, 0.0]], dtype=np.float64)
+    context = {
+        "household_type": "multi",
+        "helper_presence": "present",
+        "layout_topology": {"bedroom": ["entrance"]},
+    }
+    Beta6Orchestrator(require_intake_artifact=False).run_phase4_hmm_baseline(
+        observation_log_probs=obs,
+        labels=["a", "b"],
+        room_name="bedroom",
+        resident_home_context=context,
+    )
+
+    assert captured["room_name"] == "bedroom"
+    assert captured["resident_home_context"] == context
+
+
 def test_orchestrator_phase4_unknown_abstain_generates_triage():
     probs = np.array([[0.51, 0.49], [0.99, 0.01]], dtype=np.float64)
     result = Beta6Orchestrator(require_intake_artifact=False).run_phase4_unknown_abstain(

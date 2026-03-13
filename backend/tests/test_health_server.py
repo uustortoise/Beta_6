@@ -674,6 +674,88 @@ def test_health_snapshot_reports_missing_resident_home_context(monkeypatch):
     ]
 
 
+def test_resident_home_context_contract_uses_profile_context_when_household_config_is_incomplete(monkeypatch):
+    monkeypatch.setattr(
+        "backend.ml.household_analyzer.HouseholdAnalyzer.get_config",
+        lambda self: {
+            "household_type": "single",
+            "helper_presence": "unknown",
+            "layout_topology": {},
+        },
+    )
+    monkeypatch.setattr(
+        "backend.processors.profile_processor.ProfileProcessor.load_profile",
+        lambda self, elder_id: {
+            "resident_home_context": {
+                "household_type": "multi",
+                "helper_presence": "present",
+                "layout_topology": {"bedroom": ["entrance", "livingroom"]},
+            }
+        },
+        raising=False,
+    )
+
+    contract = __import__("backend.health_server", fromlist=["_resolve_resident_home_context_contract"])._resolve_resident_home_context_contract(
+        "elder_123"
+    )
+
+    assert contract["status"] == "ready"
+    assert contract["household_type"] == "multi"
+    assert contract["helper_presence"] == "present"
+    assert contract["layout_topology"] == {"bedroom": ["entrance", "livingroom"]}
+
+
+def test_resident_home_context_contract_uses_resident_context_table_when_profile_missing(monkeypatch):
+    monkeypatch.setattr(
+        "backend.ml.household_analyzer.HouseholdAnalyzer.get_config",
+        lambda self: {
+            "household_type": "single",
+            "helper_presence": "unknown",
+            "layout_topology": {},
+        },
+    )
+    monkeypatch.setattr(
+        "backend.processors.profile_processor.ProfileProcessor.load_profile",
+        lambda self, elder_id: None,
+        raising=False,
+    )
+
+    class _FakeConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(
+        "utils.intelligence_db.get_intelligence_db",
+        lambda: _FakeConn(),
+    )
+    monkeypatch.setattr(
+        "utils.intelligence_db.query_to_dataframe",
+        lambda conn, query, params=(): pd.DataFrame(
+            [
+                {
+                    "household_type": "multi",
+                    "helper_presence": "present",
+                    "layout_topology": {"bedroom": ["entrance"]},
+                }
+            ]
+        )
+        if "FROM resident_home_context" in query
+        else pd.DataFrame(),
+    )
+
+    contract = __import__("backend.health_server", fromlist=["_resolve_resident_home_context_contract"])._resolve_resident_home_context_contract(
+        "elder_123"
+    )
+
+    assert contract["status"] == "ready"
+    assert contract["household_type"] == "multi"
+    assert contract["helper_presence"] == "present"
+    assert contract["layout_topology"] == {"bedroom": ["entrance"]}
+
+
 def test_build_ml_snapshot_report_maps_room_status_and_thresholds(monkeypatch):
     monkeypatch.delenv("WF_DRIFT_THRESHOLD", raising=False)
     monkeypatch.delenv("WF_MIN_TRANSITION_F1", raising=False)

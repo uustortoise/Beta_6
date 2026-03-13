@@ -246,7 +246,11 @@ def _apply_event_decoder_stability(room_name: str, pred_df: pd.DataFrame) -> tup
         return pred_df, 0
 
 
-def _apply_pre_persistence_arbitration(prediction_results: dict) -> tuple[dict, dict]:
+def _apply_pre_persistence_arbitration(
+    prediction_results: dict,
+    *,
+    elder_id: str | None = None,
+) -> tuple[dict, dict]:
     """
     Resolve cross-room contradictions before persisting ADL rows.
     """
@@ -306,9 +310,25 @@ def _apply_pre_persistence_arbitration(prediction_results: dict) -> tuple[dict, 
         }
 
     try:
-        from ml.home_empty_fusion import HomeEmptyFusion
+        from ml.home_empty_fusion import HomeEmptyConfig, HomeEmptyFusion
 
-        fusion = HomeEmptyFusion()
+        resident_home_context = None
+        elder = str(elder_id or "").strip()
+        if elder:
+            try:
+                resident_home_context = HouseholdAnalyzer().get_resident_home_context_contract(
+                    elder_id=elder,
+                )
+            except Exception as context_exc:
+                logger.warning(
+                    "Pre-persistence resident/home context unavailable for %s: %s",
+                    elder,
+                    context_exc,
+                )
+
+        fusion = HomeEmptyFusion(
+            HomeEmptyConfig(resident_home_context=resident_home_context)
+        )
         timestamps = sorted(pd.Timestamp(ts).to_pydatetime() for ts in timestamp_set)
         fused_predictions = fusion.fuse(fusion_inputs, timestamps)
     except Exception as e:
@@ -504,7 +524,8 @@ def process_file(file_path: Path):
             if _pre_persistence_arbitration_enabled():
                 try:
                     prediction_results, arbitration_report = _apply_pre_persistence_arbitration(
-                        prediction_results
+                        prediction_results,
+                        elder_id=elder_id,
                     )
                     logger.info(
                         "Pre-persistence arbitration applied for %s: %s",

@@ -44,6 +44,8 @@ def fit_transition_log_matrix_from_sequences(
     allowed_map: Optional[Mapping[Tuple[str, str], bool]] = None,
     disallowed_pairs: Optional[Iterable[Tuple[str, str]]] = None,
     policy: TransitionPolicy = TransitionPolicy(),
+    room_name: str | None = None,
+    resident_home_context: Optional[Mapping[str, Any]] = None,
 ) -> np.ndarray:
     """Fit log transition potentials from labeled sequences with smoothing."""
     states = [str(label).strip().lower() for label in labels]
@@ -68,7 +70,13 @@ def fit_transition_log_matrix_from_sequences(
 
     probs = counts / np.clip(np.sum(counts, axis=1, keepdims=True), 1e-9, None)
     learned = np.log(np.clip(probs, 1e-12, 1.0))
-    base = build_transition_log_matrix(states, allowed_map=resolved_allowed_map, policy=policy)
+    base = build_transition_log_matrix(
+        states,
+        allowed_map=resolved_allowed_map,
+        policy=policy,
+        room_name=room_name,
+        resident_home_context=resident_home_context,
+    )
     transition = learned + base
     if resolved_allowed_map:
         impossible = -float(policy.impossible_transition_penalty)
@@ -88,6 +96,8 @@ def decode_crf_with_duration_priors(
     label_sequences_for_fit: Optional[Sequence[Sequence[str]]] = None,
     disallowed_pairs: Optional[Iterable[Tuple[str, str]]] = None,
     smoothing: float = 1.0,
+    room_name: str | None = None,
+    resident_home_context: Optional[Mapping[str, Any]] = None,
 ) -> CRFDecodeResult:
     """
     Decode with linear-chain CRF-style transition potentials + duration penalties.
@@ -114,12 +124,16 @@ def decode_crf_with_duration_priors(
             smoothing=smoothing,
             allowed_map=allowed_map,
             policy=policy.transition,
+            room_name=room_name,
+            resident_home_context=resident_home_context,
         )
     else:
         transition = build_transition_log_matrix(
             states,
             allowed_map=allowed_map,
             policy=policy.transition,
+            room_name=room_name,
+            resident_home_context=resident_home_context,
         )
     if transition.shape != (n_states, n_states):
         raise ValueError(f"transition_log_matrix must be {(n_states, n_states)}, got {transition.shape}")

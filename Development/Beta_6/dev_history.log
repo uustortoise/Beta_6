@@ -171,3 +171,25 @@
   - `PYTHONPATH=backend pytest backend/tests/test_home_empty_fusion.py backend/tests/test_health_server.py -q` -> 51 passed, 3 warnings
   - `PYTHONPATH=backend pytest backend/tests/test_beta6_hmm_duration_priors.py backend/tests/test_beta6_policy_config_schemas.py -q` -> 15 passed, 3 warnings
   - `python3 -m py_compile backend/ml/home_empty_fusion.py backend/ml/beta6/sequence/transition_builder.py backend/ml/household_analyzer.py backend/processors/profile_processor.py backend/health_server.py backend/export_dashboard.py` -> passed
+2026-03-13 02:35:35 UTC | TASK-20 | Fix Task 6 production wiring review findings
+- Context: review of commit `87225ae` found three production-path gaps in Task 6: pre-persistence fusion dropped resident/home context, Beta 6 HMM/CRF wrappers dropped transition-builder room/context payloads, and health snapshot resident context ignored stored resident-specific sources.
+- Files changed:
+  - `backend/ml/household_analyzer.py`
+  - `backend/process_data.py`
+  - `backend/ml/beta6/orchestrator.py`
+  - `backend/ml/beta6/sequence/hmm_decoder.py`
+  - `backend/ml/beta6/sequence/crf_decoder.py`
+  - `backend/tests/test_process_data_arbitration.py`
+  - `backend/tests/test_beta6_orchestrator.py`
+  - `backend/tests/test_beta6_orchestrator_phase4.py`
+  - `backend/tests/test_health_server.py`
+- Actions:
+  - taught `HouseholdAnalyzer.get_resident_home_context_contract()` to merge explicit profile payloads, persisted `profile.json` resident context, `resident_home_context` table rows, and household config fallback
+  - threaded `elder_id` into pre-persistence arbitration and constructed `HomeEmptyFusion` with resident/home context so Task 6 home-empty arbitration runs in the real persistence path
+  - extended Beta 6 HMM/CRF orchestrator and decoder entry points to accept `room_name` and `resident_home_context`, then forwarded those into transition-matrix construction
+  - added regressions proving the production call sites now pass the resident/home context payload instead of only exercising helper-level paths
+- Verification:
+  - red phase: `PYTHONPATH=backend pytest backend/tests/test_process_data_arbitration.py backend/tests/test_beta6_orchestrator.py backend/tests/test_beta6_orchestrator_phase4.py backend/tests/test_health_server.py -q` -> 5 failed (expected missing wiring failures before implementation)
+  - green phase: `PYTHONPATH=backend pytest backend/tests/test_process_data_arbitration.py backend/tests/test_beta6_orchestrator.py backend/tests/test_beta6_orchestrator_phase4.py backend/tests/test_health_server.py -q` -> 41 passed, 3 warnings
+  - focused regression sweep: `PYTHONPATH=backend pytest backend/tests/test_process_data_arbitration.py backend/tests/test_beta6_orchestrator.py backend/tests/test_beta6_orchestrator_phase4.py backend/tests/test_beta6_hmm_duration_priors.py backend/tests/test_beta6_crf_decoder.py backend/tests/test_health_server.py backend/tests/test_home_empty_fusion.py -q` -> 73 passed, 3 warnings
+  - syntax: `python3 -m py_compile backend/ml/household_analyzer.py backend/process_data.py backend/ml/beta6/orchestrator.py backend/ml/beta6/sequence/hmm_decoder.py backend/ml/beta6/sequence/crf_decoder.py backend/tests/test_process_data_arbitration.py backend/tests/test_beta6_orchestrator.py backend/tests/test_beta6_orchestrator_phase4.py backend/tests/test_health_server.py` -> passed

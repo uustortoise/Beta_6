@@ -151,6 +151,8 @@ def decode_hmm_with_duration_priors(
     labels: Sequence[str],
     transition_log_matrix: Optional[np.ndarray] = None,
     duration_policy: Optional[DurationPriorPolicy] = None,
+    room_name: str | None = None,
+    resident_home_context: Optional[Mapping[str, Any]] = None,
 ) -> HMMDecodeResult:
     """
     Decode sequence with Viterbi + soft duration-prior penalties (option b).
@@ -169,7 +171,12 @@ def decode_hmm_with_duration_priors(
     transition = (
         np.asarray(transition_log_matrix, dtype=np.float64)
         if transition_log_matrix is not None
-        else build_transition_log_matrix(states, policy=policy.transition)
+        else build_transition_log_matrix(
+            states,
+            policy=policy.transition,
+            room_name=room_name,
+            resident_home_context=resident_home_context,
+        )
     )
     if transition.shape != (n_states, n_states):
         raise ValueError(f"transition_log_matrix must be {(n_states, n_states)}, got {transition.shape}")

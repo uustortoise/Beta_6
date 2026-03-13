@@ -120,6 +120,46 @@ def test_orchestrator_phase5_crf_ab_gate_passes_on_non_regression():
     assert result.decode_length == 4
 
 
+def test_orchestrator_phase5_crf_ab_gate_passes_room_context_to_transition_builder(monkeypatch):
+    captured = {}
+
+    def _fake_build_transition_log_matrix(labels, *, allowed_map=None, policy=None, room_name=None, resident_home_context=None):
+        captured["room_name"] = room_name
+        captured["resident_home_context"] = resident_home_context
+        return np.zeros((len(labels), len(labels)), dtype=np.float64)
+
+    monkeypatch.setattr(
+        "ml.beta6.orchestrator.build_transition_log_matrix",
+        _fake_build_transition_log_matrix,
+    )
+
+    labels = ["sleep", "out"]
+    probs = np.asarray(
+        [
+            [0.92, 0.08],
+            [0.90, 0.10],
+            [0.15, 0.85],
+            [0.10, 0.90],
+        ],
+        dtype=np.float64,
+    )
+    log_probs = np.log(np.clip(probs, 1e-9, 1.0))
+    context = {
+        "household_type": "multi",
+        "helper_presence": "present",
+        "layout_topology": {"bedroom": ["entrance"]},
+    }
+    Beta6Orchestrator(require_intake_artifact=False).run_phase5_crf_ab_gate(
+        observation_log_probs=log_probs,
+        labels=labels,
+        room_name="bedroom",
+        resident_home_context=context,
+    )
+
+    assert captured["room_name"] == "bedroom"
+    assert captured["resident_home_context"] == context
+
+
 def test_orchestrator_phase6_shadow_compare_emits_signed_artifact(tmp_path: Path):
     orchestrator = Beta6Orchestrator(require_intake_artifact=False)
     out = tmp_path / "shadow_compare.json"

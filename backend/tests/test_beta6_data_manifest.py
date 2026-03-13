@@ -131,6 +131,64 @@ def test_intake_summary_includes_per_room_per_date_label_counts(tmp_path: Path):
     } in counts
 
 
+def test_intake_summary_uses_filename_date_tags_for_labeled_daily_files(tmp_path: Path):
+    daily = pd.DataFrame(
+        {
+            "elder_id": ["HK0011_jessica", "HK0011_jessica"],
+            "room": ["Bedroom", "Bedroom"],
+            "activity": ["sleep", "bedroom_normal_use"],
+            "pir": [1.0, 0.0],
+            "door": [0.0, 0.0],
+        }
+    )
+    daily.to_csv(tmp_path / "HK0011_jessica_2025-12-04.csv", index=False)
+
+    manifest = build_pretrain_corpus_manifest(
+        corpus_roots=[tmp_path],
+        policy=CorpusManifestPolicy(min_rows=2, min_features=2, max_missing_ratio=0.2),
+    )
+
+    assert manifest["gate"]["approved"] is True
+    entry_counts = manifest["entries"][0]["label_summary"]["per_room_per_date_label_counts"]
+    assert {
+        "room": "bedroom",
+        "date": "2025-12-04",
+        "activity": "sleep",
+        "count": 1,
+    } in entry_counts
+    assert {
+        "room": "bedroom",
+        "date": "2025-12-04",
+        "activity": "bedroom_normal_use",
+        "count": 1,
+    } in manifest["summary"]["per_room_per_date_label_counts"]
+
+
+def test_manifest_duplicate_governance_is_not_path_order_dependent(tmp_path: Path):
+    daily = pd.DataFrame(
+        {
+            "elder_id": ["HK0011_jessica", "HK0011_jessica"],
+            "room": ["Bedroom", "Bedroom"],
+            "activity": ["sleep", "sleep"],
+            "pir": [1.0, 0.0],
+            "door": [0.0, 1.0],
+        }
+    )
+    daily.to_csv(tmp_path / "a_bad.csv", index=False)
+    daily.to_csv(tmp_path / "z_HK0011_jessica_2025-12-04.csv", index=False)
+
+    manifest = build_pretrain_corpus_manifest(
+        corpus_roots=[tmp_path],
+        policy=CorpusManifestPolicy(min_rows=2, min_features=2, max_missing_ratio=0.2),
+    )
+
+    assert manifest["gate"]["approved"] is True
+    assert manifest["stats"]["records_kept"] == 1
+    assert manifest["stats"]["quarantined"] == 0
+    assert manifest["entries"][0]["source_tags"]["date_tags"] == ["2025-12-04"]
+    assert manifest["stats"]["duplicates_removed"] == 1
+
+
 def test_load_feature_matrix_ignores_metadata_columns_in_labeled_tables(tmp_path: Path):
     csv_path = tmp_path / "labeled.csv"
     _write_labeled_frame(csv_path)

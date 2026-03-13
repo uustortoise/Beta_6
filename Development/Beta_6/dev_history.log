@@ -254,6 +254,20 @@
   - green phase: `PYTHONPATH=backend pytest backend/tests/test_build_pretrain_corpus_manifest_script.py backend/tests/test_beta6_data_manifest.py backend/tests/test_beta6_intake_gate.py backend/tests/test_beta6_intake_precheck.py -q` -> 19 passed, 3 warnings
   - regression sweep: `PYTHONPATH=backend pytest backend/tests/test_build_pretrain_corpus_manifest_script.py backend/tests/test_beta6_data_manifest.py backend/tests/test_beta6_intake_gate.py backend/tests/test_beta6_intake_precheck.py backend/tests/test_beta6_self_supervised_pretrain.py backend/tests/test_beta6_trainer_intake_gate.py -q` -> 30 passed, 3 warnings
   - syntax: `python3 -m py_compile backend/scripts/build_pretrain_corpus_manifest.py backend/ml/beta6/data/data_manifest.py backend/ml/beta6/gates/intake_gate.py backend/ml/beta6/gates/intake_precheck.py backend/tests/test_build_pretrain_corpus_manifest_script.py backend/tests/test_beta6_data_manifest.py backend/tests/test_beta6_intake_gate.py backend/tests/test_beta6_intake_precheck.py` -> passed
+2026-03-13 10:00:52 UTC | TASK-23 | Fix Task 9 review findings for filename-tag summaries and duplicate-order governance
+- Context: review of `2763228` found two semantic gaps in `data_manifest.py`: file-level date tags were not feeding per-room/per-date label summaries for daily labeled files, and content-hash dedupe ran before governance, which let lexical filename order flip `gate.approved` vs quarantine.
+- Files changed:
+  - `backend/ml/beta6/data/data_manifest.py`
+  - `backend/tests/test_beta6_data_manifest.py`
+- Actions:
+  - added red-phase regressions proving filename-tagged daily files now need per-room/per-date counts and that duplicate hash groups must not change approval based on path ordering
+  - changed manifest building to aggregate alias provenance per content hash before governance, choose a deterministic canonical alias with the strongest tag evidence, and only then emit `entries` / `duplicates`
+  - taught label-summary generation to use a single file-level fallback date when row-level dates are absent, so approved daily files contribute to `per_room_per_date_label_counts`
+- Verification:
+  - red phase: `PYTHONPATH=backend pytest backend/tests/test_beta6_data_manifest.py -q -k "filename_date_tags or duplicate_governance"` -> 2 failed, 7 deselected, 3 warnings
+  - green phase: `PYTHONPATH=backend pytest backend/tests/test_beta6_data_manifest.py -q -k "filename_date_tags or duplicate_governance"` -> 2 passed, 7 deselected, 3 warnings
+  - regression sweep: `PYTHONPATH=backend pytest backend/tests/test_build_pretrain_corpus_manifest_script.py backend/tests/test_beta6_data_manifest.py backend/tests/test_beta6_intake_gate.py backend/tests/test_beta6_intake_precheck.py backend/tests/test_beta6_self_supervised_pretrain.py backend/tests/test_beta6_trainer_intake_gate.py -q` -> 32 passed, 3 warnings
+  - syntax: `python3 -m py_compile backend/ml/beta6/data/data_manifest.py backend/tests/test_beta6_data_manifest.py` -> passed
 2026-03-13 09:17:33 UTC | TASK-22 | Fix Task 7 review regressions in registry alias strictness and certification-status visibility
 - Context: review of `dcc4789` found two follow-up issues: registry repair was treating missing latest `*_decision_trace.json` aliases as mandatory and skipping otherwise loadable rooms, and the new `rejected_by_beta61_certification` training status was not counted or rendered consistently in ops/health/dashboard summaries.
 - Files changed:

@@ -248,7 +248,18 @@ def _extract_date_tags(frame: pd.DataFrame | None, path: Path) -> list[str]:
     return sorted(tags)
 
 
-def _label_summary(frame: pd.DataFrame | None) -> dict[str, list[dict[str, Any]]]:
+def _resolve_fallback_date(date_tags: Sequence[str]) -> str | None:
+    normalized = sorted({_normalize_date_token(value) for value in date_tags if _normalize_date_token(value)})
+    if len(normalized) == 1:
+        return normalized[0]
+    return None
+
+
+def _label_summary(
+    frame: pd.DataFrame | None,
+    *,
+    fallback_date: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
     if frame is None or frame.empty:
         return {"per_room_per_date_label_counts": []}
     room_col = _find_column(frame, _ROOM_COLUMNS)
@@ -259,13 +270,14 @@ def _label_summary(frame: pd.DataFrame | None) -> dict[str, list[dict[str, Any]]
     row_dates = _extract_row_dates(frame)
     counts: dict[tuple[str, str, str], int] = {}
     for idx, raw_date in enumerate(row_dates):
-        if not raw_date:
+        effective_date = raw_date or fallback_date
+        if not effective_date:
             continue
         room = _normalize_token(frame.iloc[idx][room_col])
         activity = _normalize_token(frame.iloc[idx][activity_col])
         if not room or not activity:
             continue
-        key = (room.lower(), raw_date, activity.lower())
+        key = (room.lower(), effective_date, activity.lower())
         counts[key] = counts.get(key, 0) + 1
 
     return {
@@ -288,6 +300,21 @@ def _has_labeled_axes(frame: pd.DataFrame | None) -> bool:
     if frame is None or frame.empty:
         return False
     return _find_column(frame, _ROOM_COLUMNS) is not None and _find_column(frame, _ACTIVITY_COLUMNS) is not None
+
+
+def _choose_canonical_alias(aliases: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    def _score(alias: Mapping[str, Any]) -> tuple[int, int, int, int, str]:
+        user_tags = alias.get("user_tags", [])
+        date_tags = alias.get("date_tags", [])
+        return (
+            int(bool(user_tags)),
+            int(bool(date_tags)),
+            len(user_tags) + len(date_tags),
+            len(date_tags),
+            str(alias.get("path", "")),
+        )
+
+    return max(aliases, key=_score)
 
 
 def _build_entry(
@@ -385,11 +412,10 @@ def build_pretrain_corpus_manifest(
     include_extensions = _normalize_extensions(policy.include_extensions)
     include_set = set(include_extensions)
 
+    candidate_groups: dict[str, Dict[str, Any]] = {}
     entries: list[Dict[str, Any]] = []
     duplicates: list[Dict[str, Any]] = []
     quarantine: list[Dict[str, Any]] = []
-
-    seen_hashes: dict[str, str] = {}
     files_scanned = 0
 
     for candidate in _iter_candidates(corpus_roots, include_extensions=include_set):
@@ -408,18 +434,6 @@ def build_pretrain_corpus_manifest(
                 }
             )
             continue
-
-        original = seen_hashes.get(content_hash)
-        if original is not None:
-            duplicates.append(
-                {
-                    "path": path_str,
-                    "duplicate_of": original,
-                    "content_hash": content_hash,
-                }
-            )
-            continue
-        seen_hashes[content_hash] = path_str
 
         raw_frame: pd.DataFrame | None = None
         try:
@@ -442,16 +456,58 @@ def build_pretrain_corpus_manifest(
         missing_ratio = _missing_ratio(matrix)
         user_tags = _extract_user_tags(raw_frame, candidate)
         date_tags = _extract_date_tags(raw_frame, candidate)
-        label_summary = _label_summary(raw_frame)
+        group = candidate_groups.get(content_hash)
+        alias = {
+            "path": path_str,
+            "user_tags": list(user_tags),
+            "date_tags": list(date_tags),
+        }
+        if group is None:
+            candidate_groups[content_hash] = {
+                "content_hash": content_hash,
+                "row_count": row_count,
+                "feature_count": feature_count,
+                "missing_ratio": missing_ratio,
+                "raw_frame": raw_frame,
+                "aliases": [alias],
+            }
+        else:
+            group["aliases"].append(alias)
+
+    for content_hash, group in sorted(candidate_groups.items(), key=lambda item: item[0]):
+        aliases = list(group.get("aliases", []))
+        canonical_alias = _choose_canonical_alias(aliases)
+        canonical_path = Path(str(canonical_alias.get("path", "")))
+
+        user_tags = sorted(
+            {
+                token
+                for alias in aliases
+                for token in alias.get("user_tags", [])
+                if _normalize_token(token)
+            }
+        )
+        date_tags = sorted(
+            {
+                token
+                for alias in aliases
+                for token in alias.get("date_tags", [])
+                if _normalize_date_token(token)
+            }
+        )
+        label_summary = _label_summary(
+            group.get("raw_frame"),
+            fallback_date=_resolve_fallback_date(date_tags),
+        )
 
         quarantine_reasons: list[str] = []
-        if row_count < int(policy.min_rows):
+        if int(group["row_count"]) < int(policy.min_rows):
             quarantine_reasons.append("manifest_row_count_violation")
-        if feature_count < int(policy.min_features):
+        if int(group["feature_count"]) < int(policy.min_features):
             quarantine_reasons.append("manifest_feature_count_violation")
-        if missing_ratio > float(policy.max_missing_ratio):
+        if float(group["missing_ratio"]) > float(policy.max_missing_ratio):
             quarantine_reasons.append("manifest_missing_ratio_violation")
-        if bool(policy.require_user_date_tags_for_labeled_sources) and _has_labeled_axes(raw_frame):
+        if bool(policy.require_user_date_tags_for_labeled_sources) and _has_labeled_axes(group.get("raw_frame")):
             if not user_tags:
                 quarantine_reasons.append("manifest_missing_user_tag")
             if not date_tags:
@@ -460,11 +516,11 @@ def build_pretrain_corpus_manifest(
         if quarantine_reasons:
             quarantine.append(
                 _build_entry(
-                    candidate=candidate,
+                    candidate=canonical_path,
                     content_hash=content_hash,
-                    row_count=row_count,
-                    feature_count=feature_count,
-                    missing_ratio=missing_ratio,
+                    row_count=int(group["row_count"]),
+                    feature_count=int(group["feature_count"]),
+                    missing_ratio=float(group["missing_ratio"]),
                     user_tags=user_tags,
                     date_tags=date_tags,
                     label_summary=label_summary,
@@ -472,24 +528,34 @@ def build_pretrain_corpus_manifest(
                     quarantine_reasons=quarantine_reasons,
                 )
             )
-            continue
-
-        entries.append(
-            _build_entry(
-                candidate=candidate,
-                content_hash=content_hash,
-                row_count=row_count,
-                feature_count=feature_count,
-                missing_ratio=missing_ratio,
-                user_tags=user_tags,
-                date_tags=date_tags,
-                label_summary=label_summary,
-                status=AUTO_APPROVED_STATUS,
-                quarantine_reasons=(),
+        else:
+            entries.append(
+                _build_entry(
+                    candidate=canonical_path,
+                    content_hash=content_hash,
+                    row_count=int(group["row_count"]),
+                    feature_count=int(group["feature_count"]),
+                    missing_ratio=float(group["missing_ratio"]),
+                    user_tags=user_tags,
+                    date_tags=date_tags,
+                    label_summary=label_summary,
+                    status=AUTO_APPROVED_STATUS,
+                    quarantine_reasons=(),
+                )
             )
+
+        duplicates.extend(
+            {
+                "path": str(alias["path"]),
+                "duplicate_of": str(canonical_path),
+                "content_hash": content_hash,
+            }
+            for alias in aliases
+            if str(alias["path"]) != str(canonical_path)
         )
 
     entries = sorted(entries, key=lambda item: (item["content_hash"], item["path"]))
+    duplicates = sorted(duplicates, key=lambda item: (item["content_hash"], item["path"]))
     quarantine = sorted(quarantine, key=lambda item: str(item.get("path") or ""))
     summary = _aggregate_manifest_summary(entries)
 

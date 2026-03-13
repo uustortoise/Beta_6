@@ -408,3 +408,16 @@
   - targeted regressions: `PYTHONPATH=backend pytest backend/tests/test_health_server.py -k resident_home_context_contract backend/tests/test_process_data_arbitration.py backend/tests/test_beta6_trainer_intake_gate.py -q` -> 2 passed, 35 deselected, 3 warnings
   - touched-suite regressions: `PYTHONPATH=backend pytest backend/tests/test_process_data_arbitration.py backend/tests/test_beta6_trainer_intake_gate.py -q` -> 10 passed, 3 warnings
   - syntax: `python3 -m py_compile backend/ml/home_empty_fusion.py backend/ml/household_analyzer.py backend/ml/beta6/sequence/transition_builder.py backend/ml/beta6/training/beta6_trainer.py backend/tests/test_home_empty_fusion.py backend/tests/test_transformer_timeline_heads.py` -> passed
+2026-03-13 12:20:08 UTC | TASK-28 | Fix Task 13 review gap in demographic-exclusion detection
+- Context: review of `42d5a3d` found that the new demographic-exclusion helper only inspected top-level `age`/`gender`/`sex` keys, while the repo’s real profile schema stores age/gender under `personal_info`. That made the Task 13 bundle emit false-green `demographic_fields_present=[]` / `excluded_default_input_fields=[]` for normal loaded profiles.
+- Files changed:
+  - `backend/ml/household_analyzer.py`
+  - `backend/tests/test_transformer_timeline_heads.py`
+- Actions:
+  - updated `identify_deferred_demographic_fields(...)` to union observed demographic keys from both the top-level payload and nested `personal_info`
+  - changed the Task 13 demographic regression to use the real profile shape (`personal_info.age`, `personal_info.gender`) while still covering top-level `sex`
+- Verification:
+  - red phase: `PYTHONPATH=backend pytest backend/tests/test_transformer_timeline_heads.py -q -k demographic_context_is_not_default_training_input` -> 1 failed, 15 deselected, 3 warnings
+  - green phase: same command -> 1 passed, 15 deselected, 3 warnings
+  - focused suite: `PYTHONPATH=backend pytest backend/tests/test_home_empty_fusion.py backend/tests/test_transformer_timeline_heads.py -q` -> 44 passed, 3 warnings
+  - syntax: `python3 -m py_compile backend/ml/home_empty_fusion.py backend/ml/household_analyzer.py backend/ml/beta6/sequence/transition_builder.py backend/ml/beta6/training/beta6_trainer.py backend/tests/test_home_empty_fusion.py backend/tests/test_transformer_timeline_heads.py` -> passed

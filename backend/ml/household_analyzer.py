@@ -31,11 +31,15 @@ def _coerce_resident_home_context_payload(value: Mapping[str, Any] | None) -> di
 def identify_deferred_demographic_fields(profile_context: Mapping[str, Any] | None) -> tuple[str, ...]:
     """Return demographic fields that were observed but intentionally excluded from default inputs."""
     source = profile_context if isinstance(profile_context, Mapping) else {}
-    observed = {
-        str(key).strip().lower()
-        for key in source.keys()
-        if str(key).strip().lower() in DEFERRED_DEMOGRAPHIC_FIELDS
-    }
+    personal_info = source.get("personal_info")
+    personal_info = personal_info if isinstance(personal_info, Mapping) else {}
+    observed = set()
+    for candidate_source in (source, personal_info):
+        observed.update(
+            str(key).strip().lower()
+            for key in candidate_source.keys()
+            if str(key).strip().lower() in DEFERRED_DEMOGRAPHIC_FIELDS
+        )
     return tuple(sorted(observed))
 
 

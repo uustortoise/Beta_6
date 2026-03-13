@@ -289,9 +289,11 @@ class TestBeta62ContextConditioning(unittest.TestCase):
         bundle = build_context_conditioning_bundle(
             room_name="bedroom",
             profile_context={
-                "age": 82,
                 "sex": "female",
-                "gender": "female",
+                "personal_info": {
+                    "age": 82,
+                    "gender": "female",
+                },
                 "resident_home_context": {
                     "household_type": "multi",
                     "helper_presence": "present",

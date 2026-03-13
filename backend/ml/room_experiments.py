@@ -97,6 +97,8 @@ def build_room_diagnostic_report(
     profile_payload: Mapping[str, Any],
     typed_policy_values: Mapping[str, Any],
     grouped_fragility: Mapping[str, Any] | None = None,
+    candidate_name: str | None = None,
+    execution_mode: str | None = None,
     candidate_execution_plan: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     profile = _as_mapping(profile_payload)
@@ -122,8 +124,52 @@ def build_room_diagnostic_report(
             if str(k).strip()
         },
         "fragility": dict(grouped_fragility or {}),
+        "candidate_name": str(candidate_name or "").strip().lower(),
+        "execution_mode": str(execution_mode or "").strip().lower(),
         "candidate_execution_plan": dict(candidate_execution_plan or {}),
     }
+
+
+def build_candidate_diagnostic_reports(
+    *,
+    room_name: str,
+    profile_name: str,
+    profile_payload: Mapping[str, Any],
+    typed_policy_values: Mapping[str, Any],
+    grouped_fragility: Mapping[str, Any] | None = None,
+    candidate_execution_plan: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    plan = _as_mapping(candidate_execution_plan)
+    selected = plan.get("selected")
+    if not isinstance(selected, list):
+        return []
+
+    base_values = dict(typed_policy_values)
+    reports: list[dict[str, Any]] = []
+    for raw_candidate in selected:
+        candidate = _as_mapping(raw_candidate)
+        candidate_name = str(candidate.get("candidate_name") or "").strip().lower()
+        if not candidate_name:
+            continue
+        execution_mode = str(candidate.get("execution_mode") or "full_retrain").strip().lower()
+        effective_values = dict(base_values)
+        effective_values.update(dict(_as_mapping(candidate.get("typed_policy_values"))))
+        reports.append(
+            {
+                "candidate_name": candidate_name,
+                "execution_mode": execution_mode,
+                "report": build_room_diagnostic_report(
+                    room_name=room_name,
+                    profile_name=profile_name,
+                    profile_payload=profile_payload,
+                    typed_policy_values=effective_values,
+                    grouped_fragility=grouped_fragility,
+                    candidate_name=candidate_name,
+                    execution_mode=execution_mode,
+                ),
+            }
+        )
+    return reports
 
 
 def build_grouped_regime_fragility_report(

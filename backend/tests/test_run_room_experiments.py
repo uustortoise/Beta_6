@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+from scripts import run_room_experiments as script
 from ml.room_experiments import (
     build_candidate_execution_plan,
     build_grouped_regime_fragility_report,
@@ -187,3 +188,68 @@ def test_room_policy_sweeps_can_run_as_fast_replay_diagnostics():
     assert plan["selected"][0]["candidate_name"] == "shadow_gate"
     assert plan["selected"][0]["execution_mode"] == "fast_replay"
     assert plan["rejected"] == []
+
+
+def test_room_experiment_script_materializes_selected_candidates_only(tmp_path: Path, monkeypatch):
+    class _DummyTrainingProfile:
+        def get_room_diagnostic_profile(self, profile_name):
+            assert profile_name == "livingroom_policy_sensitivity"
+            return {
+                "room": "livingroom",
+                "typed_policy_fields": ["two_stage_core.gate_mode"],
+                "env_overrides": {},
+            }
+
+    class _DummyPolicy:
+        training_profile = _DummyTrainingProfile()
+
+    output = tmp_path / "room_report.json"
+    monkeypatch.setattr(script, "load_policy_from_env", lambda *_args, **_kwargs: _DummyPolicy())
+    monkeypatch.setattr(
+        script,
+        "_resolve_profile_typed_policy_values",
+        lambda _profile: {"two_stage_core.gate_mode": "primary"},
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "run_room_experiments.py",
+            "--room",
+            "LivingRoom",
+            "--profile",
+            "livingroom_policy_sensitivity",
+            "--output",
+            str(output),
+            "--candidate-plan-json",
+            json.dumps(
+                [
+                    {
+                        "candidate_name": "known_bad",
+                        "early_blockers": ["collapse_detected"],
+                    },
+                    {
+                        "candidate_name": "shadow_gate",
+                        "typed_policy_values": {"two_stage_core.gate_mode": "shadow"},
+                    },
+                ]
+            ),
+            "--fast-replay",
+        ],
+    )
+
+    rc = script.main()
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    candidate_artifacts = payload.get("candidate_artifacts", [])
+
+    assert rc == 0
+    assert len(candidate_artifacts) == 1
+    assert candidate_artifacts[0]["candidate_name"] == "shadow_gate"
+    assert candidate_artifacts[0]["execution_mode"] == "fast_replay"
+    candidate_output = Path(candidate_artifacts[0]["output"])
+    assert candidate_output.exists()
+    candidate_payload = json.loads(candidate_output.read_text(encoding="utf-8"))
+    assert candidate_payload["report"]["candidate_name"] == "shadow_gate"
+    assert candidate_payload["report"]["execution_mode"] == "fast_replay"
+    assert candidate_payload["report"]["typed_policy_values"]["two_stage_core.gate_mode"] == "shadow"
+    assert not (tmp_path / "room_report.known_bad.json").exists()

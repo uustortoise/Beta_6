@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+from ml.beta6.training.beta6_trainer import build_pretrain_cache_context
 from scripts import build_pretrain_corpus_manifest as script
 
 
@@ -69,3 +70,58 @@ def test_manifest_script_auto_approves_clean_files_and_quarantines_red_flags(tmp
     assert payload["gate"]["approved"] is True
     assert payload["stats"]["records_kept"] == 1
     assert payload["stats"]["quarantined"] == 1
+
+
+def test_manifest_script_prints_cache_seed_matching_pretrain_cache_context(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+):
+    clean = tmp_path / "clean.csv"
+    clean.write_text(
+        "\n".join(
+            [
+                "elder_id,timestamp,room,activity,f1,f2",
+                "HK0011_jessica,2025-12-04T07:00:00,Bedroom,sleep,1,0",
+                "HK0011_jessica,2025-12-04T07:05:00,Bedroom,bedroom_normal_use,0,0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config = tmp_path / "pretrain.yaml"
+    config.write_text("pretrain:\n  embedding_dim: 8\n  epochs: 3\n", encoding="utf-8")
+    out = tmp_path / "manifest.json"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "build_pretrain_corpus_manifest.py",
+            "--corpus-root",
+            str(tmp_path),
+            "--output",
+            str(out),
+            "--min-rows",
+            "2",
+            "--min-features",
+            "2",
+            "--pretrain-config",
+            str(config),
+            "--max-files",
+            "1",
+        ],
+    )
+
+    rc = script.main()
+    stdout = capsys.readouterr().out
+    cache_seed = next(
+        line.split("CacheSeed:", 1)[1].strip()
+        for line in stdout.splitlines()
+        if line.startswith("CacheSeed:")
+    )
+    cache_context = build_pretrain_cache_context(
+        manifest_path=out,
+        config_path=config,
+        max_files=1,
+    )
+
+    assert rc == 0
+    assert cache_seed == cache_context["cache_key"]

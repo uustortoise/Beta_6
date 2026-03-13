@@ -447,3 +447,21 @@
   - green phase: same command -> 1 passed, 15 deselected, 3 warnings
   - focused suite: `PYTHONPATH=backend pytest backend/tests/test_home_empty_fusion.py backend/tests/test_transformer_timeline_heads.py -q` -> 44 passed, 3 warnings
   - syntax: `python3 -m py_compile backend/ml/home_empty_fusion.py backend/ml/household_analyzer.py backend/ml/beta6/sequence/transition_builder.py backend/ml/beta6/training/beta6_trainer.py backend/tests/test_home_empty_fusion.py backend/tests/test_transformer_timeline_heads.py` -> passed
+2026-03-13 14:34:21 UTC | TASK-30 | Fix Task 14 review gaps in fast-replay execution and cache-seed alignment
+- Context: review of `f66c4b3` found that Task 14’s candidate triage was report-only and never changed the room-experiment script’s execution path, and that the manifest-builder CLI printed a `CacheSeed` derived from manifest policy rather than the canonical pretrain cache-key helper.
+- Files changed:
+  - `backend/ml/room_experiments.py`
+  - `backend/scripts/run_room_experiments.py`
+  - `backend/scripts/build_pretrain_corpus_manifest.py`
+  - `backend/tests/test_run_room_experiments.py`
+  - `backend/tests/test_build_pretrain_corpus_manifest_script.py`
+- Actions:
+  - extended room diagnostics to materialize selected candidate replay reports with explicit `candidate_name` and `execution_mode`
+  - changed `run_room_experiments.py` to consume `candidate_execution_plan` by writing candidate artifact manifests only for selected candidates and skipping rejected ones
+  - added canonical `--pretrain-config` and `--max-files` CLI knobs to the manifest builder and resolved `CacheSeed` through `build_pretrain_cache_context(...)` so it matches the actual pretrain cache key
+  - added regressions proving the room-experiment script writes only selected candidate artifacts and that the manifest-builder’s printed `CacheSeed` equals the trainer helper’s cache key
+- Verification:
+  - red phase: `PYTHONPATH=backend pytest backend/tests/test_run_room_experiments.py -q -k materializes_selected_candidates_only` -> 1 failed, 8 deselected, 3 warnings; `PYTHONPATH=backend pytest backend/tests/test_build_pretrain_corpus_manifest_script.py -q -k cache_seed_matching_pretrain_cache_context` -> 1 failed, 2 deselected, 3 warnings
+  - green phase: same commands -> 1 passed, 8 deselected, 3 warnings; 1 passed, 2 deselected, 3 warnings
+  - focused suite: `PYTHONPATH=backend pytest backend/tests/test_beta6_self_supervised_pretrain.py backend/tests/test_beta6_data_manifest.py backend/tests/test_beta6_trainer_intake_gate.py backend/tests/test_run_room_experiments.py backend/tests/test_build_pretrain_corpus_manifest_script.py backend/tests/test_beta6_shim_import_guard.py -q` -> 36 passed, 3 warnings
+  - syntax: `python3 -m py_compile backend/ml/room_experiments.py backend/scripts/run_room_experiments.py backend/scripts/build_pretrain_corpus_manifest.py backend/tests/test_run_room_experiments.py backend/tests/test_build_pretrain_corpus_manifest_script.py` -> passed

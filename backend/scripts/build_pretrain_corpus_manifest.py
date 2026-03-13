@@ -13,8 +13,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from ml.beta6.data_manifest import CorpusManifestPolicy, build_pretrain_corpus_manifest  # noqa: E402
-from ml.beta6.feature_fingerprint import hash_json_payload  # noqa: E402
-from ml.beta6.feature_store import build_feature_sequence_cache_key  # noqa: E402
+from ml.beta6.training.beta6_trainer import build_pretrain_cache_context  # noqa: E402
 
 
 def main() -> int:
@@ -36,6 +35,17 @@ def main() -> int:
     parser.add_argument("--max-missing-ratio", type=float, default=0.4)
     parser.add_argument("--min-rows", type=int, default=8)
     parser.add_argument("--min-features", type=int, default=2)
+    parser.add_argument(
+        "--pretrain-config",
+        default=None,
+        help="Optional pretrain config path used to resolve the canonical cache key",
+    )
+    parser.add_argument(
+        "--max-files",
+        type=int,
+        default=None,
+        help="Optional max-files limit used when resolving the canonical pretrain cache key",
+    )
     args = parser.parse_args()
 
     include_ext = tuple(args.include_ext) if args.include_ext else (".csv", ".parquet", ".npy")
@@ -56,15 +66,14 @@ def main() -> int:
 
     stats = manifest.get("stats", {})
     fingerprint = manifest.get("fingerprint", {}).get("value")
-    policy_fingerprint = hash_json_payload(manifest.get("policy", {}))
-    cache_seed = build_feature_sequence_cache_key(
-        manifest_fingerprint=str(fingerprint or ""),
-        policy_fingerprint=policy_fingerprint,
-        stage="pretrain_matrix",
+    cache_context = build_pretrain_cache_context(
+        manifest_path=output_path,
+        config_path=args.pretrain_config,
+        max_files=args.max_files,
     )
     print(f"Wrote manifest: {output_path}")
     print(f"Fingerprint: {fingerprint}")
-    print(f"CacheSeed: {cache_seed}")
+    print(f"CacheSeed: {cache_context['cache_key']}")
     print(
         "Stats: "
         f"files_scanned={stats.get('files_scanned', 0)} "

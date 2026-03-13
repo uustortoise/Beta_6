@@ -13,6 +13,7 @@ from typing import Any, Mapping
 from ml.policy_config import load_policy_from_env
 from ml.room_experiments import (
     build_candidate_execution_plan,
+    build_candidate_diagnostic_reports,
     build_grouped_regime_fragility_report,
     build_room_diagnostic_report,
     resolve_typed_policy_values,
@@ -120,6 +121,45 @@ def _build_manifest_payload(
     }
 
 
+def _candidate_output_path(base_output: Path, candidate_name: str) -> Path:
+    token = normalize_room_name(candidate_name) or "candidate"
+    suffix = base_output.suffix or ".json"
+    return base_output.with_name(f"{base_output.stem}.{token}{suffix}")
+
+
+def _write_candidate_artifacts(
+    *,
+    output_path: Path,
+    profile_name: str,
+    room_name: str,
+    candidate_reports: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    artifacts: list[dict[str, Any]] = []
+    for candidate in candidate_reports:
+        candidate_map = _as_mapping(candidate)
+        candidate_name = str(candidate_map.get("candidate_name") or "").strip().lower()
+        if not candidate_name:
+            continue
+        candidate_output = _candidate_output_path(output_path, candidate_name)
+        candidate_payload = _build_manifest_payload(
+            profile_name=profile_name,
+            room_name=room_name,
+            report=_as_mapping(candidate_map.get("report")),
+        )
+        candidate_output.write_text(
+            json.dumps(candidate_payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        artifacts.append(
+            {
+                "candidate_name": candidate_name,
+                "execution_mode": str(candidate_map.get("execution_mode") or "").strip().lower(),
+                "output": str(candidate_output),
+            }
+        )
+    return artifacts
+
+
 def _resolve_profile_typed_policy_values(profile: Mapping[str, Any]) -> dict[str, Any]:
     resolved_env = dict(os.environ)
     env_overrides = _as_mapping(profile.get("env_overrides"))
@@ -206,6 +246,14 @@ def main() -> int:
         grouped_fragility=grouped_fragility,
         candidate_execution_plan=candidate_execution_plan,
     )
+    candidate_reports = build_candidate_diagnostic_reports(
+        room_name=room,
+        profile_name=profile_name,
+        profile_payload=profile,
+        typed_policy_values=typed_values,
+        grouped_fragility=grouped_fragility,
+        candidate_execution_plan=candidate_execution_plan,
+    )
     payload = _build_manifest_payload(
         profile_name=profile_name,
         room_name=room,
@@ -213,6 +261,13 @@ def main() -> int:
     )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if candidate_execution_plan:
+        payload["candidate_artifacts"] = _write_candidate_artifacts(
+            output_path=output_path,
+            profile_name=profile_name,
+            room_name=room,
+            candidate_reports=candidate_reports,
+        )
     output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(str(output_path))
     return 0

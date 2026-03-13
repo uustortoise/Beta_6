@@ -50,3 +50,22 @@ def test_timeline_hard_gates_pass_when_below_thresholds():
     assert result.checked is True
     assert result.passed is True
     assert result.reason_code is None
+
+
+def test_timeline_hard_gates_preserve_event_native_quality_metrics():
+    profile = select_capability_profile("bathroom")
+    result = evaluate_timeline_hard_gates(
+        {
+            "timeline_metrics": {
+                "duration_mae_minutes": 8.0,
+                "fragmentation_rate": 0.2,
+                "boundary_f1": 0.76,
+                "episode_f1": 0.71,
+            }
+        },
+        profile,
+    )
+    assert result.checked is True
+    assert result.passed is True
+    assert result.details["boundary_f1"] == 0.76
+    assert result.details["episode_f1"] == 0.71

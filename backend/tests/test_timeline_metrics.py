@@ -56,6 +56,34 @@ class TestTimelineMetrics(unittest.TestCase):
         self.assertEqual(d['fragmentation_rate'], 0.2)
         self.assertEqual(d['num_pred_episodes'], 10)
 
+    def test_timeline_metrics_include_event_level_quality_fields(self):
+        pred = [
+            {
+                'start_time': datetime(2026, 2, 1, 10, 0, 0),
+                'end_time': datetime(2026, 2, 1, 10, 20, 0),
+                'duration_minutes': 20.0,
+                'label': 'sleeping',
+            }
+        ]
+        gt = [
+            {
+                'start_time': datetime(2026, 2, 1, 10, 0, 0),
+                'end_time': datetime(2026, 2, 1, 10, 20, 0),
+                'duration_minutes': 20.0,
+                'label': 'sleeping',
+            }
+        ]
+
+        metrics = compute_timeline_metrics(pred, gt, tolerance_minutes=0.0)
+        payload = metrics.to_dict()
+
+        self.assertEqual(payload['boundary_precision'], 1.0)
+        self.assertEqual(payload['boundary_recall'], 1.0)
+        self.assertEqual(payload['boundary_f1'], 1.0)
+        self.assertEqual(payload['episode_precision'], 1.0)
+        self.assertEqual(payload['episode_recall'], 1.0)
+        self.assertEqual(payload['episode_f1'], 1.0)
+
 
 class TestComputeFragmentationRate(unittest.TestCase):
     """Tests for fragmentation rate computation."""

@@ -18,6 +18,7 @@ from ml.timeline_targets import (
     EpisodeAttributeTargets,
     build_boundary_targets,
     build_boundary_targets_from_episodes,
+    build_event_native_targets,
     build_episode_attribute_targets,
     build_multi_room_targets,
     targets_to_dataframe,
@@ -134,6 +135,31 @@ class TestBoundaryTargets(unittest.TestCase):
         self.assertIn('end_flags', d)
         self.assertIn('timestamps', d)
         self.assertEqual(len(d['start_flags']), 3)
+
+    def test_timeline_targets_generate_event_native_supervision(self):
+        """Event-native supervision should include boundary, continuity, and per-window duration targets."""
+        base_time = datetime(2026, 2, 1, 10, 0, 0)
+        timestamps = np.array([
+            base_time,
+            base_time + timedelta(seconds=10),
+            base_time + timedelta(seconds=20),
+            base_time + timedelta(seconds=30),
+        ])
+        labels = np.array(['unoccupied', 'sleeping', 'sleeping', 'unoccupied'])
+
+        targets = build_event_native_targets(
+            timestamps=timestamps,
+            labels=labels,
+            room_name='bedroom',
+            min_episode_duration_seconds=10.0,
+        )
+
+        np.testing.assert_array_equal(targets.boundary_targets.start_flags, np.array([0, 1, 0, 0]))
+        np.testing.assert_array_equal(targets.boundary_targets.end_flags, np.array([0, 0, 1, 0]))
+        np.testing.assert_array_equal(targets.continuity_flags, np.array([0, 1, 0, 0]))
+        self.assertAlmostEqual(float(targets.duration_targets_minutes[1]), 20.0 / 60.0, places=4)
+        self.assertAlmostEqual(float(targets.duration_targets_minutes[2]), 20.0 / 60.0, places=4)
+        self.assertEqual(int(targets.daily_episode_count), 1)
 
 
 class TestEpisodeAttributeTargets(unittest.TestCase):

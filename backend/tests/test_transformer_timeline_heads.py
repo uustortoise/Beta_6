@@ -139,6 +139,29 @@ class TestTransformerTimelineHeads(unittest.TestCase):
         self.assertNotIn("boundary_end_logits", outputs)
         self.assertNotIn("daily_duration_pred", outputs)
         self.assertNotIn("daily_count_pred", outputs)
+
+    def test_timeline_heads_emit_onset_offset_duration_outputs(self):
+        """Timeline-native offline heads should emit onset/offset, continuity, and duration outputs."""
+        config = TimelineHeadConfig(
+            num_activity_classes=self.num_classes,
+            enable_activity=False,
+            enable_occupancy=False,
+            enable_boundary_start=True,
+            enable_boundary_end=True,
+            enable_daily_duration=True,
+            enable_daily_count=False,
+            enable_continuity=True,
+        )
+        model = TransformerTimelineHeads(config)
+
+        encoder_outputs = tf.random.normal([self.batch_size, self.seq_len, self.hidden_dim])
+        outputs = model(encoder_outputs, training=False)
+
+        self.assertIn("boundary_start_logits", outputs)
+        self.assertIn("boundary_end_logits", outputs)
+        self.assertIn("continuity_logits", outputs)
+        self.assertIn("daily_duration_pred", outputs)
+        self.assertEqual(outputs["continuity_logits"].shape, (self.batch_size, self.seq_len, 1))
     
     def test_loss_computation(self):
         """Test loss computation."""

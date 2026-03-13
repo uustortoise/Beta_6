@@ -309,6 +309,30 @@
   - red phase: `PYTHONPATH=backend pytest backend/tests/test_beta6_active_learning.py backend/tests/test_run_active_learning_triage_script.py backend/tests/test_ui_services.py -q` -> import failure for missing `build_correction_learning_records`, then one sqlite timestamp binding failure during implementation
   - green phase: `PYTHONPATH=backend pytest backend/tests/test_beta6_active_learning.py backend/tests/test_run_active_learning_triage_script.py backend/tests/test_ui_services.py -q` -> 40 passed, 42 warnings
   - syntax: `python3 -m py_compile backend/services/correction_service.py backend/ml/beta6/training/active_learning.py backend/scripts/run_active_learning_triage.py backend/tests/test_beta6_active_learning.py backend/tests/test_run_active_learning_triage_script.py backend/tests/test_ui_services.py` -> passed
+2026-03-13 11:29:33 UTC | TASK-26 | Add Beta 6.2 timeline-native supervision bundle and event-quality summaries
+- Context: Task 12 needed a first-class offline event-native supervision path. The branch already had boundary heads and day-level auxiliaries, but it still lacked continuity supervision, reusable event-native target bundles, and event-quality metrics surfaced into Beta 6.2 timeline gate details.
+- Files changed:
+  - `backend/ml/transformer_timeline_heads.py`
+  - `backend/ml/timeline_targets.py`
+  - `backend/ml/timeline_metrics.py`
+  - `backend/ml/beta6/training/beta6_trainer.py`
+  - `backend/ml/beta6/gates/timeline_hard_gates.py`
+  - `backend/tests/test_transformer_timeline_heads.py`
+  - `backend/tests/test_timeline_targets.py`
+  - `backend/tests/test_timeline_metrics.py`
+  - `backend/tests/test_beta6_timeline_hard_gates.py`
+- Actions:
+  - added `EventNativeTargets` plus `build_event_native_targets(...)` to emit boundary targets, continuity flags, per-window duration targets, and daily episode aggregates from offline label sequences
+  - added continuity-head support to the existing transformer timeline heads and wired continuity loss into multi-task loss computation
+  - extended `TimelineMetrics` to emit event-quality fields (`boundary_precision/recall/f1`, `episode_precision/recall/f1`) using the existing episode matching path
+  - added `build_event_native_supervision_bundle(...)` in `beta6_trainer.py` as the Beta 6.2 offline trainer touchpoint for the new target bundle
+  - taught Beta 6.2 timeline hard-gate details to preserve event-native quality metrics when present without changing the existing MAE/fragmentation fail logic
+  - added red/green tests for continuity outputs, event-native target generation, event-quality metric summaries, and hard-gate detail preservation
+- Verification:
+  - red phase: `PYTHONPATH=backend pytest backend/tests/test_transformer_timeline_heads.py backend/tests/test_timeline_targets.py backend/tests/test_timeline_metrics.py backend/tests/test_timeline_gates.py backend/tests/test_beta6_timeline_hard_gates.py -q` -> import failure for missing `build_event_native_targets`
+  - green phase: same command -> 93 passed, 3 warnings
+  - regression sweep: `PYTHONPATH=backend pytest backend/tests/test_beta6_dynamic_gate_artifacts.py backend/tests/test_beta6_gate_engine.py backend/tests/test_beta6_timeline_hard_gates.py -q` -> 21 passed, 3 warnings
+  - syntax: `python3 -m py_compile backend/ml/transformer_timeline_heads.py backend/ml/timeline_targets.py backend/ml/timeline_metrics.py backend/ml/beta6/training/beta6_trainer.py backend/ml/beta6/gates/timeline_hard_gates.py backend/tests/test_transformer_timeline_heads.py backend/tests/test_timeline_targets.py backend/tests/test_timeline_metrics.py backend/tests/test_beta6_timeline_hard_gates.py` -> passed
 2026-03-13 10:32:57 UTC | TASK-24 | Fix Task 10 review finding by scoping grouped-regime blocking to explicit fragile-room profiles
 - Context: review of `824c673` found that grouped worst-slice blocking in `TrainingPipeline._evaluate_grouped_regime_gate(...)` was payload-driven only; once wired, any room with grouped fragility diagnostics could be blocked. The intended behavior was to affect only explicitly configured fragile-room profiles.
 - Files changed:

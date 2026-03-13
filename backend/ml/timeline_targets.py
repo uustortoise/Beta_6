@@ -63,6 +63,38 @@ class EpisodeAttributeTargets:
         }
 
 
+@dataclass
+class EventNativeTargets:
+    """Container for offline event-native supervision targets."""
+
+    boundary_targets: BoundaryTargets
+    continuity_flags: np.ndarray
+    duration_targets_minutes: np.ndarray
+    timestamps: np.ndarray
+    daily_duration_minutes: float
+    daily_episode_count: int
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "boundary_targets": self.boundary_targets.to_dict(),
+            "continuity_flags": self.continuity_flags.tolist(),
+            "duration_targets_minutes": [round(float(v), 4) for v in self.duration_targets_minutes.tolist()],
+            "timestamps": [pd.Timestamp(ts).isoformat() for ts in self.timestamps],
+            "daily_duration_minutes": round(float(self.daily_duration_minutes), 4),
+            "daily_episode_count": int(self.daily_episode_count),
+        }
+
+
+def _resolve_window_duration_seconds(timestamps: np.ndarray) -> float:
+    if len(timestamps) > 1:
+        ts1 = pd.Timestamp(timestamps[1])
+        ts0 = pd.Timestamp(timestamps[0])
+        delta = (ts1 - ts0).total_seconds()
+        if delta > 0:
+            return float(delta)
+    return 10.0
+
+
 def build_boundary_targets(
     labels: np.ndarray,
     window_duration_seconds: float = 10.0,
@@ -264,6 +296,108 @@ def build_episode_attribute_targets(
         episode_starts=episode_starts,
         episode_ends=episode_ends,
         episode_labels=episode_labels_list,
+    )
+
+
+def build_event_native_targets(
+    timestamps: np.ndarray,
+    labels: np.ndarray,
+    room_name: str,
+    min_episode_duration_seconds: float = 30.0,
+    excluded_labels: frozenset = frozenset({'unoccupied', 'unknown'}),
+) -> EventNativeTargets:
+    """
+    Build offline event-native supervision targets for Beta 6.2.
+    """
+    if len(timestamps) != len(labels):
+        raise ValueError("timestamps and labels must have same length")
+
+    if len(labels) == 0:
+        empty_boundary = BoundaryTargets(
+            start_flags=np.array([], dtype=np.int32),
+            end_flags=np.array([], dtype=np.int32),
+            timestamps=np.array([], dtype=object),
+        )
+        return EventNativeTargets(
+            boundary_targets=empty_boundary,
+            continuity_flags=np.array([], dtype=np.int32),
+            duration_targets_minutes=np.array([], dtype=np.float32),
+            timestamps=np.array([], dtype=object),
+            daily_duration_minutes=0.0,
+            daily_episode_count=0,
+        )
+
+    normalized_timestamps = pd.to_datetime(timestamps).to_numpy()
+    window_duration_seconds = _resolve_window_duration_seconds(normalized_timestamps)
+    if len(labels) >= 2:
+        boundary_targets = build_boundary_targets(
+            labels,
+            window_duration_seconds=window_duration_seconds,
+            excluded_labels=excluded_labels,
+        )
+    else:
+        is_care = labels[0] not in excluded_labels
+        boundary_targets = BoundaryTargets(
+            start_flags=np.array([1 if is_care else 0], dtype=np.int32),
+            end_flags=np.array([1 if is_care else 0], dtype=np.int32),
+            timestamps=np.array([0.0], dtype=np.float32),
+        )
+
+    continuity_flags = np.zeros(len(labels), dtype=np.int32)
+    duration_targets_minutes = np.zeros(len(labels), dtype=np.float32)
+    daily_duration_minutes = 0.0
+    daily_episode_count = 0
+
+    current_label: Optional[str] = None
+    current_start_idx: Optional[int] = None
+    current_end_idx: Optional[int] = None
+
+    def _finalize_episode(label: Optional[str], start_idx: Optional[int], end_idx: Optional[int]) -> None:
+        nonlocal daily_duration_minutes, daily_episode_count
+        if label is None or start_idx is None or end_idx is None:
+            return
+        start_ts = pd.Timestamp(normalized_timestamps[start_idx])
+        end_ts = pd.Timestamp(normalized_timestamps[end_idx])
+        duration_seconds = (end_ts - start_ts).total_seconds() + window_duration_seconds
+        if duration_seconds < float(min_episode_duration_seconds):
+            return
+        duration_minutes = float(duration_seconds / 60.0)
+        duration_targets_minutes[start_idx : end_idx + 1] = duration_minutes
+        if end_idx > start_idx:
+            continuity_flags[start_idx:end_idx] = 1
+        daily_duration_minutes += duration_minutes
+        daily_episode_count += 1
+
+    for idx, label in enumerate(labels):
+        label_token = str(label)
+        if label_token in excluded_labels:
+            _finalize_episode(current_label, current_start_idx, current_end_idx)
+            current_label = None
+            current_start_idx = None
+            current_end_idx = None
+            continue
+        if current_label is None:
+            current_label = label_token
+            current_start_idx = idx
+            current_end_idx = idx
+            continue
+        if label_token != current_label:
+            _finalize_episode(current_label, current_start_idx, current_end_idx)
+            current_label = label_token
+            current_start_idx = idx
+            current_end_idx = idx
+        else:
+            current_end_idx = idx
+
+    _finalize_episode(current_label, current_start_idx, current_end_idx)
+
+    return EventNativeTargets(
+        boundary_targets=boundary_targets,
+        continuity_flags=continuity_flags,
+        duration_targets_minutes=duration_targets_minutes,
+        timestamps=normalized_timestamps,
+        daily_duration_minutes=float(daily_duration_minutes),
+        daily_episode_count=int(daily_episode_count),
     )
 
 

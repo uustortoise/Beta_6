@@ -29,6 +29,7 @@ class TimelineHeadConfig:
     enable_occupancy: bool = True
     enable_boundary_start: bool = True
     enable_boundary_end: bool = True
+    enable_continuity: bool = False
     enable_daily_duration: bool = False  # Optional auxiliary
     enable_daily_count: bool = False  # Optional auxiliary
     
@@ -42,6 +43,7 @@ class TimelineHeadConfig:
     w_occupancy: float = 1.0
     w_boundary_start: float = 0.5
     w_boundary_end: float = 0.5
+    w_continuity: float = 0.2
     w_daily_duration: float = 0.1
     w_daily_count: float = 0.1
     
@@ -52,6 +54,7 @@ class TimelineHeadConfig:
         assert all(w >= 0 for w in [
             self.w_activity, self.w_occupancy,
             self.w_boundary_start, self.w_boundary_end,
+            self.w_continuity,
             self.w_daily_duration, self.w_daily_count
         ]), "all loss weights must be non-negative"
 
@@ -64,6 +67,7 @@ class TimelineModelOutput:
     occupancy_logits: Optional[tf.Tensor] = None
     boundary_start_logits: Optional[tf.Tensor] = None
     boundary_end_logits: Optional[tf.Tensor] = None
+    continuity_logits: Optional[tf.Tensor] = None
     daily_duration_pred: Optional[tf.Tensor] = None
     daily_count_pred: Optional[tf.Tensor] = None
     
@@ -74,6 +78,7 @@ class TimelineModelOutput:
             'occupancy_logits': self.occupancy_logits,
             'boundary_start_logits': self.boundary_start_logits,
             'boundary_end_logits': self.boundary_end_logits,
+            'continuity_logits': self.continuity_logits,
             'daily_duration_pred': self.daily_duration_pred,
             'daily_count_pred': self.daily_count_pred,
         }
@@ -135,6 +140,12 @@ class TransformerTimelineHeads(keras.Model):
                 1,
                 name='boundary_end_logits'
             )
+
+        if config.enable_continuity:
+            self.continuity_head = keras.layers.Dense(
+                1,
+                name='continuity_logits'
+            )
         
         # Daily duration regression (auxiliary)
         if config.enable_daily_duration:
@@ -187,6 +198,9 @@ class TransformerTimelineHeads(keras.Model):
         
         if self.config.enable_boundary_end:
             outputs.boundary_end_logits = self.boundary_end_head(shared)
+
+        if self.config.enable_continuity:
+            outputs.continuity_logits = self.continuity_head(shared)
         
         # Daily aggregated heads (sequence-level regression)
         if self.config.enable_daily_duration:
@@ -270,6 +284,17 @@ class TransformerTimelineHeads(keras.Model):
                         logits=tf.squeeze(boundary_end_logits, axis=-1),
                     )
                 )
+
+        continuity_logits = output_dict.get("continuity_logits")
+        if self.config.enable_continuity and continuity_logits is not None:
+            continuity_targets = targets.get('continuity_labels')
+            if continuity_targets is not None:
+                losses['continuity'] = tf.reduce_mean(
+                    tf.nn.sigmoid_cross_entropy_with_logits(
+                        labels=tf.cast(continuity_targets, tf.float32),
+                        logits=tf.squeeze(continuity_logits, axis=-1),
+                    )
+                )
         
         # Daily duration loss (Huber)
         daily_duration_pred = output_dict.get("daily_duration_pred")
@@ -305,6 +330,8 @@ class TransformerTimelineHeads(keras.Model):
             total_loss += self.config.w_boundary_start * losses['boundary_start']
         if 'boundary_end' in losses:
             total_loss += self.config.w_boundary_end * losses['boundary_end']
+        if 'continuity' in losses:
+            total_loss += self.config.w_continuity * losses['continuity']
         if 'daily_duration' in losses:
             total_loss += self.config.w_daily_duration * losses['daily_duration']
         if 'daily_count' in losses:

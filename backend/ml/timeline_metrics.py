@@ -28,6 +28,12 @@ class TimelineMetrics:
     segment_duration_mae_minutes: float = 0.0
     episode_count_error: float = 0.0
     fragmentation_rate: float = 0.0
+    boundary_precision: float = 0.0
+    boundary_recall: float = 0.0
+    boundary_f1: float = 0.0
+    episode_precision: float = 0.0
+    episode_recall: float = 0.0
+    episode_f1: float = 0.0
     
     # Episode-level details for debugging
     num_pred_episodes: int = 0
@@ -42,6 +48,12 @@ class TimelineMetrics:
             'segment_duration_mae_minutes': round(self.segment_duration_mae_minutes, 4),
             'episode_count_error': round(self.episode_count_error, 4),
             'fragmentation_rate': round(self.fragmentation_rate, 4),
+            'boundary_precision': round(self.boundary_precision, 4),
+            'boundary_recall': round(self.boundary_recall, 4),
+            'boundary_f1': round(self.boundary_f1, 4),
+            'episode_precision': round(self.episode_precision, 4),
+            'episode_recall': round(self.episode_recall, 4),
+            'episode_f1': round(self.episode_f1, 4),
             'num_pred_episodes': self.num_pred_episodes,
             'num_gt_episodes': self.num_gt_episodes,
             'matched_episodes': self.matched_episodes,
@@ -339,6 +351,16 @@ def compute_timeline_metrics(
     
     # Episode count error
     count_error = abs(len(pred_episodes) - len(gt_episodes))
+    matched_count = len(matches)
+    pred_count = len(pred_episodes)
+    gt_count = len(gt_episodes)
+
+    episode_precision = float(matched_count / pred_count) if pred_count > 0 else 0.0
+    episode_recall = float(matched_count / gt_count) if gt_count > 0 else 0.0
+    if episode_precision + episode_recall > 0.0:
+        episode_f1 = float(2.0 * episode_precision * episode_recall / (episode_precision + episode_recall))
+    else:
+        episode_f1 = 0.0
     
     return TimelineMetrics(
         segment_start_mae_minutes=start_mae,
@@ -346,9 +368,15 @@ def compute_timeline_metrics(
         segment_duration_mae_minutes=duration_mae,
         episode_count_error=count_error,
         fragmentation_rate=fragmentation,
-        num_pred_episodes=len(pred_episodes),
-        num_gt_episodes=len(gt_episodes),
-        matched_episodes=len(matches),
+        boundary_precision=episode_precision,
+        boundary_recall=episode_recall,
+        boundary_f1=episode_f1,
+        episode_precision=episode_precision,
+        episode_recall=episode_recall,
+        episode_f1=episode_f1,
+        num_pred_episodes=pred_count,
+        num_gt_episodes=gt_count,
+        matched_episodes=matched_count,
     )
 
 

@@ -30,6 +30,15 @@ def _to_float(value: Any) -> float:
     return float(value)
 
 
+def _optional_float(mapping: Mapping[str, Any], key: str) -> Optional[float]:
+    if key not in mapping:
+        return None
+    try:
+        return _to_float(mapping[key])
+    except TypeError:
+        return None
+
+
 def evaluate_timeline_hard_gates(
     report: Mapping[str, Any],
     capability_profile: CapabilityProfile,
@@ -76,6 +85,10 @@ def evaluate_timeline_hard_gates(
         "fragmentation_rate": fragmentation_rate,
         "fragmentation_rate_threshold": float(capability_profile.max_fragmentation_rate),
     }
+    for metric_name in ("boundary_f1", "episode_f1", "boundary_precision", "boundary_recall"):
+        metric_value = _optional_float(raw_timeline_metrics, metric_name)
+        if metric_value is not None:
+            details[metric_name] = metric_value
 
     if duration_mae_minutes > float(capability_profile.max_timeline_mae_minutes):
         return TimelineHardGateResult(

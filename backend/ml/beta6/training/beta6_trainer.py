@@ -44,6 +44,7 @@ from elderlycare_v1_16.config.settings import (
     PROJECT_ROOT, MODELS_DIR, DEFAULT_SENSOR_COLUMNS,
     DEFAULT_EPOCHS
 )
+from ml.timeline_targets import build_event_native_targets
 from ml.beta6.gates.intake_precheck import IntakeGateBlockedError, enforce_approved_intake_artifact
 from ml.beta6.training.fine_tune_safe_classes import run_safe_class_finetune
 from ml.beta6.training.self_supervised_pretrain import (
@@ -183,6 +184,33 @@ def prepare_training_data(
     logger.info(f"Prepared {len(X)} {format_type} with {len(label_map)} classes, shape={X.shape}")
     
     return X, y, label_map
+
+
+def build_event_native_supervision_bundle(
+    *,
+    timestamps: np.ndarray,
+    labels: np.ndarray,
+    room_name: str,
+    min_episode_duration_seconds: float = 30.0,
+) -> Dict[str, Any]:
+    """
+    Build offline event-native supervision targets for Beta 6.2 experiments.
+    """
+    event_targets = build_event_native_targets(
+        timestamps=timestamps,
+        labels=labels,
+        room_name=room_name,
+        min_episode_duration_seconds=min_episode_duration_seconds,
+    )
+    return {
+        "boundary_start_labels": event_targets.boundary_targets.start_flags.astype(np.float32),
+        "boundary_end_labels": event_targets.boundary_targets.end_flags.astype(np.float32),
+        "continuity_labels": event_targets.continuity_flags.astype(np.float32),
+        "event_duration_minutes": event_targets.duration_targets_minutes.astype(np.float32),
+        "daily_duration": float(event_targets.daily_duration_minutes),
+        "daily_count": float(event_targets.daily_episode_count),
+        "timestamps": event_targets.timestamps,
+    }
 
 
 # =============================================================================

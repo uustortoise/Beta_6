@@ -24,6 +24,8 @@ try:
 except ImportError:
     TF_AVAILABLE = False
 
+from ml.beta6.training.beta6_trainer import build_context_conditioning_bundle
+
 
 @unittest.skipUnless(TF_AVAILABLE, "TensorFlow not available")
 class TestTimelineHeadConfig(unittest.TestCase):
@@ -257,6 +259,55 @@ class TestFactoryFunction(unittest.TestCase):
         self.assertTrue(model.config.enable_boundary_start)
         self.assertTrue(model.config.enable_boundary_end)
         self.assertFalse(model.config.enable_daily_duration)
+
+
+class TestBeta62ContextConditioning(unittest.TestCase):
+    """Tests for offline-only Beta 6.2 context conditioning."""
+
+    def test_layout_topology_context_reaches_beta62_model_path(self):
+        """Layout topology should become explicit offline conditioning in the Beta 6.2 trainer path."""
+        bundle = build_context_conditioning_bundle(
+            room_name="bedroom",
+            profile_context={
+                "resident_home_context": {
+                    "household_type": "single",
+                    "helper_presence": "none",
+                    "layout_topology": {
+                        "bedroom": ["entrance", "livingroom", "toilet"],
+                    },
+                }
+            },
+        )
+
+        self.assertTrue(bundle["offline_only"])
+        self.assertEqual(bundle["context_status"], "complete")
+        self.assertAlmostEqual(bundle["context_feature_values"]["layout_connectivity"], 0.75)
+        self.assertEqual(bundle["resident_home_context"]["layout_topology"]["bedroom"], ["entrance", "livingroom", "toilet"])
+
+    def test_demographic_context_is_not_default_training_input(self):
+        """Age/sex metadata may be observed, but they must not become default training inputs."""
+        bundle = build_context_conditioning_bundle(
+            room_name="bedroom",
+            profile_context={
+                "age": 82,
+                "sex": "female",
+                "gender": "female",
+                "resident_home_context": {
+                    "household_type": "multi",
+                    "helper_presence": "present",
+                    "layout_topology": {"bedroom": ["entrance"]},
+                },
+            },
+        )
+
+        self.assertFalse(bundle["uses_demographic_inputs"])
+        self.assertEqual(bundle["demographic_fields_present"], ["age", "gender", "sex"])
+        self.assertEqual(
+            bundle["excluded_default_input_fields"],
+            ["age", "gender", "sex"],
+        )
+        self.assertNotIn("age", bundle["context_feature_names"])
+        self.assertNotIn("sex", bundle["context_feature_names"])
     
     def test_create_timeline_heads_with_auxiliary(self):
         """Test factory with auxiliary heads."""

@@ -122,6 +122,17 @@ class ResidentHomeContext:
             "status": self.status,
         }
 
+    def to_model_feature_payload(self, room_name: Optional[str] = None) -> Dict[str, float]:
+        """Return deterministic offline conditioning features for Beta 6.2 experiments."""
+        room_key = _normalize_room_key(room_name)
+        neighbours = self.layout_topology.get(room_key, ())
+        connectivity = float(min(len(set(neighbours)), 4)) / 4.0 if neighbours else 0.0
+        return {
+            "household_multi": 1.0 if self.household_type == "multi" else 0.0,
+            "helper_present": 1.0 if self.helper_presence == "present" else 0.0,
+            "layout_connectivity": connectivity,
+        }
+
 
 @dataclass
 class HomeEmptyConfig:

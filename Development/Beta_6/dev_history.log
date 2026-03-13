@@ -387,3 +387,24 @@
 - Verification:
   - red phase: `PYTHONPATH=backend pytest backend/tests/test_run_active_learning_triage_script.py -q -k correction` -> 1 failed, 2 deselected, 3 warnings; `PYTHONPATH=backend pytest backend/tests/test_beta6_active_learning.py -q -k residual_review_rows` -> 1 failed, 7 deselected, 3 warnings
   - green phase: same commands -> 1 passed, 2 deselected, 3 warnings; 1 passed, 7 deselected, 3 warnings
+2026-03-13 11:45:09 UTC | TASK-27 | Add Beta 6.2 offline context-conditioned modeling bundle before demographic modeling
+- Context: Task 13 required layout/topology and household/helper context to reach the Beta 6.2 offline model path explicitly, while proving age/sex metadata remains outside default training inputs.
+- Files changed:
+  - `backend/ml/home_empty_fusion.py`
+  - `backend/ml/household_analyzer.py`
+  - `backend/ml/beta6/sequence/transition_builder.py`
+  - `backend/ml/beta6/training/beta6_trainer.py`
+  - `backend/tests/test_home_empty_fusion.py`
+  - `backend/tests/test_transformer_timeline_heads.py`
+- Actions:
+  - added deterministic `ResidentHomeContext.to_model_feature_payload(...)` so typed layout/helper/household context can become explicit offline conditioning features
+  - extracted a pure `build_resident_home_context_contract(...)` helper and `identify_deferred_demographic_fields(...)` so trainer-side context assembly can reuse the same contract logic without DB reads
+  - exposed `resolve_transition_policy_for_context(...)` as a public decoder-policy inspection helper and routed transition-matrix construction through it
+  - added `build_context_conditioning_bundle(...)` in the Beta 6.2 trainer to emit offline-only context features, effective decoder policy, and explicit exclusion of demographic fields from default inputs
+  - added regressions proving layout connectivity reaches the trainer bundle, helper/household context changes decoder constraints from explicit payload only, and demographic fields are observed-but-excluded
+- Verification:
+  - red phase: `PYTHONPATH=backend pytest backend/tests/test_home_empty_fusion.py backend/tests/test_transformer_timeline_heads.py -q` -> 2 import errors (expected missing public Task 13 entry points before implementation)
+  - focused green: same command -> 44 passed, 3 warnings
+  - targeted regressions: `PYTHONPATH=backend pytest backend/tests/test_health_server.py -k resident_home_context_contract backend/tests/test_process_data_arbitration.py backend/tests/test_beta6_trainer_intake_gate.py -q` -> 2 passed, 35 deselected, 3 warnings
+  - touched-suite regressions: `PYTHONPATH=backend pytest backend/tests/test_process_data_arbitration.py backend/tests/test_beta6_trainer_intake_gate.py -q` -> 10 passed, 3 warnings
+  - syntax: `python3 -m py_compile backend/ml/home_empty_fusion.py backend/ml/household_analyzer.py backend/ml/beta6/sequence/transition_builder.py backend/ml/beta6/training/beta6_trainer.py backend/tests/test_home_empty_fusion.py backend/tests/test_transformer_timeline_heads.py` -> passed

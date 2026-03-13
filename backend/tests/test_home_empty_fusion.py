@@ -27,7 +27,11 @@ from ml.home_empty_fusion import (
     RoomState,
     fuse_home_empty_predictions,
 )
-from ml.beta6.sequence.transition_builder import TransitionPolicy, build_transition_log_matrix
+from ml.beta6.sequence.transition_builder import (
+    TransitionPolicy,
+    build_transition_log_matrix,
+    resolve_transition_policy_for_context,
+)
 
 
 class TestHomeEmptyConfig(unittest.TestCase):
@@ -292,6 +296,33 @@ class TestHomeEmptyFusion(unittest.TestCase):
             )
 
         self.assertFalse(np.allclose(baseline, contextual))
+
+    def test_household_helper_context_changes_decoder_constraints_offline_only(self):
+        """Helper/household context should adjust decoder constraints from explicit payload only."""
+        base_policy = TransitionPolicy(switch_penalty=0.20, self_transition_bias=0.03)
+        context = ResidentHomeContext.from_payload(
+            {
+                "household_type": "multi",
+                "helper_presence": "present",
+                "layout_topology": {"bedroom": ["entrance"]},
+            }
+        )
+
+        baseline = resolve_transition_policy_for_context(
+            policy=base_policy,
+            room_name="kitchen",
+            resident_home_context=None,
+        )
+
+        with patch("os.getenv", side_effect=AssertionError("env access is not allowed")):
+            contextual = resolve_transition_policy_for_context(
+                policy=base_policy,
+                room_name="kitchen",
+                resident_home_context=context.to_runtime_payload(),
+            )
+
+        self.assertGreater(contextual.switch_penalty, baseline.switch_penalty)
+        self.assertEqual(contextual.self_transition_bias, baseline.self_transition_bias)
     
     def test_entrance_penalty(self):
         """Test entrance penalty logic."""

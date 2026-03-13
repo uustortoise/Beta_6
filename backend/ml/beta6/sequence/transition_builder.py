@@ -96,6 +96,20 @@ def _resolve_transition_policy_for_context(
     )
 
 
+def resolve_transition_policy_for_context(
+    *,
+    policy: TransitionPolicy,
+    room_name: str | None = None,
+    resident_home_context: Optional[Mapping[str, Any]] = None,
+) -> TransitionPolicy:
+    """Public deterministic context resolver for offline/runtime decoder policy inspection."""
+    return _resolve_transition_policy_for_context(
+        policy=policy,
+        room_name=room_name,
+        resident_home_context=resident_home_context,
+    )
+
+
 def load_duration_prior_policy(path: str | Path | None) -> DurationPriorPolicy:
     policy_path = (
         Path(path).resolve()
@@ -168,7 +182,7 @@ def build_transition_log_matrix(
     n = len(normalized)
     if n == 0:
         raise ValueError("labels must not be empty")
-    effective_policy = _resolve_transition_policy_for_context(
+    effective_policy = resolve_transition_policy_for_context(
         policy=policy,
         room_name=room_name,
         resident_home_context=resident_home_context,
@@ -226,4 +240,5 @@ __all__ = [
     "duration_log_penalty",
     "load_duration_prior_policy",
     "_resolve_transition_policy_for_context",
+    "resolve_transition_policy_for_context",
 ]

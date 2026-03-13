@@ -12,9 +12,85 @@ from ml.home_empty_fusion import ResidentHomeContext
 from config import DB_PATH
 logger = logging.getLogger(__name__)
 
+RESIDENT_HOME_CONTEXT_FIELDS = ("household_type", "helper_presence", "layout_topology")
+DEFERRED_DEMOGRAPHIC_FIELDS = ("age", "gender", "sex")
+
 
 def _has_context_value(value: Any) -> bool:
     return value not in (None, "", {}, [])
+
+
+def _coerce_resident_home_context_payload(value: Mapping[str, Any] | None) -> dict[str, Any]:
+    source = value if isinstance(value, Mapping) else {}
+    if any(field in source for field in RESIDENT_HOME_CONTEXT_FIELDS):
+        return dict(source)
+    nested = source.get("resident_home_context")
+    return dict(nested) if isinstance(nested, Mapping) else {}
+
+
+def identify_deferred_demographic_fields(profile_context: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """Return demographic fields that were observed but intentionally excluded from default inputs."""
+    source = profile_context if isinstance(profile_context, Mapping) else {}
+    observed = {
+        str(key).strip().lower()
+        for key in source.keys()
+        if str(key).strip().lower() in DEFERRED_DEMOGRAPHIC_FIELDS
+    }
+    return tuple(sorted(observed))
+
+
+def build_resident_home_context_contract(
+    *,
+    elder_id: str | None = None,
+    profile_context: Mapping[str, Any] | None = None,
+    stored_profile_context: Mapping[str, Any] | None = None,
+    stored_record_context: Mapping[str, Any] | None = None,
+    config_context: Mapping[str, Any] | None = None,
+) -> dict:
+    """Pure builder for the explicit resident/home context contract."""
+    profile = _coerce_resident_home_context_payload(profile_context)
+    stored_profile = _coerce_resident_home_context_payload(stored_profile_context)
+    stored_record = _coerce_resident_home_context_payload(stored_record_context)
+    config = _coerce_resident_home_context_payload(config_context)
+
+    payload: dict[str, Any] = {}
+    sources: dict[str, str] = {}
+    for field in RESIDENT_HOME_CONTEXT_FIELDS:
+        for candidate, source_name in (
+            (profile.get(field), "profile"),
+            (stored_profile.get(field), "profile_store"),
+            (stored_record.get(field), "resident_home_context"),
+            (config.get(field), "household_config"),
+        ):
+            if _has_context_value(candidate):
+                payload[field] = candidate
+                sources[field] = source_name
+                break
+        else:
+            payload[field] = None
+            sources[field] = "missing"
+
+    context = ResidentHomeContext.from_payload(payload)
+    missing = list(context.missing_required_fields)
+    status = "ready" if not missing else "incomplete"
+    message = (
+        "Resident/home context contract is complete."
+        if not missing
+        else f"Missing required context fields: {', '.join(missing)}"
+    )
+
+    return {
+        "elder_id": str(elder_id or "").strip() or None,
+        "status": status,
+        "household_type": context.household_type,
+        "helper_presence": context.helper_presence,
+        "layout_topology": {
+            room: list(neighbours) for room, neighbours in context.layout_topology.items()
+        },
+        "missing_required_fields": missing,
+        "message": message,
+        "source": sources,
+    }
 
 class HouseholdAnalyzer:
     def __init__(self, db_path=None):
@@ -88,49 +164,16 @@ class HouseholdAnalyzer:
         """
         Return explicit typed resident/home context and missing-field diagnostics.
         """
-        profile = profile_context if isinstance(profile_context, Mapping) else {}
         stored_profile = self._load_profile_resident_home_context(elder_id)
         stored_record = self._load_resident_home_context_record(elder_id)
         config = self.get_config()
-
-        payload: dict[str, Any] = {}
-        sources: dict[str, str] = {}
-        for field in ("household_type", "helper_presence", "layout_topology"):
-            for candidate, source_name in (
-                (profile.get(field), "profile"),
-                (stored_profile.get(field), "profile_store"),
-                (stored_record.get(field), "resident_home_context"),
-                (config.get(field), "household_config"),
-            ):
-                if _has_context_value(candidate):
-                    payload[field] = candidate
-                    sources[field] = source_name
-                    break
-            else:
-                payload[field] = None
-                sources[field] = "missing"
-
-        context = ResidentHomeContext.from_payload(payload)
-        missing = list(context.missing_required_fields)
-        status = "ready" if not missing else "incomplete"
-        message = (
-            "Resident/home context contract is complete."
-            if not missing
-            else f"Missing required context fields: {', '.join(missing)}"
+        return build_resident_home_context_contract(
+            elder_id=elder_id,
+            profile_context=profile_context,
+            stored_profile_context=stored_profile,
+            stored_record_context=stored_record,
+            config_context=config,
         )
-
-        return {
-            "elder_id": str(elder_id or "").strip() or None,
-            "status": status,
-            "household_type": context.household_type,
-            "helper_presence": context.helper_presence,
-            "layout_topology": {
-                room: list(neighbours) for room, neighbours in context.layout_topology.items()
-            },
-            "missing_required_fields": missing,
-            "message": message,
-            "source": sources,
-        }
 
     def _load_profile_resident_home_context(self, elder_id: str | None) -> dict[str, Any]:
         elder = str(elder_id or "").strip()

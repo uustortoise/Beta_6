@@ -31,7 +31,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Mapping
 import numpy as np
 
 # Path setup
@@ -43,6 +43,15 @@ sys.path.insert(0, str(_backend_dir))
 from elderlycare_v1_16.config.settings import (
     PROJECT_ROOT, MODELS_DIR, DEFAULT_SENSOR_COLUMNS,
     DEFAULT_EPOCHS
+)
+from ml.beta6.sequence.transition_builder import (
+    TransitionPolicy,
+    resolve_transition_policy_for_context,
+)
+from ml.home_empty_fusion import ResidentHomeContext
+from ml.household_analyzer import (
+    build_resident_home_context_contract,
+    identify_deferred_demographic_fields,
 )
 from ml.timeline_targets import build_event_native_targets
 from ml.beta6.gates.intake_precheck import IntakeGateBlockedError, enforce_approved_intake_artifact
@@ -57,6 +66,26 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+DEFAULT_EXCLUDED_DEMOGRAPHIC_FIELDS = ("age", "gender", "sex")
+
+
+def _as_mapping(value: Any) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _select_resident_home_context_payload(
+    *,
+    profile_context: Mapping[str, Any] | None = None,
+    resident_home_context: Mapping[str, Any] | None = None,
+) -> Mapping[str, Any]:
+    if isinstance(resident_home_context, Mapping):
+        return resident_home_context
+    profile = _as_mapping(profile_context)
+    nested = profile.get("resident_home_context")
+    if isinstance(nested, Mapping):
+        return nested
+    return profile
 
 
 # =============================================================================
@@ -210,6 +239,61 @@ def build_event_native_supervision_bundle(
         "daily_duration": float(event_targets.daily_duration_minutes),
         "daily_count": float(event_targets.daily_episode_count),
         "timestamps": event_targets.timestamps,
+    }
+
+
+def build_context_conditioning_bundle(
+    *,
+    room_name: str,
+    profile_context: Mapping[str, Any] | None = None,
+    resident_home_context: Mapping[str, Any] | None = None,
+    base_transition_policy: TransitionPolicy = TransitionPolicy(),
+) -> Dict[str, Any]:
+    """
+    Build offline-only context conditioning features for Beta 6.2 experiments.
+
+    This path intentionally excludes demographic metadata from default model inputs.
+    """
+    raw_profile = _as_mapping(profile_context)
+    context_payload = _select_resident_home_context_payload(
+        profile_context=raw_profile,
+        resident_home_context=resident_home_context,
+    )
+    contract = build_resident_home_context_contract(
+        profile_context=context_payload,
+        config_context={},
+    )
+    typed_context = ResidentHomeContext.from_payload(contract)
+    runtime_payload = typed_context.to_runtime_payload()
+    feature_values = typed_context.to_model_feature_payload(room_name=room_name)
+    feature_names = list(feature_values.keys())
+    effective_policy = resolve_transition_policy_for_context(
+        policy=base_transition_policy,
+        room_name=room_name,
+        resident_home_context=runtime_payload,
+    )
+    demographic_fields_present = list(identify_deferred_demographic_fields(raw_profile))
+    excluded_fields = [
+        field for field in DEFAULT_EXCLUDED_DEMOGRAPHIC_FIELDS if field in demographic_fields_present
+    ]
+    return {
+        "room_name": str(room_name or "").strip().lower(),
+        "offline_only": True,
+        "context_status": typed_context.status,
+        "context_contract_status": str(contract.get("status") or typed_context.status),
+        "resident_home_context": runtime_payload,
+        "context_feature_names": feature_names,
+        "context_feature_values": feature_values,
+        "context_features": [float(feature_values[name]) for name in feature_names],
+        "effective_transition_policy": {
+            "switch_penalty": float(effective_policy.switch_penalty),
+            "self_transition_bias": float(effective_policy.self_transition_bias),
+            "impossible_transition_penalty": float(effective_policy.impossible_transition_penalty),
+            "step_minutes": float(effective_policy.step_minutes),
+        },
+        "demographic_fields_present": demographic_fields_present,
+        "excluded_default_input_fields": excluded_fields,
+        "uses_demographic_inputs": False,
     }
 
 

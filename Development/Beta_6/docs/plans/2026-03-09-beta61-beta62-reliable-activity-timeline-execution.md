@@ -571,13 +571,13 @@ git commit -m "feat: add beta62 intake governance and quarantine"
 
 **Files:**
 - Modify: `backend/ml/training.py`
-- Modify: `backend/ml/root_cause_analysis.py`
 - Modify: `backend/ml/room_experiments.py`
 - Modify: `backend/scripts/run_room_experiments.py`
 - Modify: `backend/ml/timeline_metrics.py`
 - Test: `backend/tests/test_training.py`
-- Test: `backend/tests/test_root_cause_analysis.py`
 - Test: `backend/tests/test_run_room_experiments.py`
+
+Branch-local execution note: this worktree does not contain `backend/ml/root_cause_analysis.py` or `backend/tests/test_root_cause_analysis.py`; grouped-regime summaries and fragile-room replay diagnostics are implemented through `room_experiments.py` and `timeline_metrics.py` in this branch.
 
 **Step 1: Write the failing tests**
 
@@ -595,7 +595,7 @@ def test_room_experiments_can_report_grouped_regime_stability(): ...
 Run:
 
 ```bash
-pytest backend/tests/test_training.py backend/tests/test_root_cause_analysis.py backend/tests/test_run_room_experiments.py -q
+pytest backend/tests/test_training.py backend/tests/test_run_room_experiments.py -q
 ```
 
 Expected: failure because grouped-by-date / grouped-by-user worst-slice gating is not yet first-class.
@@ -614,7 +614,7 @@ Add:
 Run:
 
 ```bash
-pytest backend/tests/test_training.py backend/tests/test_root_cause_analysis.py backend/tests/test_run_room_experiments.py -q
+pytest backend/tests/test_training.py backend/tests/test_run_room_experiments.py -q
 ```
 
 Expected: PASS
@@ -622,7 +622,7 @@ Expected: PASS
 **Step 5: Commit**
 
 ```bash
-git add backend/ml/training.py backend/ml/root_cause_analysis.py backend/ml/room_experiments.py backend/scripts/run_room_experiments.py backend/ml/timeline_metrics.py backend/tests/test_training.py backend/tests/test_root_cause_analysis.py backend/tests/test_run_room_experiments.py
+git add backend/ml/training.py backend/ml/room_experiments.py backend/scripts/run_room_experiments.py backend/ml/timeline_metrics.py backend/tests/test_training.py backend/tests/test_run_room_experiments.py
 git commit -m "feat: add beta62 grouped regime robustness gates"
 ```
 

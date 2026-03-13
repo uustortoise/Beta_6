@@ -48,6 +48,57 @@ class TimelineMetrics:
         }
 
 
+def summarize_grouped_metric_slices(
+    slice_metrics: List[Dict[str, Any]] | None,
+    *,
+    slice_key: str,
+    metric_key: str = "macro_f1",
+) -> Dict[str, Any]:
+    """Summarize grouped-slice metrics for replay diagnostics and fragile-room gating."""
+    normalized_rows: List[Dict[str, Any]] = []
+    for raw_row in slice_metrics or []:
+        if not isinstance(raw_row, dict):
+            continue
+        slice_value = str(raw_row.get(slice_key) or "").strip()
+        metric_value = raw_row.get(metric_key)
+        if not slice_value or metric_value is None:
+            continue
+        try:
+            metric_float = float(metric_value)
+        except (TypeError, ValueError):
+            continue
+        normalized_rows.append({"slice": slice_value, metric_key: metric_float})
+
+    summary: Dict[str, Any] = {
+        "slice_key": str(slice_key),
+        "metric_key": str(metric_key),
+        "slice_count": len(normalized_rows),
+    }
+    if not normalized_rows:
+        return summary
+
+    worst_row = min(
+        normalized_rows,
+        key=lambda row: (float(row.get(metric_key, float("inf"))), str(row.get("slice", ""))),
+    )
+    best_row = max(
+        normalized_rows,
+        key=lambda row: (float(row.get(metric_key, float("-inf"))), str(row.get("slice", ""))),
+    )
+    metric_values = [float(row[metric_key]) for row in normalized_rows]
+    summary.update(
+        {
+            "worst_slice": str(worst_row["slice"]),
+            f"worst_slice_{metric_key}": round(float(worst_row[metric_key]), 4),
+            "best_slice": str(best_row["slice"]),
+            f"best_slice_{metric_key}": round(float(best_row[metric_key]), 4),
+            f"mean_{metric_key}": round(float(np.mean(metric_values)), 4),
+            f"range_{metric_key}": round(float(max(metric_values) - min(metric_values)), 4),
+        }
+    )
+    return summary
+
+
 def compute_fragmentation_rate(
     pred_episodes: List[Dict[str, Any]],
     gt_episodes: List[Dict[str, Any]],

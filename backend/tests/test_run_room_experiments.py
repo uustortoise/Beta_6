@@ -3,7 +3,10 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
-from ml.room_experiments import build_room_diagnostic_report
+from ml.room_experiments import (
+    build_grouped_regime_fragility_report,
+    build_room_diagnostic_report,
+)
 from scripts.run_room_experiments import (
     _build_manifest_payload,
     _resolve_profile_typed_policy_values,
@@ -85,3 +88,61 @@ def test_profile_env_overrides_are_applied_to_typed_policy_values():
     with patch.dict(os.environ, {"TWO_STAGE_CORE_GATE_MODE": "primary"}, clear=False):
         typed_values = _resolve_profile_typed_policy_values(profile)
     assert typed_values["two_stage_core.gate_mode"] == "shadow"
+
+
+def test_grouped_by_date_summary_emits_worst_date_and_range():
+    grouped = build_grouped_regime_fragility_report(
+        grouped_by_date_slices=[
+            {"date": "2026-03-05", "macro_f1": 0.61},
+            {"date": "2026-03-06", "macro_f1": 0.44},
+            {"date": "2026-03-07", "macro_f1": 0.12},
+        ]
+    )
+
+    summary = grouped["grouped_by_date"]
+    assert summary["worst_slice"] == "2026-03-07"
+    assert summary["worst_slice_macro_f1"] == 0.12
+    assert summary["best_slice"] == "2026-03-05"
+    assert summary["range_macro_f1"] == 0.49
+
+
+def test_grouped_by_user_summary_emits_worst_user_and_range():
+    grouped = build_grouped_regime_fragility_report(
+        grouped_by_user_slices=[
+            {"user": "HK0011_jessica", "macro_f1": 0.71},
+            {"user": "HK0012_sam", "macro_f1": 0.27},
+            {"user": "HK0013_mary", "macro_f1": 0.63},
+        ]
+    )
+
+    summary = grouped["grouped_by_user"]
+    assert summary["worst_slice"] == "HK0012_sam"
+    assert summary["worst_slice_macro_f1"] == 0.27
+    assert summary["best_slice"] == "HK0011_jessica"
+    assert summary["range_macro_f1"] == 0.44
+
+
+def test_room_experiments_can_report_grouped_regime_stability():
+    grouped = build_grouped_regime_fragility_report(
+        grouped_by_date_slices=[
+            {"date": "2026-03-05", "macro_f1": 0.61},
+            {"date": "2026-03-07", "macro_f1": 0.12},
+        ],
+        grouped_by_user_slices=[
+            {"user": "HK0011_jessica", "macro_f1": 0.45},
+            {"user": "HK0012_sam", "macro_f1": 0.41},
+        ],
+        fragile_room_floor=0.20,
+    )
+
+    report = build_room_diagnostic_report(
+        room_name="Bedroom",
+        profile_name="bedroom_grouped_fragility",
+        profile_payload={"room": "bedroom", "grouped_regime": "grouped_by_date"},
+        typed_policy_values={},
+        grouped_fragility=grouped,
+    )
+
+    assert report["fragility"]["stability_gate"]["pass"] is False
+    assert report["fragility"]["stability_gate"]["failures"][0]["regime"] == "grouped_by_date"
+    assert report["fragility"]["stability_gate"]["failures"][0]["worst_slice"] == "2026-03-07"

@@ -2810,6 +2810,56 @@ class TrainingPipeline:
             return "conditional"
         return "pass"
 
+    @staticmethod
+    def _evaluate_grouped_regime_gate(
+        *,
+        room_name: str,
+        grouped_fragility: Mapping[str, Any] | None,
+    ) -> Dict[str, Any]:
+        gate_report: Dict[str, Any] = {
+            "pass": True,
+            "blocking_reasons": [],
+            "failures": [],
+        }
+        payload = grouped_fragility if isinstance(grouped_fragility, Mapping) else {}
+        stability_gate = payload.get("stability_gate")
+        if not isinstance(stability_gate, Mapping):
+            return gate_report
+
+        room_token = normalize_room_name(room_name)
+        blocking_reasons: List[str] = []
+        failures: List[Dict[str, Any]] = []
+        for raw_failure in stability_gate.get("failures") or []:
+            if not isinstance(raw_failure, Mapping):
+                continue
+            regime = str(raw_failure.get("regime") or "unknown").strip().lower()
+            worst_slice = str(raw_failure.get("worst_slice") or "unknown").strip() or "unknown"
+            try:
+                worst_slice_macro_f1 = float(raw_failure.get("worst_slice_macro_f1"))
+                floor = float(raw_failure.get("floor"))
+            except (TypeError, ValueError):
+                continue
+            failures.append(
+                {
+                    "regime": regime,
+                    "worst_slice": worst_slice,
+                    "worst_slice_macro_f1": round(worst_slice_macro_f1, 4),
+                    "floor": round(floor, 4),
+                }
+            )
+            blocking_reasons.append(
+                "fragile_grouped_regime_floor_failed:"
+                f"{room_token}:{regime}:{worst_slice}:{worst_slice_macro_f1:.3f}<{floor:.3f}"
+            )
+
+        explicit_pass = bool(stability_gate.get("pass", not failures))
+        if not explicit_pass and not blocking_reasons:
+            blocking_reasons.append(f"fragile_grouped_regime_gate_failed:{room_token}")
+        gate_report["pass"] = bool(explicit_pass and not failures)
+        gate_report["blocking_reasons"] = blocking_reasons
+        gate_report["failures"] = failures
+        return gate_report
+
     def _resolve_room_runtime_topology_expectation(
         self,
         *,
@@ -6725,6 +6775,20 @@ class TrainingPipeline:
             gate_watch_reasons = list(
                 dict.fromkeys(str(r) for r in (self._last_release_gate_watch_reasons or []) if str(r).strip())
             )
+            grouped_regime_gate = self._evaluate_grouped_regime_gate(
+                room_name=room_name,
+                grouped_fragility=metrics.get("grouped_fragility"),
+            )
+            metrics["grouped_regime_gate"] = dict(grouped_regime_gate)
+            if not bool(grouped_regime_gate.get("pass", True)):
+                gate_pass = False
+                gate_reasons.extend(
+                    [
+                        str(reason).strip()
+                        for reason in grouped_regime_gate.get("blocking_reasons", [])
+                        if str(reason).strip()
+                    ]
+                )
 
             # Lane B: Event gate hardening on per-label holdout metrics.
             lane_b_gate_pass, lane_b_reasons, lane_b_gate_report = self._evaluate_lane_b_event_gates(

@@ -268,6 +268,27 @@
   - green phase: `PYTHONPATH=backend pytest backend/tests/test_beta6_data_manifest.py -q -k "filename_date_tags or duplicate_governance"` -> 2 passed, 7 deselected, 3 warnings
   - regression sweep: `PYTHONPATH=backend pytest backend/tests/test_build_pretrain_corpus_manifest_script.py backend/tests/test_beta6_data_manifest.py backend/tests/test_beta6_intake_gate.py backend/tests/test_beta6_intake_precheck.py backend/tests/test_beta6_self_supervised_pretrain.py backend/tests/test_beta6_trainer_intake_gate.py -q` -> 32 passed, 3 warnings
   - syntax: `python3 -m py_compile backend/ml/beta6/data/data_manifest.py backend/tests/test_beta6_data_manifest.py` -> passed
+2026-03-13 10:13:43 UTC | TASK-24 | Add Beta 6.2 grouped-regime robustness summaries and fragile-room worst-slice gates
+- Context: Task 10 needed grouped-by-date and grouped-by-user worst-slice diagnostics to become first-class in replay artifacts and fragile-room gating, but this branch had no `root_cause_analysis.py`; the actual seams were `timeline_metrics.py`, `room_experiments.py`, `run_room_experiments.py`, and `training.py`.
+- Files changed:
+  - `backend/ml/timeline_metrics.py`
+  - `backend/ml/room_experiments.py`
+  - `backend/scripts/run_room_experiments.py`
+  - `backend/ml/training.py`
+  - `backend/tests/test_run_room_experiments.py`
+  - `backend/tests/test_training.py`
+  - `Development/Beta_6/docs/plans/2026-03-09-beta61-beta62-reliable-activity-timeline-execution.md`
+- Actions:
+  - added grouped-slice summarization in `timeline_metrics.py` to compute worst/best slice, mean macro-F1, and macro-F1 range for replay diagnostics
+  - added `build_grouped_regime_fragility_report(...)` in `room_experiments.py` to assemble grouped-by-date and grouped-by-user summaries plus a fragile-room stability gate payload
+  - extended `run_room_experiments.py` with structured grouped-date/user slice inputs and derived grouped-fragility payload resolution while preserving the existing raw `--grouped-fragility` input
+  - wired `TrainingPipeline._evaluate_grouped_regime_gate(...)` into the existing `gate_reasons` path so fragile rooms can fail closed on grouped worst-slice floor breaches without changing normal rooms
+  - corrected the Task 10 execution doc to match the actual branch-local module layout instead of the non-existent `root_cause_analysis.py` path
+- Verification:
+  - red phase: `PYTHONPATH=backend pytest backend/tests/test_training.py backend/tests/test_run_room_experiments.py -q` -> import failure for missing `build_grouped_regime_fragility_report` (expected missing grouped-regime surface before implementation)
+  - green phase: `PYTHONPATH=backend pytest backend/tests/test_training.py backend/tests/test_run_room_experiments.py -q` -> 113 passed, 3 warnings
+  - regression sweep: `PYTHONPATH=backend pytest backend/tests/test_run_room_experiments.py backend/tests/test_training.py backend/tests/test_timeline_metrics.py -q` -> 135 passed, 3 warnings
+  - syntax: `python3 -m py_compile backend/ml/timeline_metrics.py backend/ml/room_experiments.py backend/scripts/run_room_experiments.py backend/ml/training.py backend/tests/test_run_room_experiments.py backend/tests/test_training.py` -> passed
 2026-03-13 09:17:33 UTC | TASK-22 | Fix Task 7 review regressions in registry alias strictness and certification-status visibility
 - Context: review of `dcc4789` found two follow-up issues: registry repair was treating missing latest `*_decision_trace.json` aliases as mandatory and skipping otherwise loadable rooms, and the new `rejected_by_beta61_certification` training status was not counted or rendered consistently in ops/health/dashboard summaries.
 - Files changed:

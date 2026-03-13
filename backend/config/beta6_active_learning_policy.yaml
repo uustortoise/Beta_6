@@ -9,3 +9,7 @@ active_learning:
   max_share_per_room: 0.35
   max_share_per_class: 0.35
   random_seed: 42
+  correction_signal_boost: 0.55
+  boundary_signal_boost: 0.20
+  hard_negative_signal_boost: 0.20
+  residual_review_signal_boost: 0.10

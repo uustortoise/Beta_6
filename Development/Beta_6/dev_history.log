@@ -289,6 +289,26 @@
   - green phase: `PYTHONPATH=backend pytest backend/tests/test_training.py backend/tests/test_run_room_experiments.py -q` -> 113 passed, 3 warnings
   - regression sweep: `PYTHONPATH=backend pytest backend/tests/test_run_room_experiments.py backend/tests/test_training.py backend/tests/test_timeline_metrics.py -q` -> 135 passed, 3 warnings
   - syntax: `python3 -m py_compile backend/ml/timeline_metrics.py backend/ml/room_experiments.py backend/scripts/run_room_experiments.py backend/ml/training.py backend/tests/test_run_room_experiments.py backend/tests/test_training.py` -> passed
+2026-03-13 10:45:16 UTC | TASK-25 | Convert accepted corrections into Beta 6.2 learning signals
+- Context: Task 11 required the correction loop to emit training-ready supervision instead of only producing manual retrain files. The existing active-learning queue only understood uncertainty/disagreement/diversity and had no first-class notion of corrected events, boundary targets, hard negatives, or residual review context.
+- Files changed:
+  - `backend/services/correction_service.py`
+  - `backend/ml/beta6/training/active_learning.py`
+  - `backend/scripts/run_active_learning_triage.py`
+  - `backend/config/beta6_active_learning_policy.yaml`
+  - `backend/tests/test_beta6_active_learning.py`
+  - `backend/tests/test_run_active_learning_triage_script.py`
+  - `backend/tests/test_ui_services.py`
+- Actions:
+  - added `build_correction_learning_records(...)` to materialize accepted correction ranges as learning-ready event records with corrected-event flags, onset/offset targets, hard-negative labels, and residual review packs from nearby unresolved rows
+  - extended active-learning policy and queue normalization to carry correction-derived signal fields and compute `triage_priority_score` from uncertainty plus correction, boundary, hard-negative, and residual-review boosts
+  - updated queue selection ordering and stats so triage reports expose training signal counts and prioritize high-yield corrected segments ahead of plain uncertain windows
+  - extended the triage script output to print signal counts for operational runs
+  - added red/green coverage for correction-derived payloads, triage prioritization, script reporting, and correction-service training-ready exports
+- Verification:
+  - red phase: `PYTHONPATH=backend pytest backend/tests/test_beta6_active_learning.py backend/tests/test_run_active_learning_triage_script.py backend/tests/test_ui_services.py -q` -> import failure for missing `build_correction_learning_records`, then one sqlite timestamp binding failure during implementation
+  - green phase: `PYTHONPATH=backend pytest backend/tests/test_beta6_active_learning.py backend/tests/test_run_active_learning_triage_script.py backend/tests/test_ui_services.py -q` -> 40 passed, 42 warnings
+  - syntax: `python3 -m py_compile backend/services/correction_service.py backend/ml/beta6/training/active_learning.py backend/scripts/run_active_learning_triage.py backend/tests/test_beta6_active_learning.py backend/tests/test_run_active_learning_triage_script.py backend/tests/test_ui_services.py` -> passed
 2026-03-13 10:32:57 UTC | TASK-24 | Fix Task 10 review finding by scoping grouped-regime blocking to explicit fragile-room profiles
 - Context: review of `824c673` found that grouped worst-slice blocking in `TrainingPipeline._evaluate_grouped_regime_gate(...)` was payload-driven only; once wired, any room with grouped fragility diagnostics could be blocked. The intended behavior was to affect only explicitly configured fragile-room profiles.
 - Files changed:

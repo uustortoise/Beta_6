@@ -47,11 +47,18 @@ def main() -> int:
     report_json.write_text(json.dumps(result, indent=2), encoding="utf-8")
 
     stats = result.get("stats", {})
+    signal_counts = stats.get("training_signal_counts", {}) or {}
     print(f"Wrote triage queue: {output_csv}")
     print(f"Wrote triage report: {report_json}")
     print(
         f"Queue rows={stats.get('queue_rows', 0)} "
         f"input_rows={stats.get('input_rows', 0)}"
+    )
+    print(
+        "Training signals: "
+        f"corrected={signal_counts.get('corrected_event_rows', 0)} "
+        f"hard_negative={signal_counts.get('hard_negative_rows', 0)} "
+        f"residual_review={signal_counts.get('residual_review_rows', 0)}"
     )
     return 0 if str(result.get("status")) == "pass" else 2
 

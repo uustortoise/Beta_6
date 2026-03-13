@@ -175,3 +175,93 @@ def test_active_learning_refills_after_caps_to_hit_queue_target():
     assert result["status"] == "pass"
     assert len(queue) == policy.queue_size
     assert queue["room"].value_counts().max() <= int(policy.queue_size * policy.max_share_per_room)
+
+
+def test_accepted_corrections_emit_boundary_and_hard_negative_payloads():
+    frame = pd.DataFrame(
+        [
+            {
+                "candidate_id": "corr-1",
+                "room": "bedroom",
+                "activity": "sleep",
+                "confidence": 0.42,
+                "predicted_label": "nap",
+                "baseline_label": "sleep",
+                "corrected_event": True,
+                "boundary_start_target": 1,
+                "boundary_end_target": 1,
+                "hard_negative_flag": True,
+                "hard_negative_label": "nap",
+                "residual_review_flag": True,
+                "residual_review_rows": 2,
+            }
+        ]
+    )
+    policy = ActiveLearningPolicy(
+        queue_size=1,
+        uncertainty_fraction=1.0,
+        disagreement_fraction=0.0,
+        diversity_fraction=0.0,
+        max_share_per_room=1.0,
+        max_share_per_class=1.0,
+    )
+
+    result = build_active_learning_queue(frame, policy=policy)
+    queue = pd.DataFrame(result["queue"])
+
+    assert result["status"] == "pass"
+    assert bool(queue.iloc[0]["corrected_event"]) is True
+    assert int(queue.iloc[0]["boundary_start_target"]) == 1
+    assert int(queue.iloc[0]["boundary_end_target"]) == 1
+    assert bool(queue.iloc[0]["hard_negative_flag"]) is True
+    assert queue.iloc[0]["hard_negative_label"] == "nap"
+    assert float(queue.iloc[0]["triage_priority_score"]) > float(queue.iloc[0]["uncertainty_score"])
+
+
+def test_active_learning_triage_prioritizes_high_yield_segments():
+    frame = pd.DataFrame(
+        [
+            {
+                "candidate_id": "corr-1",
+                "room": "bedroom",
+                "activity": "sleep",
+                "confidence": 0.48,
+                "predicted_label": "nap",
+                "baseline_label": "sleep",
+                "corrected_event": True,
+                "boundary_start_target": 1,
+                "boundary_end_target": 1,
+                "hard_negative_flag": True,
+                "residual_review_flag": False,
+            },
+            {
+                "candidate_id": "plain-1",
+                "room": "bedroom",
+                "activity": "sleep",
+                "confidence": 0.30,
+                "predicted_label": "sleep",
+                "baseline_label": "sleep",
+                "corrected_event": False,
+                "boundary_start_target": 0,
+                "boundary_end_target": 0,
+                "hard_negative_flag": False,
+                "residual_review_flag": False,
+            },
+        ]
+    )
+    policy = ActiveLearningPolicy(
+        queue_size=2,
+        uncertainty_fraction=1.0,
+        disagreement_fraction=0.0,
+        diversity_fraction=0.0,
+        uncertainty_percentile=100.0,
+        max_share_per_room=1.0,
+        max_share_per_class=1.0,
+    )
+
+    result = build_active_learning_queue(frame, policy=policy)
+    queue = pd.DataFrame(result["queue"])
+
+    assert result["status"] == "pass"
+    assert list(queue["candidate_id"]) == ["corr-1", "plain-1"]
+    assert float(queue.iloc[0]["triage_priority_score"]) > float(queue.iloc[1]["triage_priority_score"])

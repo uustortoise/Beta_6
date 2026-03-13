@@ -7,6 +7,7 @@ from services.export_service import get_residents, export_predicted_results
 from services.audit_service import fetch_correction_trail, rollback_correction
 from services.correction_service import (
     apply_batch_corrections,
+    build_correction_learning_records,
     build_compare_timeline_payload,
     find_nearest_activity_date,
     get_activity_timeline,
@@ -978,6 +979,58 @@ def test_correction_service_apply_batch_corrections(test_db):
             (elder, room),
         ).fetchone()
         assert int(audit["cnt"]) == 1
+
+
+def test_correction_queue_outputs_training_ready_records(test_db):
+    elder = "HK_CORR_LEARN_1"
+    room = "bedroom"
+    record_day = date(2026, 3, 8)
+
+    with test_db.get_connection() as conn:
+        conn.execute("INSERT INTO elders (elder_id, full_name) VALUES (?, ?)", (elder, "Correction Learner"))
+        for ts, label, conf in [
+            ("2026-03-08 09:00:00", "low_confidence", 0.31),
+            ("2026-03-08 09:10:00", "low_confidence", 0.34),
+            ("2026-03-08 09:20:00", "unknown", 0.28),
+        ]:
+            conn.execute(
+                """
+                INSERT INTO adl_history
+                (elder_id, timestamp, room, activity_type, confidence, is_corrected, record_date, duration_minutes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (elder, ts, room, label, conf, 0, record_day.isoformat(), 10),
+            )
+        conn.commit()
+
+    success, _, count = save_correction(
+        elder,
+        room,
+        [
+            {"timestamp": "2026-03-08 09:00:00", "activity_type": "low_confidence"},
+            {"timestamp": "2026-03-08 09:10:00", "activity_type": "low_confidence"},
+        ],
+        "sleep",
+        "tester",
+    )
+    assert success
+    assert count == 2
+
+    records = build_correction_learning_records(elder, room, record_day)
+
+    assert len(records) == 1
+    record = records[0]
+    assert record["activity"] == "sleep"
+    assert record["predicted_label"] == "low_confidence"
+    assert record["baseline_label"] == "sleep"
+    assert record["corrected_event"] is True
+    assert record["boundary_start_target"] == 1
+    assert record["boundary_end_target"] == 1
+    assert record["hard_negative_flag"] is True
+    assert record["hard_negative_label"] == "low_confidence"
+    assert record["residual_review_flag"] is True
+    assert record["residual_review_rows"] == 1
+    assert record["residual_review_pack"]["rows"][0]["timestamp"] == "2026-03-08 09:20:00"
 
 
 def test_correction_service_preview_batch_detects_overlap(test_db):

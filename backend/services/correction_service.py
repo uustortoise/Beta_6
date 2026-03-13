@@ -96,6 +96,11 @@ def _majority_label(values: list[str], fallback: str = "unknown") -> str:
     return max(counter.items(), key=lambda item: item[1])[0]
 
 
+def _normalize_activity_token(value: object, fallback: str = "") -> str:
+    token = str(value or "").strip().lower()
+    return token or str(fallback or "").strip().lower()
+
+
 def _safe_rate(numerator: int, denominator: int) -> float | None:
     if int(denominator) <= 0:
         return None
@@ -1155,6 +1160,184 @@ def build_correction_training_file(elder_id: str, room: str, record_date: dt_dat
     with pd.ExcelWriter(out_path) as writer:
         training_df.to_excel(writer, sheet_name=safe_room[:31] or "room", index=False)
     return out_path
+
+
+def build_correction_learning_records(
+    elder_id: str,
+    room: str,
+    record_date: dt_date,
+    *,
+    confidence_threshold: float = 0.60,
+    context_minutes: int = 15,
+) -> list[dict]:
+    """
+    Convert accepted correction ranges into learning-ready event records for Beta 6.2 triage.
+    """
+    if not elder_id or not room:
+        return []
+
+    record_token = record_date.isoformat()
+    correction_df = query_df(
+        """
+        SELECT id, elder_id, room, timestamp_start, timestamp_end, old_activity, new_activity,
+               rows_affected, corrected_by, corrected_at
+        FROM correction_history
+        WHERE elder_id = ? AND """
+        + ROOM_MATCH_SQL
+        + """
+          AND (DATE(timestamp_start) = ? OR DATE(timestamp_end) = ?)
+        ORDER BY timestamp_start ASC, id ASC
+        """,
+        (elder_id, room, record_token, record_token),
+    )
+    if correction_df.empty:
+        return []
+
+    try:
+        detail_df = query_df(
+            """
+            SELECT correction_id, timestamp, old_activity, new_activity
+            FROM correction_history_detail
+            WHERE elder_id = ? AND """
+            + ROOM_MATCH_SQL
+            + """
+              AND DATE(timestamp) = ?
+            ORDER BY correction_id ASC, timestamp ASC
+            """,
+            (elder_id, room, record_token),
+        )
+    except Exception:
+        detail_df = pd.DataFrame()
+
+    learning_records: list[dict] = []
+    for _, corr in correction_df.iterrows():
+        correction_id = int(corr.get("id") or 0)
+        ts_start = pd.to_datetime(corr.get("timestamp_start"), errors="coerce")
+        ts_end = pd.to_datetime(corr.get("timestamp_end"), errors="coerce")
+        if pd.isna(ts_start) or pd.isna(ts_end):
+            continue
+        if ts_end < ts_start:
+            ts_end = ts_start
+        ts_start_str = _normalize_ts_str(ts_start)
+        ts_end_str = _normalize_ts_str(ts_end)
+        if not ts_start_str or not ts_end_str:
+            continue
+
+        corr_details = detail_df[detail_df.get("correction_id") == correction_id].copy() if not detail_df.empty else pd.DataFrame()
+        detail_old_values = (
+            corr_details.get("old_activity", pd.Series(dtype=object)).dropna().astype(str).tolist()
+            if not corr_details.empty
+            else []
+        )
+        detail_new_values = (
+            corr_details.get("new_activity", pd.Series(dtype=object)).dropna().astype(str).tolist()
+            if not corr_details.empty
+            else []
+        )
+        predicted_label = _normalize_activity_token(
+            _majority_label(detail_old_values, fallback=str(corr.get("old_activity") or "")),
+            fallback="unknown",
+        )
+        baseline_label = _normalize_activity_token(
+            _majority_label(detail_new_values, fallback=str(corr.get("new_activity") or "")),
+            fallback="inactive",
+        )
+
+        corrected_rows = query_df(
+            """
+            SELECT timestamp, activity_type, confidence
+            FROM adl_history
+            WHERE elder_id = ? AND """
+            + ROOM_MATCH_SQL
+            + """
+              AND timestamp >= ? AND timestamp <= ?
+              AND COALESCE(is_corrected, 0) = 1
+            ORDER BY timestamp ASC
+            """,
+            (elder_id, room, ts_start_str, ts_end_str),
+        )
+        corrected_confidence = pd.to_numeric(
+            corrected_rows.get("confidence", pd.Series(dtype=float)),
+            errors="coerce",
+        ).dropna()
+        if corrected_confidence.empty:
+            confidence = 0.5
+        else:
+            confidence = float(corrected_confidence.mean())
+
+        context_start = ts_start - timedelta(minutes=max(int(context_minutes), 0))
+        context_end = ts_end + timedelta(minutes=max(int(context_minutes), 0))
+        context_start_str = _normalize_ts_str(context_start)
+        context_end_str = _normalize_ts_str(context_end)
+        if not context_start_str or not context_end_str:
+            continue
+        residual_df = query_df(
+            """
+            SELECT timestamp, activity_type, confidence
+            FROM adl_history
+            WHERE elder_id = ? AND """
+            + ROOM_MATCH_SQL
+            + """
+              AND timestamp >= ? AND timestamp <= ?
+              AND COALESCE(is_corrected, 0) = 0
+              AND (
+                    (confidence IS NOT NULL AND confidence < ?)
+                 OR LOWER(COALESCE(activity_type, '')) IN ('low_confidence', 'unknown')
+              )
+            ORDER BY timestamp ASC
+            """,
+            (elder_id, room, context_start_str, context_end_str, float(confidence_threshold)),
+        )
+        residual_rows = []
+        if not residual_df.empty:
+            for _, residual in residual_df.iterrows():
+                residual_ts = _normalize_ts_str(residual.get("timestamp"))
+                if not residual_ts:
+                    continue
+                residual_rows.append(
+                    {
+                        "timestamp": residual_ts,
+                        "activity": _normalize_activity_token(residual.get("activity_type"), fallback="unknown"),
+                        "confidence": float(pd.to_numeric(residual.get("confidence"), errors="coerce"))
+                        if pd.notna(pd.to_numeric(residual.get("confidence"), errors="coerce"))
+                        else None,
+                    }
+                )
+
+        duration_minutes = max(0.0, (ts_end - ts_start).total_seconds() / 60.0)
+        hard_negative_flag = predicted_label != "" and predicted_label != baseline_label
+        learning_records.append(
+            {
+                "candidate_id": f"correction:{correction_id}",
+                "correction_id": correction_id,
+                "elder_id": str(elder_id),
+                "room": normalize_room_name(room),
+                "record_date": record_token,
+                "timestamp_start": _normalize_ts_str(ts_start),
+                "timestamp_end": _normalize_ts_str(ts_end),
+                "duration_minutes": round(float(duration_minutes), 4),
+                "activity": baseline_label,
+                "predicted_label": predicted_label,
+                "baseline_label": baseline_label,
+                "confidence": round(float(min(max(confidence, 0.0), 1.0)), 4),
+                "corrected_event": True,
+                "boundary_start_target": 1,
+                "boundary_end_target": 1,
+                "hard_negative_flag": bool(hard_negative_flag),
+                "hard_negative_label": predicted_label if hard_negative_flag else "",
+                "residual_review_flag": bool(residual_rows),
+                "residual_review_rows": int(len(residual_rows)),
+                "residual_review_pack": {
+                    "window_start": context_start_str,
+                    "window_end": context_end_str,
+                    "rows": residual_rows,
+                },
+                "source": "manual_correction",
+                "rows_affected": int(corr.get("rows_affected") or len(detail_old_values) or 0),
+            }
+        )
+
+    return learning_records
 
 
 def retrain_after_batch_corrections(

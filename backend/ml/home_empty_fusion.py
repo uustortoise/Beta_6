@@ -9,7 +9,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -28,6 +28,99 @@ class EntrancePenaltyStatus(Enum):
     NO_PENALTY = "no_penalty"
     RECENT_ENTRANCE = "recent_entrance"
     PENALTY_ACTIVE = "penalty_active"
+
+
+def _normalize_room_key(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return text.replace(" ", "_")
+
+
+def _normalize_household_type(value: Any) -> str:
+    token = str(value or "").strip().lower()
+    if token in {"multi", "multiple", "double", "couple", "family"}:
+        return "multi"
+    return "single"
+
+
+def _normalize_helper_presence(value: Any) -> str:
+    if isinstance(value, bool):
+        return "present" if value else "none"
+    token = str(value or "").strip().lower()
+    if token in {"present", "yes", "true", "1", "part_time", "full_time", "live_in"}:
+        return "present"
+    if token in {"none", "no", "false", "0", "absent"}:
+        return "none"
+    return "unknown"
+
+
+def _normalize_layout_topology(value: Any) -> Dict[str, Tuple[str, ...]]:
+    if not isinstance(value, Mapping):
+        return {}
+    out: Dict[str, Tuple[str, ...]] = {}
+    for room, neighbours in value.items():
+        room_key = _normalize_room_key(room)
+        if not room_key:
+            continue
+        if isinstance(neighbours, str):
+            neighbour_items = [neighbours]
+        elif isinstance(neighbours, (list, tuple, set)):
+            neighbour_items = list(neighbours)
+        else:
+            neighbour_items = []
+        normalized_neighbours: list[str] = []
+        for neighbour in neighbour_items:
+            key = _normalize_room_key(neighbour)
+            if key:
+                normalized_neighbours.append(key)
+        out[room_key] = tuple(sorted(set(normalized_neighbours)))
+    return out
+
+
+@dataclass(frozen=True)
+class ResidentHomeContext:
+    """Typed resident/home context contract for runtime arbitration."""
+
+    household_type: str
+    helper_presence: str
+    layout_topology: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
+    missing_required_fields: Tuple[str, ...] = field(default_factory=tuple)
+
+    @classmethod
+    def from_payload(cls, payload: Optional[Mapping[str, Any]]) -> "ResidentHomeContext":
+        source = payload if isinstance(payload, Mapping) else {}
+        has_helper_presence = "helper_presence" in source
+        has_layout_topology = "layout_topology" in source
+        household_type = _normalize_household_type(source.get("household_type"))
+        helper_presence = _normalize_helper_presence(source.get("helper_presence"))
+        layout_topology = _normalize_layout_topology(source.get("layout_topology"))
+
+        missing: list[str] = []
+        if (not has_helper_presence) or helper_presence == "unknown":
+            missing.append("helper_presence")
+        if (not has_layout_topology) or not layout_topology:
+            missing.append("layout_topology")
+
+        return cls(
+            household_type=household_type,
+            helper_presence=helper_presence,
+            layout_topology=layout_topology,
+            missing_required_fields=tuple(missing),
+        )
+
+    @property
+    def status(self) -> str:
+        return "complete" if not self.missing_required_fields else "incomplete"
+
+    def to_runtime_payload(self) -> Dict[str, Any]:
+        return {
+            "household_type": self.household_type,
+            "helper_presence": self.helper_presence,
+            "layout_topology": {
+                room: list(neighbours) for room, neighbours in self.layout_topology.items()
+            },
+            "missing_required_fields": list(self.missing_required_fields),
+            "status": self.status,
+        }
 
 
 @dataclass
@@ -56,6 +149,10 @@ class HomeEmptyConfig:
     max_uncertain_rate: float = 0.20  # Household coverage gate threshold
     max_prediction_age_seconds: float = 90.0  # Max age for nearest prediction matching
     alignment_tolerance_seconds: float = 15.0  # GT alignment tolerance for gate checks
+
+    # Resident/home context contract
+    resident_home_context: Optional[ResidentHomeContext] = None
+    require_resident_context: bool = False
     
     def validate(self) -> None:
         """Validate configuration."""
@@ -77,6 +174,15 @@ class HomeEmptyConfig:
             raise ValueError("alignment_tolerance_seconds must be >= 0")
         if self.expected_interval_seconds is not None and self.expected_interval_seconds <= 0:
             raise ValueError("expected_interval_seconds must be > 0 when provided")
+        if self.require_resident_context and self.resident_home_context is None:
+            raise ValueError("resident_home_context is required when require_resident_context=true")
+        if (
+            self.require_resident_context
+            and self.resident_home_context is not None
+            and self.resident_home_context.missing_required_fields
+        ):
+            missing = ", ".join(self.resident_home_context.missing_required_fields)
+            raise ValueError(f"resident_home_context missing required fields: {missing}")
 
 
 @dataclass
@@ -107,6 +213,11 @@ class HomeEmptyPrediction:
     # Entrance penalty info
     entrance_penalty_status: EntrancePenaltyStatus = EntrancePenaltyStatus.NO_PENALTY
     seconds_since_entrance: Optional[float] = None
+
+    # Context metadata for reliability reporting
+    context_household_type: Optional[str] = None
+    context_helper_presence: Optional[str] = None
+    context_contract_status: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -120,6 +231,9 @@ class HomeEmptyPrediction:
             "total_room_count": self.total_room_count,
             "entrance_penalty_status": self.entrance_penalty_status.value,
             "seconds_since_entrance": self.seconds_since_entrance,
+            "context_household_type": self.context_household_type,
+            "context_helper_presence": self.context_helper_presence,
+            "context_contract_status": self.context_contract_status,
         }
 
 
@@ -147,6 +261,10 @@ class HomeEmptyFusion:
     
     def __init__(self, config: Optional[HomeEmptyConfig] = None):
         self.config = config or HomeEmptyConfig()
+        if isinstance(self.config.resident_home_context, Mapping):
+            self.config.resident_home_context = ResidentHomeContext.from_payload(
+                self.config.resident_home_context
+            )
         self.config.validate()
         
         # State tracking
@@ -305,6 +423,11 @@ class HomeEmptyFusion:
         state, confidence = self._determine_home_state(
             occupied_count, unoccupied_count, unknown_count, total_rooms
         )
+        state, confidence = self._apply_context_arbitration(
+            state=state,
+            confidence=confidence,
+            room_states=room_states,
+        )
         
         # Update entrance tracking
         if entrance_signal:
@@ -316,6 +439,7 @@ class HomeEmptyFusion:
         
         # Check entrance penalty status
         penalty_status, seconds_since = self._check_entrance_penalty(timestamp)
+        context = self.config.resident_home_context
         
         return HomeEmptyPrediction(
             timestamp=timestamp,
@@ -328,6 +452,9 @@ class HomeEmptyFusion:
             total_room_count=total_rooms,
             entrance_penalty_status=penalty_status,
             seconds_since_entrance=seconds_since,
+            context_household_type=context.household_type if context else None,
+            context_helper_presence=context.helper_presence if context else None,
+            context_contract_status=context.status if context else None,
         )
     
     def _find_nearest_prediction(
@@ -454,6 +581,9 @@ class HomeEmptyFusion:
                 total_room_count=pred.total_room_count,
                 entrance_penalty_status=pred.entrance_penalty_status,
                 seconds_since_entrance=pred.seconds_since_entrance,
+                context_household_type=pred.context_household_type,
+                context_helper_presence=pred.context_helper_presence,
+                context_contract_status=pred.context_contract_status,
             )
             
             smoothed.append(smoothed_pred)
@@ -474,6 +604,37 @@ class HomeEmptyFusion:
         if not np.isfinite(median_diff) or median_diff <= 0:
             return 10.0
         return median_diff
+
+    def _apply_context_arbitration(
+        self,
+        *,
+        state: HomeEmptyState,
+        confidence: float,
+        room_states: List[RoomState],
+    ) -> Tuple[HomeEmptyState, float]:
+        """
+        Apply resident/home context contract only for arbitration, not label generation.
+        """
+        context = self.config.resident_home_context
+        if context is None or state != HomeEmptyState.EMPTY:
+            return state, confidence
+
+        # Multi-resident/helper households require stronger unoccupied consensus.
+        if context.household_type == "multi" or context.helper_presence == "present":
+            confident_unoccupied = sum(
+                1 for room in room_states if (not room.is_occupied and float(room.confidence) >= 0.5)
+            )
+            required = max(2, int(self.config.min_rooms_for_consensus))
+            if confident_unoccupied < required:
+                return HomeEmptyState.UNCERTAIN, min(float(confidence), 0.49)
+
+        # If topology exists, require at least one observed room to map into it.
+        if context.layout_topology:
+            observed_rooms = {_normalize_room_key(room.room_name) for room in room_states}
+            if not (observed_rooms & set(context.layout_topology.keys())):
+                return HomeEmptyState.UNCERTAIN, min(float(confidence), 0.40)
+
+        return state, confidence
 
 
 class HouseholdGate:

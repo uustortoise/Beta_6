@@ -42,6 +42,60 @@ def _as_mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def _normalize_room_key(value: Any) -> str:
+    return str(value or "").strip().lower().replace(" ", "_")
+
+
+def _resolve_transition_policy_for_context(
+    *,
+    policy: TransitionPolicy,
+    room_name: str | None = None,
+    resident_home_context: Optional[Mapping[str, Any]] = None,
+) -> TransitionPolicy:
+    """
+    Apply resident/home context as deterministic policy adjustments.
+    This path must depend only on explicit payload, never environment reads.
+    """
+    context = _as_mapping(resident_home_context)
+    if not context:
+        return policy
+
+    switch_penalty = float(policy.switch_penalty)
+    self_transition_bias = float(policy.self_transition_bias)
+    impossible_transition_penalty = float(policy.impossible_transition_penalty)
+    step_minutes = float(policy.step_minutes)
+
+    household_type = _norm(context.get("household_type"))
+    if household_type in {"multi", "multiple", "double"}:
+        switch_penalty *= 1.10
+
+    helper_presence = _norm(context.get("helper_presence"))
+    if helper_presence in {"present", "yes", "true", "1", "part_time", "full_time"}:
+        switch_penalty *= 1.08
+
+    layout_topology = _as_mapping(context.get("layout_topology"))
+    room_key = _normalize_room_key(room_name)
+    neighbours_raw = layout_topology.get(room_key)
+    if isinstance(neighbours_raw, str):
+        neighbours = [_normalize_room_key(neighbours_raw)]
+    elif isinstance(neighbours_raw, Sequence):
+        neighbours = [_normalize_room_key(item) for item in neighbours_raw]
+    else:
+        neighbours = []
+    neighbours = [item for item in neighbours if item]
+    if neighbours:
+        connectivity = min(len(set(neighbours)), 4)
+        switch_penalty *= max(0.85, 1.0 - (0.03 * float(connectivity)))
+        self_transition_bias += min(0.04, 0.01 * float(connectivity))
+
+    return TransitionPolicy(
+        switch_penalty=switch_penalty,
+        impossible_transition_penalty=impossible_transition_penalty,
+        self_transition_bias=self_transition_bias,
+        step_minutes=step_minutes,
+    )
+
+
 def load_duration_prior_policy(path: str | Path | None) -> DurationPriorPolicy:
     policy_path = (
         Path(path).resolve()
@@ -107,17 +161,24 @@ def build_transition_log_matrix(
     *,
     allowed_map: Optional[Mapping[Tuple[str, str], bool]] = None,
     policy: TransitionPolicy = TransitionPolicy(),
+    room_name: str | None = None,
+    resident_home_context: Optional[Mapping[str, Any]] = None,
 ) -> np.ndarray:
     normalized = [_norm(label) for label in labels]
     n = len(normalized)
     if n == 0:
         raise ValueError("labels must not be empty")
-    matrix = np.full((n, n), -float(policy.switch_penalty), dtype=np.float64)
+    effective_policy = _resolve_transition_policy_for_context(
+        policy=policy,
+        room_name=room_name,
+        resident_home_context=resident_home_context,
+    )
+    matrix = np.full((n, n), -float(effective_policy.switch_penalty), dtype=np.float64)
     for i in range(n):
-        matrix[i, i] += float(policy.self_transition_bias)
+        matrix[i, i] += float(effective_policy.self_transition_bias)
 
     if allowed_map:
-        impossible = -float(policy.impossible_transition_penalty)
+        impossible = -float(effective_policy.impossible_transition_penalty)
         for i, src in enumerate(normalized):
             for j, dst in enumerate(normalized):
                 if not bool(allowed_map.get((src, dst), True)):
@@ -164,4 +225,5 @@ __all__ = [
     "build_transition_log_matrix",
     "duration_log_penalty",
     "load_duration_prior_policy",
+    "_resolve_transition_policy_for_context",
 ]

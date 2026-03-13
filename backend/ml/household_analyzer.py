@@ -4,6 +4,9 @@ import numpy as np
 import json
 from pathlib import Path
 from datetime import datetime, timedelta
+from typing import Any, Mapping
+
+from ml.home_empty_fusion import ResidentHomeContext
 
 # Configuration
 from config import DB_PATH
@@ -28,7 +31,9 @@ class HouseholdAnalyzer:
             'empty_home_silence_threshold_min': 15,
             'empty_home_ignore_rooms': [],
             'enable_empty_home_detection': True,
-            'household_type': 'single'  # 'single' or 'double'
+            'household_type': 'single',  # normalized: single/multi
+            'helper_presence': 'unknown',
+            'layout_topology': {},
         }
         
         try:
@@ -50,11 +55,70 @@ class HouseholdAnalyzer:
                     elif key == 'enable_empty_home_detection':
                         config[key] = (val.lower() == 'true')
                     elif key == 'household_type':
-                        config[key] = val.lower()
+                        token = str(val or "").strip().lower()
+                        config[key] = 'multi' if token in {'multi', 'multiple', 'double', 'couple'} else 'single'
+                    elif key == 'helper_presence':
+                        token = str(val or "").strip().lower()
+                        if token in {'present', 'yes', 'true', '1', 'part_time', 'full_time', 'live_in'}:
+                            config[key] = 'present'
+                        elif token in {'none', 'no', 'false', '0', 'absent'}:
+                            config[key] = 'none'
+                        else:
+                            config[key] = 'unknown'
+                    elif key == 'layout_topology':
+                        try:
+                            parsed = json.loads(val)
+                        except Exception:
+                            parsed = {}
+                        config[key] = parsed if isinstance(parsed, dict) else {}
                 return config
         except Exception as e:
             logger.error(f"Failed to load config: {e}")
             return defaults
+
+    def get_resident_home_context_contract(
+        self,
+        elder_id: str | None = None,
+        profile_context: Mapping[str, Any] | None = None,
+    ) -> dict:
+        """
+        Return explicit typed resident/home context and missing-field diagnostics.
+        """
+        profile = profile_context if isinstance(profile_context, Mapping) else {}
+        config = self.get_config()
+
+        payload: dict[str, Any] = {}
+        sources: dict[str, str] = {}
+        for field in ("household_type", "helper_presence", "layout_topology"):
+            profile_value = profile.get(field)
+            if profile_value not in (None, "", {}, []):
+                payload[field] = profile_value
+                sources[field] = "profile"
+            else:
+                payload[field] = config.get(field)
+                sources[field] = "household_config"
+
+        context = ResidentHomeContext.from_payload(payload)
+        missing = list(context.missing_required_fields)
+        status = "ready" if not missing else "incomplete"
+        message = (
+            "Resident/home context contract is complete."
+            if not missing
+            else f"Missing required context fields: {', '.join(missing)}"
+        )
+
+        return {
+            "elder_id": str(elder_id or "").strip() or None,
+            "status": status,
+            "household_type": context.household_type,
+            "helper_presence": context.helper_presence,
+            "layout_topology": {
+                room: list(neighbours) for room, neighbours in context.layout_topology.items()
+            },
+            "missing_required_fields": missing,
+            "message": message,
+            "source": sources,
+        }
 
     def apply_conflict_resolution(self, df_min: pd.DataFrame) -> pd.DataFrame:
         """
@@ -202,7 +266,7 @@ class HouseholdAnalyzer:
                     return
 
                 # 2b. Apply Conflict Resolution for DOUBLE households
-                if config.get('household_type', 'single') == 'double':
+                if config.get('household_type', 'single') == 'multi':
                     logger.info("Applying Double-Household Conflict Resolution...")
                     df_min = self.apply_conflict_resolution(df_min)
 

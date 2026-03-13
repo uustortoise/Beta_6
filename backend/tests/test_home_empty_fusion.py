@@ -8,6 +8,7 @@ import sys
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 import numpy as np
@@ -22,9 +23,11 @@ from ml.home_empty_fusion import (
     HomeEmptyPrediction,
     HomeEmptyState,
     HouseholdGate,
+    ResidentHomeContext,
     RoomState,
     fuse_home_empty_predictions,
 )
+from ml.beta6.sequence.transition_builder import TransitionPolicy, build_transition_log_matrix
 
 
 class TestHomeEmptyConfig(unittest.TestCase):
@@ -52,6 +55,45 @@ class TestHomeEmptyConfig(unittest.TestCase):
         config = HomeEmptyConfig(min_precision=1.5)
         
         with self.assertRaises(ValueError):
+            config.validate()
+
+    def test_single_vs_multi_resident_context_is_typed_and_explicit(self):
+        """Context contract should normalize and type household + helper + layout fields."""
+        single = ResidentHomeContext.from_payload(
+            {
+                "household_type": "single",
+                "helper_presence": False,
+                "layout_topology": {"bedroom": ["entrance"]},
+            }
+        )
+        self.assertEqual(single.household_type, "single")
+        self.assertEqual(single.helper_presence, "none")
+        self.assertEqual(single.layout_topology["bedroom"], ("entrance",))
+        self.assertEqual(single.missing_required_fields, ())
+
+        multi = ResidentHomeContext.from_payload(
+            {
+                "household_type": "double",
+                "helper_presence": "part_time",
+                "layout_topology": {"bedroom": ["entrance", "livingroom"]},
+            }
+        )
+        self.assertEqual(multi.household_type, "multi")
+        self.assertEqual(multi.helper_presence, "present")
+        self.assertEqual(multi.layout_topology["bedroom"], ("entrance", "livingroom"))
+        self.assertEqual(multi.missing_required_fields, ())
+
+    def test_missing_required_context_is_reported_clearly(self):
+        """Strict mode must report exactly which context fields are missing."""
+        partial = ResidentHomeContext.from_payload({"household_type": "single"})
+        config = HomeEmptyConfig(
+            resident_home_context=partial,
+            require_resident_context=True,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "resident_home_context missing required fields: helper_presence, layout_topology",
+        ):
             config.validate()
 
 
@@ -226,6 +268,30 @@ class TestHomeEmptyFusion(unittest.TestCase):
         self.assertEqual(len(predictions), 1)
         # Home is occupied if ANY room is occupied
         self.assertEqual(predictions[0].state, HomeEmptyState.OCCUPIED)
+
+    def test_layout_context_reaches_transition_builder_without_env_reads(self):
+        """Transition policy should consume explicit layout context payload only."""
+        labels = ["sleep", "bedroom_normal_use", "unoccupied"]
+        policy = TransitionPolicy(switch_penalty=0.20, self_transition_bias=0.03)
+        baseline = build_transition_log_matrix(labels, policy=policy)
+
+        context = ResidentHomeContext.from_payload(
+            {
+                "household_type": "multi",
+                "helper_presence": "present",
+                "layout_topology": {"bedroom": ["entrance", "livingroom", "toilet"]},
+            }
+        )
+
+        with patch("os.getenv", side_effect=AssertionError("env access is not allowed")):
+            contextual = build_transition_log_matrix(
+                labels,
+                policy=policy,
+                room_name="bedroom",
+                resident_home_context=context.to_runtime_payload(),
+            )
+
+        self.assertFalse(np.allclose(baseline, contextual))
     
     def test_entrance_penalty(self):
         """Test entrance penalty logic."""

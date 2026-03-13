@@ -146,6 +146,28 @@
   - replay CLI now applies profile `env_overrides` to the policy used for typed-policy value resolution before building manifest output
   - added regression tests for all three review findings (writer/reader integration, stale alias guard, override application)
 - Verification:
-  - `PYTHONPATH=backend pytest backend/tests/test_training.py backend/tests/test_run_room_experiments.py -q -k "runtime_enabled_flag or stale_latest_two_stage_meta_alias or profile_env_overrides_are_applied_to_typed_policy_values or livingroom_replay_candidate_is_traceable_to_typed_policy_fields or bedroom_grouped_date_fragility"` -> 6 passed
-  - `PYTHONPATH=backend pytest backend/tests/test_training.py backend/tests/test_run_room_experiments.py backend/tests/test_policy_config.py -q` -> 126 passed, 3 warnings
-  - `python3 -m py_compile backend/ml/training.py backend/scripts/run_room_experiments.py backend/tests/test_training.py backend/tests/test_run_room_experiments.py` -> passed
+ - `PYTHONPATH=backend pytest backend/tests/test_training.py backend/tests/test_run_room_experiments.py -q -k "runtime_enabled_flag or stale_latest_two_stage_meta_alias or profile_env_overrides_are_applied_to_typed_policy_values or livingroom_replay_candidate_is_traceable_to_typed_policy_fields or bedroom_grouped_date_fragility"` -> 6 passed
+ - `PYTHONPATH=backend pytest backend/tests/test_training.py backend/tests/test_run_room_experiments.py backend/tests/test_policy_config.py -q` -> 126 passed, 3 warnings
+ - `python3 -m py_compile backend/ml/training.py backend/scripts/run_room_experiments.py backend/tests/test_training.py backend/tests/test_run_room_experiments.py` -> passed
+2026-03-13 01:21:12 UTC | TASK-20 beta61-resident-home-context-contract | Added typed resident/home context contract plumbing for household fusion, transition policy arbitration, and health/dashboard reporting.
+- Code change:
+  - `backend/db/schema.sql`
+  - `backend/export_dashboard.py`
+  - `backend/health_server.py`
+  - `backend/ml/beta6/sequence/transition_builder.py`
+  - `backend/ml/home_empty_fusion.py`
+  - `backend/ml/household_analyzer.py`
+  - `backend/processors/profile_processor.py`
+  - `backend/tests/test_health_server.py`
+  - `backend/tests/test_home_empty_fusion.py`
+- Task outcome:
+  - introduced `ResidentHomeContext` typed contract (`household_type`, `helper_presence`, `layout_topology`) with explicit missing-field diagnostics
+  - added strict validation path in `HomeEmptyConfig` (`require_resident_context`) with deterministic failure reasons
+  - applied context-aware arbitration in home-empty fusion and propagated context metadata in fused outputs
+  - extended transition matrix builder to accept explicit resident/home context payload and room name (no env-derived behavior)
+  - added analyzer/profile helpers to normalize and report contract status; surfaced context completeness in health snapshot timeline reliability and household dashboard config
+  - added PostgreSQL schema table for resident/home context contract storage
+- Verification:
+  - `PYTHONPATH=backend pytest backend/tests/test_home_empty_fusion.py backend/tests/test_health_server.py -q` -> 51 passed, 3 warnings
+  - `PYTHONPATH=backend pytest backend/tests/test_beta6_hmm_duration_priors.py backend/tests/test_beta6_policy_config_schemas.py -q` -> 15 passed, 3 warnings
+  - `python3 -m py_compile backend/ml/home_empty_fusion.py backend/ml/beta6/sequence/transition_builder.py backend/ml/household_analyzer.py backend/processors/profile_processor.py backend/health_server.py backend/export_dashboard.py` -> passed

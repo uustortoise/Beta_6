@@ -19,6 +19,7 @@ from ml.evaluation import TimeCheckpointedSplitter, evaluate_model, load_room_tr
 from ml.policy_config import load_policy_from_env
 from ml.release_gates import resolve_scheduled_threshold
 from ml.household_analyzer import HouseholdAnalyzer
+from processors.profile_processor import ProfileProcessor
 from ml.hard_negative_mining import (
     ensure_hard_negative_table,
     fetch_hard_negative_queue,
@@ -5599,18 +5600,55 @@ with tab4:
     
     # Init Analyzer
     h_analyzer = HouseholdAnalyzer()
+    resident_ids = get_residents()
+    context_resident_id = resident_ids[0] if resident_ids else "resident_01"
+    profile_context = {}
+    try:
+        profile = ProfileProcessor(DATA_ROOT).load_profile(context_resident_id)
+        if isinstance(profile, dict):
+            profile_context = profile.get("resident_home_context", {})
+    except Exception:
+        profile_context = {}
     
     with col_config:
         st.subheader("⚙️ Rule Configuration")
         with st.form("household_config_form"):
             current_config = h_analyzer.get_config()
+            context_contract = h_analyzer.get_resident_home_context_contract(
+                elder_id=context_resident_id,
+                profile_context=profile_context if isinstance(profile_context, dict) else None,
+            )
+            missing_context_fields = context_contract.get("missing_required_fields", [])
+            if isinstance(missing_context_fields, list) and missing_context_fields:
+                st.warning(
+                    "Resident/home context contract is incomplete: "
+                    + ", ".join(str(item) for item in missing_context_fields if str(item))
+                )
+            else:
+                st.caption("Resident/home context contract is complete.")
             
             # Household Type Toggle (NEW)
+            current_household_type = str(current_config.get("household_type", "single")).strip().lower()
+            if current_household_type in {"double", "multi", "multiple", "couple"}:
+                current_household_type = "multi"
+            else:
+                current_household_type = "single"
             household_type = st.radio(
                 "Household Type",
-                options=['single', 'double'],
-                index=0 if current_config.get('household_type', 'single') == 'single' else 1,
-                help="Single = 1 elder. Double = 2 people (enables Conflict Resolution to filter out secondary person)."
+                options=['single', 'multi'],
+                index=0 if current_household_type == 'single' else 1,
+                help="Single = 1 elder. Multi = more than one resident/helper in the household."
+            )
+
+            helper_presence = st.selectbox(
+                "Domestic Helper Presence",
+                options=["unknown", "none", "present"],
+                index=["unknown", "none", "present"].index(
+                    str(current_config.get("helper_presence", "unknown")).strip().lower()
+                    if str(current_config.get("helper_presence", "unknown")).strip().lower() in {"unknown", "none", "present"}
+                    else "unknown"
+                ),
+                help="Used for household arbitration and reliability diagnostics.",
             )
             
             enable_detection = st.checkbox("Enable Empty Home Detection", value=current_config.get('enable_empty_home_detection', True))
@@ -5642,21 +5680,38 @@ with tab4:
                 default=[r for r in default_ignored if r in all_rooms],
                 help="Rooms where activity should NOT prevent 'Empty Home' status (e.g. Basement, Garage)"
             )
+
+            layout_topology_default = current_config.get("layout_topology", {})
+            if not isinstance(layout_topology_default, dict):
+                layout_topology_default = {}
+            layout_topology_json = st.text_area(
+                "Layout Topology (JSON adjacency)",
+                value=json.dumps(layout_topology_default, indent=2, sort_keys=True),
+                height=120,
+                help="Example: {\"bedroom\": [\"entrance\", \"livingroom\"]}",
+            )
             
             save_config = st.form_submit_button("💾 Save Configuration")
     
     if save_config:
         # Save to DB
         try:
+            parsed_layout = json.loads(layout_topology_json or "{}")
+            if not isinstance(parsed_layout, dict):
+                raise ValueError("layout_topology must be a JSON object")
             with get_dashboard_connection() as conn:
                 conn.execute("INSERT OR REPLACE INTO household_config (key, value) VALUES (?, ?)", 
                              ('household_type', household_type))
+                conn.execute("INSERT OR REPLACE INTO household_config (key, value) VALUES (?, ?)",
+                             ('helper_presence', helper_presence))
                 conn.execute("INSERT OR REPLACE INTO household_config (key, value) VALUES (?, ?)", 
                              ('enable_empty_home_detection', str(enable_detection).lower()))
                 conn.execute("INSERT OR REPLACE INTO household_config (key, value) VALUES (?, ?)", 
                              ('empty_home_silence_threshold_min', str(silence_threshold)))
                 conn.execute("INSERT OR REPLACE INTO household_config (key, value) VALUES (?, ?)", 
                              ('empty_home_ignore_rooms', json.dumps(ignored_rooms)))
+                conn.execute("INSERT OR REPLACE INTO household_config (key, value) VALUES (?, ?)",
+                             ('layout_topology', json.dumps(parsed_layout)))
                 conn.commit()
             st.success("Configuration saved!")
         except Exception as e:

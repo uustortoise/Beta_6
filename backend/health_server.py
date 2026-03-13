@@ -828,6 +828,61 @@ def _resolve_authority_state() -> str:
     )
 
 
+def _resolve_resident_home_context_contract(elder_id: str) -> dict:
+    elder = str(elder_id or "").strip()
+    if not elder:
+        return {
+            "status": "not_available",
+            "message": "Missing elder_id for resident/home context contract.",
+            "missing_required_fields": ["helper_presence", "layout_topology"],
+            "household_type": "single",
+            "helper_presence": "unknown",
+            "layout_topology": {},
+        }
+    try:
+        try:
+            from backend.ml.household_analyzer import HouseholdAnalyzer
+        except Exception:
+            from ml.household_analyzer import HouseholdAnalyzer
+        contract = HouseholdAnalyzer().get_resident_home_context_contract(elder_id=elder)
+    except Exception as exc:
+        return {
+            "status": "not_available",
+            "message": f"Resident/home context contract unavailable: {exc}",
+            "missing_required_fields": ["helper_presence", "layout_topology"],
+            "household_type": "single",
+            "helper_presence": "unknown",
+            "layout_topology": {},
+        }
+    if not isinstance(contract, dict):
+        return {
+            "status": "not_available",
+            "message": "Resident/home context contract unavailable.",
+            "missing_required_fields": ["helper_presence", "layout_topology"],
+            "household_type": "single",
+            "helper_presence": "unknown",
+            "layout_topology": {},
+        }
+
+    missing = contract.get("missing_required_fields")
+    missing_list = [str(item) for item in missing if str(item)] if isinstance(missing, list) else []
+    return {
+        "status": str(contract.get("status", "not_available")).strip() or "not_available",
+        "household_type": str(contract.get("household_type", "single")).strip() or "single",
+        "helper_presence": str(contract.get("helper_presence", "unknown")).strip() or "unknown",
+        "layout_topology": contract.get("layout_topology", {})
+        if isinstance(contract.get("layout_topology"), dict)
+        else {},
+        "missing_required_fields": missing_list,
+        "message": str(contract.get("message", "")).strip()
+        or (
+            "Resident/home context contract is complete."
+            if not missing_list
+            else f"Missing required context fields: {', '.join(missing_list)}"
+        ),
+    }
+
+
 def _extract_policy_sensitive_rooms(room_rows: list[dict]) -> list[str]:
     selected: set[str] = set()
     for row in room_rows if isinstance(room_rows, list) else []:
@@ -1062,6 +1117,7 @@ def build_ml_snapshot_report(
         timeline_reliability["authority_state"] = authority_state
         timeline_reliability["policy_sensitive_rooms"] = []
         timeline_reliability["active_system"] = str(os.getenv("ACTIVE_SYSTEM", "beta6")).strip() or "beta6"
+        timeline_reliability["resident_home_context"] = _resolve_resident_home_context_contract(elder_id)
         return {
             "elder_id": elder_id,
             "generated_at": generated_at,
@@ -1460,6 +1516,7 @@ def build_ml_snapshot_report(
     timeline_reliability["authority_state"] = authority_state
     timeline_reliability["policy_sensitive_rooms"] = _extract_policy_sensitive_rooms(rooms)
     timeline_reliability["active_system"] = str(os.getenv("ACTIVE_SYSTEM", "beta6")).strip() or "beta6"
+    timeline_reliability["resident_home_context"] = _resolve_resident_home_context_contract(elder_id)
 
     return {
         "elder_id": elder_id,

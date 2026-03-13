@@ -284,6 +284,18 @@ CREATE TABLE IF NOT EXISTS household_config (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 17b. Resident/Home Context Contract (typed household metadata)
+CREATE TABLE IF NOT EXISTS resident_home_context (
+    elder_id TEXT PRIMARY KEY REFERENCES elders(elder_id) ON DELETE CASCADE,
+    household_type TEXT NOT NULL DEFAULT 'single',
+    helper_presence TEXT NOT NULL DEFAULT 'unknown',
+    layout_topology JSONB NOT NULL DEFAULT '{}'::jsonb,
+    context_source JSONB,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_resident_home_context_helper
+ON resident_home_context(helper_presence);
+
 -- 18. Trajectory Events
 CREATE TABLE IF NOT EXISTS trajectory_events (
     id SERIAL PRIMARY KEY,

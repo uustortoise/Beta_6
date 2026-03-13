@@ -39,6 +39,7 @@ class ProfileProcessor:
         profile_path = self.get_elder_dir(elder_id) / "profile.json"
         
         # Ensure timestamp
+        self._normalize_resident_home_context(profile_data)
         profile_data['last_updated'] = datetime.now().isoformat()
         if 'id' not in profile_data:
             profile_data['id'] = elder_id
@@ -82,6 +83,85 @@ class ProfileProcessor:
                     })
         return residents
 
+    @staticmethod
+    def _normalize_resident_home_context(profile_data: Dict[str, Any]) -> Dict[str, Any]:
+        raw = profile_data.get("resident_home_context")
+        source = raw if isinstance(raw, dict) else {}
+
+        household_token = str(source.get("household_type", "single") or "").strip().lower()
+        household_type = "multi" if household_token in {"multi", "multiple", "double", "couple"} else "single"
+
+        helper_value = source.get("helper_presence", "unknown")
+        if isinstance(helper_value, bool):
+            helper_presence = "present" if helper_value else "none"
+        else:
+            helper_token = str(helper_value or "").strip().lower()
+            if helper_token in {"present", "yes", "true", "1", "part_time", "full_time", "live_in"}:
+                helper_presence = "present"
+            elif helper_token in {"none", "no", "false", "0", "absent"}:
+                helper_presence = "none"
+            else:
+                helper_presence = "unknown"
+
+        raw_layout = source.get("layout_topology")
+        normalized_layout: Dict[str, List[str]] = {}
+        if isinstance(raw_layout, dict):
+            for room, neighbors in raw_layout.items():
+                room_key = str(room or "").strip().lower().replace(" ", "_")
+                if not room_key:
+                    continue
+                if isinstance(neighbors, str):
+                    values = [neighbors]
+                elif isinstance(neighbors, list):
+                    values = neighbors
+                else:
+                    values = []
+                items: List[str] = []
+                for value in values:
+                    key = str(value or "").strip().lower().replace(" ", "_")
+                    if key:
+                        items.append(key)
+                normalized_layout[room_key] = sorted(set(items))
+
+        profile_data["resident_home_context"] = {
+            "household_type": household_type,
+            "helper_presence": helper_presence,
+            "layout_topology": normalized_layout,
+        }
+        return profile_data["resident_home_context"]
+
+    def get_resident_home_context(self, elder_id: str) -> Dict[str, Any]:
+        profile = self.load_profile(elder_id)
+        if not isinstance(profile, dict):
+            return {
+                "status": "not_available",
+                "household_type": "single",
+                "helper_presence": "unknown",
+                "layout_topology": {},
+                "missing_required_fields": ["helper_presence", "layout_topology"],
+                "message": "Profile missing; resident/home context contract unavailable.",
+            }
+
+        context = self._normalize_resident_home_context(profile)
+        missing: List[str] = []
+        if str(context.get("helper_presence", "unknown")).strip().lower() == "unknown":
+            missing.append("helper_presence")
+        if not isinstance(context.get("layout_topology"), dict) or not context.get("layout_topology"):
+            missing.append("layout_topology")
+
+        return {
+            "status": "ready" if not missing else "incomplete",
+            "household_type": context.get("household_type", "single"),
+            "helper_presence": context.get("helper_presence", "unknown"),
+            "layout_topology": context.get("layout_topology", {}),
+            "missing_required_fields": missing,
+            "message": (
+                "Resident/home context contract is complete."
+                if not missing
+                else f"Missing required context fields: {', '.join(missing)}"
+            ),
+        }
+
 
 
     def create_default_profile(self, elder_id: str):
@@ -98,6 +178,11 @@ class ProfileProcessor:
         profile["personal_info"]["age"] = 75
         profile["personal_info"]["gender"] = "Unknown"
         profile["system_metadata"]["created_at"] = datetime.now().isoformat()
+        profile["resident_home_context"] = {
+            "household_type": "single",
+            "helper_presence": "unknown",
+            "layout_topology": {},
+        }
         
         # Keep top-level analysis fields that the dashboard might rely on loosely for now
         # (Though we should migrate frontend to read from proper paths eventually)

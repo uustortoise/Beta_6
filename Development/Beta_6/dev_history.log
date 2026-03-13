@@ -348,3 +348,18 @@
   - green phase: `PYTHONPATH=backend pytest backend/tests/test_registry.py backend/tests/test_ui_services.py -k 'beta61_certification or validate_and_repair_skips_sync_when_aliases_already_match or load_models_for_elder' backend/tests/test_health_server.py -k 'beta61_certification or promotion_gate' -q` -> 4 passed, 79 deselected, 4 warnings
   - focused suites: `PYTHONPATH=backend pytest backend/tests/test_registry.py backend/tests/test_run_daily_analysis_beta6_authority.py backend/tests/test_ui_services.py backend/tests/test_health_server.py -q` -> 109 passed, 40 warnings
   - syntax: `python3 -m py_compile backend/ml/legacy/registry.py backend/services/ops_service.py backend/export_dashboard.py backend/health_server.py backend/tests/test_ui_services.py backend/tests/test_health_server.py` -> passed
+2026-03-13 11:05:11 UTC | TASK-26 | Fix Task 11 review gaps in correction-derived triage wiring and residual-review accounting
+- Context: review of `0fc3608` found that correction-derived learning records existed only as a helper and never entered the operational triage script, while queue stats undercounted residual-review load by summing boolean flags instead of unresolved rows.
+- Files changed:
+  - `backend/scripts/run_active_learning_triage.py`
+  - `backend/ml/beta6/training/active_learning.py`
+  - `backend/tests/test_run_active_learning_triage_script.py`
+  - `backend/tests/test_beta6_active_learning.py`
+- Actions:
+  - made `run_active_learning_triage.py` accept correction-derived sources directly via `--correction-elder-id`, `--correction-room`, and `--correction-date`, with optional threshold/context overrides
+  - allowed the script to build a queue from correction-derived learning records alone or to append them to a CSV candidate set before queue generation
+  - corrected `training_signal_counts.residual_review_rows` to sum actual `residual_review_rows` instead of counting flagged candidates
+  - added regressions covering correction-only CLI runs and residual-review row summation
+- Verification:
+  - red phase: `PYTHONPATH=backend pytest backend/tests/test_run_active_learning_triage_script.py -q -k correction` -> 1 failed, 2 deselected, 3 warnings; `PYTHONPATH=backend pytest backend/tests/test_beta6_active_learning.py -q -k residual_review_rows` -> 1 failed, 7 deselected, 3 warnings
+  - green phase: same commands -> 1 passed, 2 deselected, 3 warnings; 1 passed, 7 deselected, 3 warnings

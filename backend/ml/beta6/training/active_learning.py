@@ -426,7 +426,7 @@ def build_active_learning_queue(
         if not capped.empty
         else 0,
         "hard_negative_rows": int(capped["hard_negative_flag"].sum()) if not capped.empty else 0,
-        "residual_review_rows": int(capped["residual_review_flag"].sum()) if not capped.empty else 0,
+        "residual_review_rows": int(capped["residual_review_rows"].sum()) if not capped.empty else 0,
     }
     return {
         "status": "pass" if queue_rows else "fail",

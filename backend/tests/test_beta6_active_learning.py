@@ -265,3 +265,52 @@ def test_active_learning_triage_prioritizes_high_yield_segments():
     assert result["status"] == "pass"
     assert list(queue["candidate_id"]) == ["corr-1", "plain-1"]
     assert float(queue.iloc[0]["triage_priority_score"]) > float(queue.iloc[1]["triage_priority_score"])
+
+
+def test_active_learning_stats_sum_actual_residual_review_rows():
+    frame = pd.DataFrame(
+        [
+            {
+                "candidate_id": "corr-1",
+                "room": "bedroom",
+                "activity": "sleep",
+                "confidence": 0.22,
+                "predicted_label": "nap",
+                "baseline_label": "sleep",
+                "corrected_event": True,
+                "boundary_start_target": 1,
+                "boundary_end_target": 1,
+                "hard_negative_flag": True,
+                "residual_review_flag": True,
+                "residual_review_rows": 3,
+            },
+            {
+                "candidate_id": "corr-2",
+                "room": "livingroom",
+                "activity": "relaxing",
+                "confidence": 0.28,
+                "predicted_label": "out",
+                "baseline_label": "relaxing",
+                "corrected_event": True,
+                "boundary_start_target": 1,
+                "boundary_end_target": 1,
+                "hard_negative_flag": True,
+                "residual_review_flag": True,
+                "residual_review_rows": 2,
+            },
+        ]
+    )
+    policy = ActiveLearningPolicy(
+        queue_size=2,
+        uncertainty_fraction=1.0,
+        disagreement_fraction=0.0,
+        diversity_fraction=0.0,
+        uncertainty_percentile=100.0,
+        max_share_per_room=1.0,
+        max_share_per_class=1.0,
+    )
+
+    result = build_active_learning_queue(frame, policy=policy)
+
+    assert result["status"] == "pass"
+    assert result["stats"]["training_signal_counts"]["residual_review_rows"] == 5

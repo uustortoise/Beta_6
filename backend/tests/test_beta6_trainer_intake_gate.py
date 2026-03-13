@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import numpy as np
 
 from ml.beta6 import beta6_trainer
@@ -158,3 +161,36 @@ def test_trainer_rejects_multiple_modes(monkeypatch):
     )
     rc = beta6_trainer.main()
     assert rc == 2
+
+
+def test_tensor_reuse_is_disabled_when_inputs_change(tmp_path: Path):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "fingerprint": {"value": "manifest-fingerprint"},
+                "entries": [{"path": "/tmp/a.npy"}],
+                "stats": {"p0_violations": 0, "records_kept": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    config_a = tmp_path / "a.yaml"
+    config_b = tmp_path / "b.yaml"
+    config_a.write_text("pretrain:\n  embedding_dim: 4\n", encoding="utf-8")
+    config_b.write_text("pretrain:\n  embedding_dim: 8\n", encoding="utf-8")
+
+    context_a = beta6_trainer.build_pretrain_cache_context(
+        manifest_path=manifest_path,
+        config_path=config_a,
+        max_files=2,
+    )
+    context_b = beta6_trainer.build_pretrain_cache_context(
+        manifest_path=manifest_path,
+        config_path=config_b,
+        max_files=2,
+    )
+
+    assert context_a["manifest_fingerprint"] == context_b["manifest_fingerprint"]
+    assert context_a["policy_fingerprint"] != context_b["policy_fingerprint"]
+    assert context_a["cache_key"] != context_b["cache_key"]

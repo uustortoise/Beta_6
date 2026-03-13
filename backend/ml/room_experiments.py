@@ -37,6 +37,59 @@ def resolve_typed_policy_values(
     return resolved
 
 
+def build_candidate_execution_plan(
+    *,
+    candidates: list[Mapping[str, Any]] | None = None,
+    fast_replay: bool = False,
+) -> dict[str, Any]:
+    selected: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+
+    for index, raw_candidate in enumerate(candidates or []):
+        candidate = _as_mapping(raw_candidate)
+        candidate_name = str(
+            candidate.get("candidate_name")
+            or candidate.get("profile_name")
+            or f"candidate_{index + 1}"
+        ).strip().lower()
+        blockers = [
+            str(reason).strip()
+            for reason in candidate.get("early_blockers", [])
+            if str(reason).strip()
+        ]
+        stability_gate = _as_mapping(_as_mapping(candidate.get("grouped_fragility")).get("stability_gate"))
+        if stability_gate and stability_gate.get("pass") is False:
+            blockers.append("stability_gate_failed")
+
+        record = {
+            "candidate_name": candidate_name,
+            "typed_policy_values": dict(_as_mapping(candidate.get("typed_policy_values"))),
+        }
+        if blockers:
+            rejected.append(
+                {
+                    **record,
+                    "execution_mode": "rejected_early",
+                    "rejection_reasons": blockers,
+                }
+            )
+            continue
+
+        selected.append(
+            {
+                **record,
+                "execution_mode": "fast_replay" if fast_replay else "full_retrain",
+                "rejection_reasons": [],
+            }
+        )
+
+    return {
+        "fast_replay": bool(fast_replay),
+        "selected": selected,
+        "rejected": rejected,
+    }
+
+
 def build_room_diagnostic_report(
     *,
     room_name: str,
@@ -44,6 +97,7 @@ def build_room_diagnostic_report(
     profile_payload: Mapping[str, Any],
     typed_policy_values: Mapping[str, Any],
     grouped_fragility: Mapping[str, Any] | None = None,
+    candidate_execution_plan: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     profile = _as_mapping(profile_payload)
     report_room = normalize_room_name(room_name)
@@ -68,6 +122,7 @@ def build_room_diagnostic_report(
             if str(k).strip()
         },
         "fragility": dict(grouped_fragility or {}),
+        "candidate_execution_plan": dict(candidate_execution_plan or {}),
     }
 
 

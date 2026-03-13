@@ -13,6 +13,8 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from ml.beta6.data_manifest import CorpusManifestPolicy, build_pretrain_corpus_manifest  # noqa: E402
+from ml.beta6.feature_fingerprint import hash_json_payload  # noqa: E402
+from ml.beta6.feature_store import build_feature_sequence_cache_key  # noqa: E402
 
 
 def main() -> int:
@@ -54,8 +56,15 @@ def main() -> int:
 
     stats = manifest.get("stats", {})
     fingerprint = manifest.get("fingerprint", {}).get("value")
+    policy_fingerprint = hash_json_payload(manifest.get("policy", {}))
+    cache_seed = build_feature_sequence_cache_key(
+        manifest_fingerprint=str(fingerprint or ""),
+        policy_fingerprint=policy_fingerprint,
+        stage="pretrain_matrix",
+    )
     print(f"Wrote manifest: {output_path}")
     print(f"Fingerprint: {fingerprint}")
+    print(f"CacheSeed: {cache_seed}")
     print(
         "Stats: "
         f"files_scanned={stats.get('files_scanned', 0)} "

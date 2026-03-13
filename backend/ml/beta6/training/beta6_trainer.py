@@ -48,6 +48,9 @@ from ml.beta6.sequence.transition_builder import (
     TransitionPolicy,
     resolve_transition_policy_for_context,
 )
+from ml.beta6.data.data_manifest import load_manifest
+from ml.beta6.data.feature_fingerprint import hash_json_payload
+from ml.beta6.feature_store import build_feature_sequence_cache_key
 from ml.home_empty_fusion import ResidentHomeContext
 from ml.household_analyzer import (
     build_resident_home_context_contract,
@@ -57,7 +60,9 @@ from ml.timeline_targets import build_event_native_targets
 from ml.beta6.gates.intake_precheck import IntakeGateBlockedError, enforce_approved_intake_artifact
 from ml.beta6.training.fine_tune_safe_classes import run_safe_class_finetune
 from ml.beta6.training.self_supervised_pretrain import (
+    build_pretrain_policy_fingerprint,
     load_corpus_matrix,
+    load_pretrain_config,
     run_self_supervised_pretraining,
 )
 
@@ -294,6 +299,34 @@ def build_context_conditioning_bundle(
         "demographic_fields_present": demographic_fields_present,
         "excluded_default_input_fields": excluded_fields,
         "uses_demographic_inputs": False,
+    }
+
+
+def build_pretrain_cache_context(
+    *,
+    manifest_path: str | Path,
+    config_path: str | Path | None,
+    max_files: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Resolve the canonical pretrain cache key from manifest + policy fingerprints."""
+    manifest = load_manifest(manifest_path)
+    manifest_fingerprint = str(
+        _as_mapping(manifest.get("fingerprint")).get("value")
+        or hash_json_payload({"entries": manifest.get("entries", [])})
+    )
+    config = load_pretrain_config(config_path)
+    policy_fingerprint = build_pretrain_policy_fingerprint(config, max_files=max_files)
+    cache_key = build_feature_sequence_cache_key(
+        manifest_fingerprint=manifest_fingerprint,
+        policy_fingerprint=policy_fingerprint,
+        stage="pretrain_matrix",
+        extra={"max_files": None if max_files is None else int(max_files)},
+    )
+    return {
+        "manifest_fingerprint": manifest_fingerprint,
+        "policy_fingerprint": policy_fingerprint,
+        "cache_key": cache_key,
+        "cache_dir": str(Path(manifest_path).resolve().parent / ".beta6_cache"),
     }
 
 

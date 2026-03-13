@@ -9,6 +9,7 @@ from ml.beta6.data_manifest import (
     build_pretrain_corpus_manifest,
     load_feature_matrix,
 )
+from ml.beta6.feature_store import build_feature_sequence_cache_key
 
 
 def _write_csv(path: Path, matrix: np.ndarray) -> None:
@@ -198,3 +199,24 @@ def test_load_feature_matrix_ignores_metadata_columns_in_labeled_tables(tmp_path
     assert matrix.shape == (4, 2)
     assert matrix.dtype == np.float32
     assert np.array_equal(matrix[:, 0], np.array([1.0, 0.0, 1.0, 1.0], dtype=np.float32))
+
+
+def test_cache_key_builder_is_stable_for_manifest_and_policy_fingerprint():
+    key_a = build_feature_sequence_cache_key(
+        manifest_fingerprint="manifest-1",
+        policy_fingerprint="policy-1",
+        stage="pretrain_matrix",
+    )
+    key_b = build_feature_sequence_cache_key(
+        manifest_fingerprint="manifest-1",
+        policy_fingerprint="policy-1",
+        stage="pretrain_matrix",
+    )
+    key_c = build_feature_sequence_cache_key(
+        manifest_fingerprint="manifest-2",
+        policy_fingerprint="policy-1",
+        stage="pretrain_matrix",
+    )
+
+    assert key_a == key_b
+    assert key_a != key_c

@@ -7,6 +7,7 @@ import pytest
 from ml.beta6.data_manifest import CorpusManifestPolicy, build_pretrain_corpus_manifest
 from ml.beta6.self_supervised_pretrain import (
     encode_with_checkpoint,
+    load_corpus_matrix_bundle,
     load_pretrain_checkpoint,
     run_self_supervised_pretraining,
 )
@@ -104,3 +105,41 @@ def test_pretrain_fails_closed_on_empty_manifest_records(tmp_path: Path):
             config_path=None,
             output_dir=tmp_path / "out",
         )
+
+
+def test_feature_sequence_cache_respects_manifest_and_policy_fingerprint(tmp_path: Path):
+    manifest_path = _build_manifest(tmp_path)
+    cache_dir = tmp_path / "cache"
+
+    first = load_corpus_matrix_bundle(
+        manifest_path,
+        cache_dir=cache_dir,
+        policy_fingerprint="policy-a",
+    )
+    second = load_corpus_matrix_bundle(
+        manifest_path,
+        cache_dir=cache_dir,
+        policy_fingerprint="policy-a",
+    )
+    third = load_corpus_matrix_bundle(
+        manifest_path,
+        cache_dir=cache_dir,
+        policy_fingerprint="policy-b",
+    )
+
+    changed_root = tmp_path / "changed"
+    changed_root.mkdir()
+    manifest_changed = _build_manifest(changed_root)
+
+    fourth = load_corpus_matrix_bundle(
+        manifest_changed,
+        cache_dir=cache_dir,
+        policy_fingerprint="policy-a",
+    )
+
+    assert first["cache_hit"] is False
+    assert second["cache_hit"] is True
+    assert first["cache_key"] == second["cache_key"]
+    assert third["cache_hit"] is False
+    assert third["cache_key"] != first["cache_key"]
+    assert fourth["cache_key"] != first["cache_key"]

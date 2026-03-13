@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+import json
+from pathlib import Path
+from typing import Any, Iterable, Mapping, Sequence
+
+import numpy as np
+
+from .feature_fingerprint import hash_json_payload
 
 
 @dataclass(frozen=True)
@@ -106,9 +112,76 @@ def has_window_overlap(
     )
 
 
+def build_feature_sequence_cache_key(
+    *,
+    manifest_fingerprint: str,
+    policy_fingerprint: str,
+    stage: str,
+    extra: Mapping[str, Any] | None = None,
+) -> str:
+    """Build a canonical cache key for reusable feature/sequence tensors."""
+    payload = {
+        "manifest_fingerprint": str(manifest_fingerprint or "").strip(),
+        "policy_fingerprint": str(policy_fingerprint or "").strip(),
+        "stage": str(stage or "").strip().lower(),
+        "extra": dict(extra or {}),
+    }
+    return hash_json_payload(payload)
+
+
+def load_cached_tensor(
+    cache_dir: str | Path,
+    *,
+    cache_key: str,
+) -> dict[str, Any] | None:
+    """Load a cached tensor bundle when the exact key is present."""
+    root = Path(cache_dir).resolve()
+    tensor_path = root / f"{cache_key}.npy"
+    metadata_path = root / f"{cache_key}.json"
+    if not tensor_path.exists() or not metadata_path.exists():
+        return None
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if str(metadata.get("cache_key") or "") != str(cache_key):
+            return None
+        array = np.load(tensor_path, allow_pickle=False)
+    except Exception:
+        return None
+    return {
+        "array": np.asarray(array, dtype=np.float32),
+        "metadata": metadata,
+        "tensor_path": str(tensor_path),
+        "metadata_path": str(metadata_path),
+    }
+
+
+def save_cached_tensor(
+    cache_dir: str | Path,
+    *,
+    cache_key: str,
+    array: np.ndarray,
+    metadata: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    """Persist a reusable tensor bundle keyed by manifest/policy fingerprint."""
+    root = Path(cache_dir).resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    tensor_path = root / f"{cache_key}.npy"
+    metadata_path = root / f"{cache_key}.json"
+    np.save(tensor_path, np.asarray(array, dtype=np.float32), allow_pickle=False)
+    payload = {"cache_key": str(cache_key), **dict(metadata or {})}
+    metadata_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return {
+        "tensor_path": str(tensor_path),
+        "metadata_path": str(metadata_path),
+    }
+
+
 __all__ = [
     "Window",
+    "build_feature_sequence_cache_key",
     "has_resident_leakage",
     "has_time_leakage",
     "has_window_overlap",
+    "load_cached_tensor",
+    "save_cached_tensor",
 ]

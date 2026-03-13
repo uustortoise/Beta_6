@@ -13,6 +13,11 @@ from ml.yaml_compat import load_yaml_file
 
 from ..data.data_manifest import load_feature_matrix, load_manifest
 from ..data.feature_fingerprint import hash_json_payload
+from ..data.feature_store import (
+    build_feature_sequence_cache_key,
+    load_cached_tensor,
+    save_cached_tensor,
+)
 
 
 PRETRAIN_CONFIG_VERSION = "v1"
@@ -47,18 +52,70 @@ def load_pretrain_config(path: str | Path | None) -> PretrainConfig:
     )
 
 
-def load_corpus_matrix(
+def build_pretrain_policy_fingerprint(
+    config: PretrainConfig,
+    *,
+    max_files: Optional[int] = None,
+) -> str:
+    return hash_json_payload(
+        {
+            "pretrain_config_version": PRETRAIN_CONFIG_VERSION,
+            "embedding_dim": int(config.embedding_dim),
+            "mask_ratio": float(config.mask_ratio),
+            "epochs": int(config.epochs),
+            "random_seed": int(config.random_seed),
+            "min_total_rows": int(config.min_total_rows),
+            "max_files": None if max_files is None else int(max_files),
+        }
+    )
+
+
+def _resolve_manifest_fingerprint(manifest: Mapping[str, Any]) -> str:
+    fingerprint = _as_mapping(manifest.get("fingerprint")).get("value")
+    token = str(fingerprint or "").strip()
+    if token:
+        return token
+    entries = manifest.get("entries", [])
+    return hash_json_payload({"entries": entries if isinstance(entries, list) else []})
+
+
+def load_corpus_matrix_bundle(
     manifest_path: str | Path,
     *,
     max_files: Optional[int] = None,
     enforce_manifest_contract: bool = True,
-) -> np.ndarray:
+    cache_dir: str | Path | None = None,
+    policy_fingerprint: str | None = None,
+) -> Dict[str, Any]:
     manifest = load_manifest(manifest_path)
     if enforce_manifest_contract:
         _assert_manifest_contract(manifest, manifest_path=manifest_path)
     entries = manifest.get("entries", [])
     if not isinstance(entries, list) or not entries:
         raise ValueError("manifest.entries must be a non-empty list")
+
+    manifest_fingerprint = _resolve_manifest_fingerprint(manifest)
+    effective_policy_fingerprint = str(policy_fingerprint or "").strip() or hash_json_payload(
+        {"max_files": None if max_files is None else int(max_files)}
+    )
+    cache_key = build_feature_sequence_cache_key(
+        manifest_fingerprint=manifest_fingerprint,
+        policy_fingerprint=effective_policy_fingerprint,
+        stage="pretrain_matrix",
+        extra={"max_files": None if max_files is None else int(max_files)},
+    )
+    resolved_cache_dir = Path(cache_dir).resolve() if cache_dir is not None else None
+    if resolved_cache_dir is not None:
+        cached = load_cached_tensor(resolved_cache_dir, cache_key=cache_key)
+        if cached is not None:
+            return {
+                "matrix": np.asarray(cached["array"], dtype=np.float32),
+                "cache_hit": True,
+                "cache_key": cache_key,
+                "cache_path": str(cached["tensor_path"]),
+                "manifest_fingerprint": manifest_fingerprint,
+                "policy_fingerprint": effective_policy_fingerprint,
+            }
 
     matrices = []
     selected_entries = entries if max_files is None else entries[: max(int(max_files), 0)]
@@ -71,7 +128,48 @@ def load_corpus_matrix(
 
     if not matrices:
         raise ValueError("no valid corpus files in manifest")
-    return np.vstack(matrices).astype(np.float32)
+    matrix = np.vstack(matrices).astype(np.float32)
+    cache_path = None
+    if resolved_cache_dir is not None:
+        cache_artifacts = save_cached_tensor(
+            resolved_cache_dir,
+            cache_key=cache_key,
+            array=matrix,
+            metadata={
+                "manifest_fingerprint": manifest_fingerprint,
+                "policy_fingerprint": effective_policy_fingerprint,
+                "max_files": None if max_files is None else int(max_files),
+                "manifest_path": str(Path(manifest_path).resolve()),
+            },
+        )
+        cache_path = cache_artifacts["tensor_path"]
+
+    return {
+        "matrix": matrix,
+        "cache_hit": False,
+        "cache_key": cache_key,
+        "cache_path": cache_path,
+        "manifest_fingerprint": manifest_fingerprint,
+        "policy_fingerprint": effective_policy_fingerprint,
+    }
+
+
+def load_corpus_matrix(
+    manifest_path: str | Path,
+    *,
+    max_files: Optional[int] = None,
+    enforce_manifest_contract: bool = True,
+    cache_dir: str | Path | None = None,
+    policy_fingerprint: str | None = None,
+) -> np.ndarray:
+    bundle = load_corpus_matrix_bundle(
+        manifest_path,
+        max_files=max_files,
+        enforce_manifest_contract=enforce_manifest_contract,
+        cache_dir=cache_dir,
+        policy_fingerprint=policy_fingerprint,
+    )
+    return np.asarray(bundle["matrix"], dtype=np.float32)
 
 
 def _assert_manifest_contract(manifest: Mapping[str, Any], *, manifest_path: str | Path) -> None:
@@ -217,15 +315,25 @@ def run_self_supervised_pretraining(
     config_path: str | Path | None,
     output_dir: str | Path,
     max_files: Optional[int] = None,
+    cache_dir: str | Path | None = None,
 ) -> Dict[str, Any]:
     manifest = load_manifest(manifest_path)
     _assert_manifest_contract(manifest, manifest_path=manifest_path)
     config = load_pretrain_config(config_path)
-    matrix = load_corpus_matrix(
+    policy_fingerprint = build_pretrain_policy_fingerprint(config, max_files=max_files)
+    effective_cache_dir = (
+        Path(cache_dir).resolve()
+        if cache_dir is not None
+        else Path(manifest_path).resolve().parent / ".beta6_cache"
+    )
+    matrix_bundle = load_corpus_matrix_bundle(
         manifest_path,
         max_files=max_files,
         enforce_manifest_contract=False,
+        cache_dir=effective_cache_dir,
+        policy_fingerprint=policy_fingerprint,
     )
+    matrix = np.asarray(matrix_bundle["matrix"], dtype=np.float32)
     payload = train_self_supervised_encoder(matrix, config=config)
     artifacts = save_pretrain_checkpoint(payload, output_dir=output_dir)
     return {
@@ -234,14 +342,23 @@ def run_self_supervised_pretraining(
         "config": payload["config"],
         "metrics": payload["metrics"],
         "artifacts": artifacts,
+        "cache": {
+            "cache_hit": bool(matrix_bundle["cache_hit"]),
+            "cache_key": str(matrix_bundle["cache_key"]),
+            "cache_path": matrix_bundle["cache_path"],
+            "manifest_fingerprint": str(matrix_bundle["manifest_fingerprint"]),
+            "policy_fingerprint": str(matrix_bundle["policy_fingerprint"]),
+        },
     }
 
 
 __all__ = [
     "PRETRAIN_CONFIG_VERSION",
     "PretrainConfig",
+    "build_pretrain_policy_fingerprint",
     "encode_with_checkpoint",
     "load_corpus_matrix",
+    "load_corpus_matrix_bundle",
     "load_pretrain_checkpoint",
     "load_pretrain_config",
     "run_self_supervised_pretraining",

@@ -12,6 +12,7 @@ from typing import Any, Mapping
 
 from ml.policy_config import load_policy_from_env
 from ml.room_experiments import (
+    build_candidate_execution_plan,
     build_grouped_regime_fragility_report,
     build_room_diagnostic_report,
     resolve_typed_policy_values,
@@ -53,6 +54,19 @@ def _parse_grouped_slices(raw_value: str, *, label: str) -> list[dict[str, Any]]
     return normalized
 
 
+def _parse_candidate_plan(raw_value: str) -> list[dict[str, Any]]:
+    txt = str(raw_value or "").strip()
+    if not txt:
+        return []
+    try:
+        payload = json.loads(txt)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid --candidate-plan-json JSON: {exc}") from exc
+    if not isinstance(payload, list):
+        raise ValueError("Invalid --candidate-plan-json payload: expected JSON array")
+    return [dict(row) for row in payload if isinstance(row, dict)]
+
+
 def _resolve_grouped_fragility_payload(
     *,
     raw_grouped_fragility: str,
@@ -75,6 +89,20 @@ def _resolve_grouped_fragility_payload(
     if derived_payload:
         payload.update(derived_payload)
     return payload
+
+
+def _resolve_candidate_execution_plan(
+    *,
+    raw_candidate_plan: str,
+    fast_replay: bool,
+) -> dict[str, Any]:
+    candidates = _parse_candidate_plan(raw_candidate_plan)
+    if not candidates:
+        return {}
+    return build_candidate_execution_plan(
+        candidates=candidates,
+        fast_replay=fast_replay,
+    )
 
 
 def _build_manifest_payload(
@@ -134,6 +162,16 @@ def main() -> int:
         default=None,
         help="Optional macro-F1 floor for grouped fragile-room stability gating",
     )
+    parser.add_argument(
+        "--candidate-plan-json",
+        default="",
+        help="Optional JSON array of candidate replay plans for early elimination or fast replay",
+    )
+    parser.add_argument(
+        "--fast-replay",
+        action="store_true",
+        help="Mark selected candidate sweeps as fast replay diagnostics instead of full retrain",
+    )
     args = parser.parse_args()
 
     room = normalize_room_name(args.room)
@@ -156,12 +194,17 @@ def main() -> int:
         raw_grouped_user_slices=args.grouped_user_slices,
         fragile_room_floor=args.fragile_room_floor,
     )
+    candidate_execution_plan = _resolve_candidate_execution_plan(
+        raw_candidate_plan=args.candidate_plan_json,
+        fast_replay=args.fast_replay,
+    )
     report = build_room_diagnostic_report(
         room_name=room,
         profile_name=profile_name,
         profile_payload=profile,
         typed_policy_values=typed_values,
         grouped_fragility=grouped_fragility,
+        candidate_execution_plan=candidate_execution_plan,
     )
     payload = _build_manifest_payload(
         profile_name=profile_name,

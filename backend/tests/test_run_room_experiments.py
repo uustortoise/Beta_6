@@ -4,11 +4,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ml.room_experiments import (
+    build_candidate_execution_plan,
     build_grouped_regime_fragility_report,
     build_room_diagnostic_report,
 )
 from scripts.run_room_experiments import (
     _build_manifest_payload,
+    _resolve_candidate_execution_plan,
     _resolve_profile_typed_policy_values,
 )
 
@@ -146,3 +148,42 @@ def test_room_experiments_can_report_grouped_regime_stability():
     assert report["fragility"]["stability_gate"]["pass"] is False
     assert report["fragility"]["stability_gate"]["failures"][0]["regime"] == "grouped_by_date"
     assert report["fragility"]["stability_gate"]["failures"][0]["worst_slice"] == "2026-03-07"
+
+
+def test_bad_candidates_can_be_eliminated_early_without_affecting_good_runs():
+    plan = build_candidate_execution_plan(
+        candidates=[
+            {
+                "candidate_name": "known_bad",
+                "early_blockers": ["collapse_detected"],
+            },
+            {
+                "candidate_name": "good_shadow",
+                "typed_policy_values": {"two_stage_core.gate_mode": "shadow"},
+            },
+        ],
+        fast_replay=False,
+    )
+
+    assert plan["selected"][0]["candidate_name"] == "good_shadow"
+    assert plan["selected"][0]["execution_mode"] == "full_retrain"
+    assert plan["rejected"][0]["candidate_name"] == "known_bad"
+    assert plan["rejected"][0]["rejection_reasons"] == ["collapse_detected"]
+
+
+def test_room_policy_sweeps_can_run_as_fast_replay_diagnostics():
+    plan = _resolve_candidate_execution_plan(
+        raw_candidate_plan=json.dumps(
+            [
+                {
+                    "candidate_name": "shadow_gate",
+                    "typed_policy_values": {"two_stage_core.gate_mode": "shadow"},
+                }
+            ]
+        ),
+        fast_replay=True,
+    )
+
+    assert plan["selected"][0]["candidate_name"] == "shadow_gate"
+    assert plan["selected"][0]["execution_mode"] == "fast_replay"
+    assert plan["rejected"] == []

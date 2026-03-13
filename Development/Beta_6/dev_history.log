@@ -408,6 +408,32 @@
   - targeted regressions: `PYTHONPATH=backend pytest backend/tests/test_health_server.py -k resident_home_context_contract backend/tests/test_process_data_arbitration.py backend/tests/test_beta6_trainer_intake_gate.py -q` -> 2 passed, 35 deselected, 3 warnings
   - touched-suite regressions: `PYTHONPATH=backend pytest backend/tests/test_process_data_arbitration.py backend/tests/test_beta6_trainer_intake_gate.py -q` -> 10 passed, 3 warnings
   - syntax: `python3 -m py_compile backend/ml/home_empty_fusion.py backend/ml/household_analyzer.py backend/ml/beta6/sequence/transition_builder.py backend/ml/beta6/training/beta6_trainer.py backend/tests/test_home_empty_fusion.py backend/tests/test_transformer_timeline_heads.py` -> passed
+2026-03-13 12:43:06 UTC | TASK-28 | Improve Beta 6.2 learning-efficiency infrastructure and fast replay diagnostics
+- Context: Task 14 required deterministic cache keys keyed by manifest/policy fingerprints, reusable corpus-matrix loading with safe invalidation, and a lightweight candidate triage path so room policy sweeps can run as fast replay diagnostics before full retrains.
+- Files changed:
+  - `backend/ml/beta6/data/feature_store.py`
+  - `backend/ml/beta6/training/self_supervised_pretrain.py`
+  - `backend/ml/beta6/training/beta6_trainer.py`
+  - `backend/ml/room_experiments.py`
+  - `backend/scripts/build_pretrain_corpus_manifest.py`
+  - `backend/scripts/run_room_experiments.py`
+  - `backend/tests/test_beta6_self_supervised_pretrain.py`
+  - `backend/tests/test_beta6_data_manifest.py`
+  - `backend/tests/test_beta6_trainer_intake_gate.py`
+  - `backend/tests/test_run_room_experiments.py`
+- Actions:
+  - added canonical tensor-cache helpers in the Beta 6.2 feature-store surface for manifest/policy keyed reuse
+  - added `load_corpus_matrix_bundle(...)` and policy-fingerprint support so pretraining can reuse cached matrices and invalidate safely when manifest or config changes
+  - added `build_pretrain_cache_context(...)` in the trainer so CLI callers can resolve deterministic cache keys without changing current good-path behavior
+  - added candidate execution planning in room experiments so obviously bad candidates can be rejected early and good candidates can be marked as `fast_replay` instead of `full_retrain`
+  - extended the room replay CLI to accept candidate-plan JSON and emit candidate execution plans in diagnostic artifacts
+  - surfaced a manifest-derived cache seed in the manifest builder CLI for operator traceability
+- Verification:
+  - red phase: `PYTHONPATH=backend pytest backend/tests/test_beta6_self_supervised_pretrain.py backend/tests/test_beta6_data_manifest.py backend/tests/test_beta6_trainer_intake_gate.py backend/tests/test_run_room_experiments.py -q` -> 3 import errors (expected missing cache/replay planning entry points before implementation)
+  - focused green: same command -> 31 passed, 3 warnings
+  - adjacent regressions: `PYTHONPATH=backend pytest backend/tests/test_build_pretrain_corpus_manifest_script.py backend/tests/test_beta6_shim_import_guard.py -q` -> 3 passed, 3 warnings
+  - syntax: `python3 -m py_compile backend/ml/beta6/data/feature_store.py backend/ml/beta6/training/self_supervised_pretrain.py backend/ml/beta6/training/beta6_trainer.py backend/ml/room_experiments.py backend/scripts/build_pretrain_corpus_manifest.py backend/scripts/run_room_experiments.py backend/tests/test_beta6_self_supervised_pretrain.py backend/tests/test_beta6_data_manifest.py backend/tests/test_beta6_trainer_intake_gate.py backend/tests/test_run_room_experiments.py` -> passed
+  - hygiene: `git diff --check` -> passed
 2026-03-13 12:20:08 UTC | TASK-28 | Fix Task 13 review gap in demographic-exclusion detection
 - Context: review of `42d5a3d` found that the new demographic-exclusion helper only inspected top-level `age`/`gender`/`sex` keys, while the repo’s real profile schema stores age/gender under `personal_info`. That made the Task 13 bundle emit false-green `demographic_fields_present=[]` / `excluded_default_input_fields=[]` for normal loaded profiles.
 - Files changed:

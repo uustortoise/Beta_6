@@ -193,3 +193,22 @@
   - green phase: `PYTHONPATH=backend pytest backend/tests/test_process_data_arbitration.py backend/tests/test_beta6_orchestrator.py backend/tests/test_beta6_orchestrator_phase4.py backend/tests/test_health_server.py -q` -> 41 passed, 3 warnings
   - focused regression sweep: `PYTHONPATH=backend pytest backend/tests/test_process_data_arbitration.py backend/tests/test_beta6_orchestrator.py backend/tests/test_beta6_orchestrator_phase4.py backend/tests/test_beta6_hmm_duration_priors.py backend/tests/test_beta6_crf_decoder.py backend/tests/test_health_server.py backend/tests/test_home_empty_fusion.py -q` -> 73 passed, 3 warnings
   - syntax: `python3 -m py_compile backend/ml/household_analyzer.py backend/process_data.py backend/ml/beta6/orchestrator.py backend/ml/beta6/sequence/hmm_decoder.py backend/ml/beta6/sequence/crf_decoder.py backend/tests/test_process_data_arbitration.py backend/tests/test_beta6_orchestrator.py backend/tests/test_beta6_orchestrator_phase4.py backend/tests/test_health_server.py` -> passed
+2026-03-13 08:53:15 UTC | TASK-21 | Close Task 7 rerun audit and repair LivingRoom decision-trace alias consistency
+- Context: the real-environment Jessica `4-10 Dec` certification rerun completed with `GlobalGate=PASS`, but post-run forensics found a LivingRoom lineage mismatch: registry v2 promoted `legacy_v2` while the unversioned `LivingRoom_decision_trace.json` had been overwritten by failed candidate-only `v6`.
+- Files changed:
+  - `backend/ml/legacy/registry.py`
+  - `backend/tests/test_registry.py`
+  - `backend/run_daily_analysis.py`
+  - `backend/tests/test_run_daily_analysis_beta6_authority.py`
+  - `Development/Beta_6/docs/plans/2026-03-09-beta61-beta62-reliable-activity-timeline-execution.md`
+- Actions:
+  - traced the discrepancy end-to-end across `pipeline.log`, `LivingRoom_v6_decision_trace.json`, `LivingRoom_versions.json`, and registry v2 champion-pointer events
+  - confirmed the actual promoted LivingRoom champion was `legacy_v2` while unversioned decision-trace aliases were not being resynced during rollback/promotion
+  - extended legacy registry alias sync and deactivation logic to include `_decision_trace.json`, which repairs the latest trace to match the true champion after rollback/promotion
+  - repaired the already-produced Jessica LivingRoom artifact in-place with `ModelRegistry.validate_and_repair_room_registry_state(...)`, resulting in `LivingRoom_decision_trace.json` pointing back to `saved_version=2`
+  - left the Task 7 certification-entry code and test changes in place as the current uncommitted checkpoint for this branch
+- Verification:
+  - red phase: `PYTHONPATH=backend pytest backend/tests/test_training.py -k 'write_decision_trace' backend/tests/test_registry.py -k 'decision_trace or deactivate_current_version or rollback_to_version' -q` -> 4 failed (expected alias-consistency failures before implementation)
+  - green phase: `PYTHONPATH=backend pytest backend/tests/test_training.py -k 'write_decision_trace' backend/tests/test_registry.py -k 'decision_trace or deactivate_current_version or rollback_to_version' -q` -> 6 passed, 3 warnings
+  - focused sweep: `PYTHONPATH=backend pytest backend/tests/test_registry.py backend/tests/test_run_daily_analysis_beta6_authority.py backend/tests/test_training.py -k 'write_decision_trace or beta61_certification_entry or rollback_to_version or deactivate_current_version or save_model_artifacts_reconciles_single_promoted_version or cleanup_preserves_current_champion_even_if_old or cleanup_resets_stale_current_version_reference' -q` -> 12 passed, 3 warnings
+  - artifact repair check: `PYTHONPATH=backend python3 -c "from pathlib import Path; from ml.registry import ModelRegistry; r=ModelRegistry(Path('/Users/dickson/DT/DT_development/Development/Beta_6/.worktrees/beta61-beta62-execution/backend')); print(r.validate_and_repair_room_registry_state('HK0011_jessica','LivingRoom'))"` -> `{'valid': True, 'repaired': True, 'issues': ['Alias mismatch detected for current_version 2; syncing aliases']}`

@@ -345,6 +345,114 @@ def test_beta6_authority_live_run_requires_explicit_signing_key(monkeypatch, tmp
     assert report["phase4_dynamic_gate"]["evaluation_report_path"] is None
 
 
+def test_beta61_certification_entry_fails_on_block_status_and_topology_mismatch(monkeypatch):
+    monkeypatch.setattr("run_daily_analysis._is_beta6_authority_enabled", lambda: True)
+    monkeypatch.setenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")
+    monkeypatch.setenv("BETA6_GATE_SIGNING_KEY", "test-live-key")
+    monkeypatch.setattr(
+        "run_daily_analysis._check_beta6_authority_postgres_preflight",
+        lambda: (True, {"status": "ok"}),
+    )
+    monkeypatch.setattr(
+        "run_daily_analysis._load_historical_corrections_signal",
+        lambda elder_id: {"available": True, "count": 5},  # noqa: ARG005
+    )
+    metrics = [
+        {
+            "room": "Bedroom",
+            "room_status": "block",
+            "runtime_topology": {"matches": True},
+        },
+        {
+            "room": "Kitchen",
+            "room_status": "pass",
+            "runtime_topology": {
+                "matches": False,
+                "expected_runtime_topology": "single_stage",
+                "actual_runtime_topology": "two_stage",
+                "source": "saved_two_stage_meta",
+            },
+        },
+    ]
+
+    passed, report = run_daily_analysis._evaluate_beta61_certification_entry(
+        elder_id="HK0011_jessica",
+        metrics=metrics,
+        beta6_fallback_summary={"activated": [], "cleared": [], "errors": []},
+    )
+
+    assert passed is False
+    checks = {entry["check"]: entry for entry in report["checks"]}
+    assert checks["room_status_allows_go"]["pass"] is False
+    assert checks["runtime_topology_matches_saved_artifacts"]["pass"] is False
+    assert report["room_status"]["block_rooms"] == ["bedroom"]
+    assert report["runtime_topology_mismatches"][0]["room"] == "kitchen"
+
+
+def test_beta61_certification_entry_fails_when_fallback_state_incomplete(monkeypatch):
+    monkeypatch.setattr("run_daily_analysis._is_beta6_authority_enabled", lambda: True)
+    monkeypatch.setenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")
+    monkeypatch.setenv("BETA6_GATE_SIGNING_KEY", "test-live-key")
+    monkeypatch.setattr(
+        "run_daily_analysis._check_beta6_authority_postgres_preflight",
+        lambda: (True, {"status": "ok"}),
+    )
+    monkeypatch.setattr(
+        "run_daily_analysis._load_historical_corrections_signal",
+        lambda elder_id: {"available": True, "count": 2},  # noqa: ARG005
+    )
+    metrics = [
+        {
+            "room": "Bedroom",
+            "room_status": "pass",
+            "runtime_topology": {"matches": True},
+        }
+    ]
+
+    passed, report = run_daily_analysis._evaluate_beta61_certification_entry(
+        elder_id="HK0011_jessica",
+        metrics=metrics,
+        beta6_fallback_summary={"errors": [{"room": "bedroom", "error": "missing pointer"}]},
+    )
+
+    assert passed is False
+    checks = {entry["check"]: entry for entry in report["checks"]}
+    assert checks["rollback_fallback_state_complete"]["pass"] is False
+    assert report["reason"] == "rollback_fallback_state_complete"
+
+
+def test_beta61_certification_entry_tracks_nonblocking_historical_signal(monkeypatch):
+    monkeypatch.setattr("run_daily_analysis._is_beta6_authority_enabled", lambda: True)
+    monkeypatch.setenv("RELEASE_GATE_EVIDENCE_PROFILE", "production")
+    monkeypatch.setenv("BETA6_GATE_SIGNING_KEY", "test-live-key")
+    monkeypatch.setattr(
+        "run_daily_analysis._check_beta6_authority_postgres_preflight",
+        lambda: (True, {"status": "ok"}),
+    )
+    monkeypatch.setattr(
+        "run_daily_analysis._load_historical_corrections_signal",
+        lambda elder_id: {"available": False, "error": "table missing"},  # noqa: ARG005
+    )
+    metrics = [
+        {
+            "room": "Bedroom",
+            "room_status": "conditional",
+            "runtime_topology": {"matches": True},
+        }
+    ]
+
+    passed, report = run_daily_analysis._evaluate_beta61_certification_entry(
+        elder_id="HK0011_jessica",
+        metrics=metrics,
+        beta6_fallback_summary={"errors": []},
+    )
+
+    assert passed is True
+    assert report["room_status"]["conditional_rooms"] == ["bedroom"]
+    assert report["signals"]["postgres_preflight"]["pass"] is True
+    assert report["signals"]["historical_corrections"]["available"] is False
+
+
 def test_beta6_training_preflight_requires_explicit_evidence_profile(monkeypatch, tmp_path):
     monkeypatch.delenv("RELEASE_GATE_EVIDENCE_PROFILE", raising=False)
     monkeypatch.setattr("run_daily_analysis.validate_label_policy_consistency", lambda **kwargs: SimpleNamespace(status="pass", errors=[], warnings=[]))

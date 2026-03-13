@@ -340,7 +340,12 @@ class ModelRegistry:
 
             # 2. Alias Consistency
             models_dir = self.get_models_dir(elder_id)
-            suffixes = ["_model.keras", "_scaler.pkl", "_label_encoder.pkl"]
+            suffixes = [
+                "_model.keras",
+                "_scaler.pkl",
+                "_label_encoder.pkl",
+                "_decision_trace.json",
+            ]
             
             if current == 0:
                 # Verify no unversioned aliases exist
@@ -353,7 +358,11 @@ class ModelRegistry:
             else:
                 # Verify aliases are bit-consistent with current champion artifacts.
                 mandatory = ["_model.keras", "_scaler.pkl", "_label_encoder.pkl"]
-                optional = ["_thresholds.json", "_adapter_weights.pkl"]
+                optional = [
+                    "_thresholds.json",
+                    "_adapter_weights.pkl",
+                    "_decision_trace.json",
+                ]
                 missing_versioned_mandatory: list[str] = []
                 needs_sync = False
 
@@ -453,7 +462,11 @@ class ModelRegistry:
         """
         models_dir = self.get_models_dir(elder_id)
         mandatory = ["_model.keras", "_scaler.pkl", "_label_encoder.pkl"]
-        optional = ["_thresholds.json", "_adapter_weights.pkl"]
+        optional = [
+            "_thresholds.json",
+            "_adapter_weights.pkl",
+            "_decision_trace.json",
+        ]
 
         for suffix in mandatory:
             src = models_dir / f"{room_name}_v{int(version)}{suffix}"
@@ -538,6 +551,7 @@ class ModelRegistry:
                 "_label_encoder.pkl",
                 "_thresholds.json",
                 "_adapter_weights.pkl",
+                "_decision_trace.json",
             ]:
                 path = models_dir / f"{room_name}{suffix}"
                 if path.exists():

@@ -499,6 +499,165 @@ def _validate_beta6_training_preflight(elder_id: str, aggregate_files: list[Path
     return True, report
 
 
+def _load_historical_corrections_signal(elder_id: str) -> dict:
+    """
+    Certification signal: can we read historical corrections for this resident?
+    Non-blocking, but always reported.
+    """
+    try:
+        adl_svc = ADLService()
+        with adl_svc.db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM correction_history
+                WHERE elder_id = ?
+                  AND COALESCE(is_deleted, 0) = 0
+                """,
+                (elder_id,),
+            )
+            row = cursor.fetchone()
+            if isinstance(row, dict):
+                count = int(row.get("count", 0) or 0)
+            elif isinstance(row, (list, tuple)) and row:
+                count = int(row[0] or 0)
+            else:
+                count = 0
+        return {
+            "available": True,
+            "count": int(count),
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _evaluate_beta61_certification_entry(
+    *,
+    elder_id: str,
+    metrics: list[dict],
+    beta6_fallback_summary: dict | None = None,
+) -> tuple[bool, dict]:
+    """
+    Beta 6.1 certification-entry checklist (fail-closed).
+    GO is allowed with room statuses pass/conditional, never with block.
+    """
+    checks: list[dict] = []
+    failed_checks: list[str] = []
+
+    def _push(check: str, ok: bool, details: dict | None = None, *, blocking: bool = True) -> None:
+        entry = {
+            "check": str(check),
+            "pass": bool(ok),
+            "blocking": bool(blocking),
+        }
+        if details:
+            entry["details"] = details
+        checks.append(entry)
+        if blocking and not ok:
+            failed_checks.append(str(check))
+
+    authority_enabled = bool(_is_beta6_authority_enabled())
+    _push("beta6_authority_enabled", authority_enabled, {"enabled": authority_enabled})
+
+    evidence_profile = str(os.getenv("RELEASE_GATE_EVIDENCE_PROFILE", "")).strip().lower()
+    _push(
+        "release_gate_evidence_profile_explicit",
+        bool(evidence_profile),
+        {"value": evidence_profile or None},
+    )
+
+    signing_key = str(os.getenv("BETA6_GATE_SIGNING_KEY", "")).strip()
+    _push(
+        "beta6_gate_signing_key_explicit",
+        bool(signing_key),
+        {"configured": bool(signing_key)},
+    )
+
+    postgres_ok, postgres_details = _check_beta6_authority_postgres_preflight()
+    _push("postgres_reachable", postgres_ok, postgres_details if isinstance(postgres_details, dict) else {})
+
+    fallback_errors = []
+    if isinstance(beta6_fallback_summary, dict):
+        raw_errors = beta6_fallback_summary.get("errors")
+        if isinstance(raw_errors, list):
+            fallback_errors = [str(item) for item in raw_errors if str(item).strip()]
+    _push(
+        "rollback_fallback_state_complete",
+        len(fallback_errors) == 0,
+        {"errors": fallback_errors[:25]},
+    )
+
+    room_status_buckets = {
+        "pass_rooms": [],
+        "conditional_rooms": [],
+        "block_rooms": [],
+        "unknown_rooms": [],
+    }
+    topology_mismatches: list[dict] = []
+    for metric in metrics if isinstance(metrics, list) else []:
+        room_raw = str((metric or {}).get("room") or "").strip()
+        room = normalize_room_name(room_raw) if room_raw else ""
+        if not room:
+            continue
+
+        status = str((metric or {}).get("room_status") or "").strip().lower()
+        if status == "pass":
+            room_status_buckets["pass_rooms"].append(room)
+        elif status == "conditional":
+            room_status_buckets["conditional_rooms"].append(room)
+        elif status == "block":
+            room_status_buckets["block_rooms"].append(room)
+        else:
+            room_status_buckets["unknown_rooms"].append(room)
+
+        topology = (metric or {}).get("runtime_topology")
+        if isinstance(topology, dict) and not bool(topology.get("matches", True)):
+            topology_mismatches.append(
+                {
+                    "room": room,
+                    "expected_runtime_topology": topology.get("expected_runtime_topology"),
+                    "actual_runtime_topology": topology.get("actual_runtime_topology"),
+                    "source": topology.get("source"),
+                }
+            )
+
+    room_status_ok = (
+        len(room_status_buckets["block_rooms"]) == 0
+        and len(room_status_buckets["unknown_rooms"]) == 0
+    )
+    _push("room_status_allows_go", room_status_ok, dict(room_status_buckets))
+
+    topology_ok = len(topology_mismatches) == 0
+    _push(
+        "runtime_topology_matches_saved_artifacts",
+        topology_ok,
+        {"mismatches": topology_mismatches[:25]},
+    )
+
+    historical_signal = _load_historical_corrections_signal(elder_id)
+
+    report = {
+        "pass": len(failed_checks) == 0,
+        "reason": failed_checks[0] if failed_checks else "ok",
+        "failed_checks": failed_checks,
+        "checks": checks,
+        "room_status": room_status_buckets,
+        "runtime_topology_mismatches": topology_mismatches,
+        "signals": {
+            "postgres_preflight": {
+                "pass": bool(postgres_ok),
+                "details": postgres_details if isinstance(postgres_details, dict) else {},
+            },
+            "historical_corrections": historical_signal,
+        },
+    }
+    return bool(report["pass"]), report
+
+
 def _validate_beta6_runtime_activation_preflight(
     elder_id: str,
     *,
@@ -3134,6 +3293,13 @@ def train_files(file_paths: list[Path]):
         beta6_gate_report: dict = {"pass": True, "reason": "disabled"}
         beta6_fallback_summary: dict = {"activated": [], "cleared": [], "errors": []}
         beta6_phase4_runtime_policy: dict = {"status": "disabled", "reason": "no_metrics"}
+        beta61_certification_pass = True
+        beta61_certification_report: dict = {
+            "pass": True,
+            "reason": "not_evaluated",
+            "checks": [],
+            "signals": {},
+        }
         phase6_stability_report: dict = {"status": "disabled", "reason": "no_metrics"}
 
         if metrics:
@@ -3388,6 +3554,19 @@ def train_files(file_paths: list[Path]):
                                 metric["gate_reasons"] = list(existing) + ["promotion_apply_failed"]
 
         if metrics:
+            beta61_certification_pass, beta61_certification_report = _evaluate_beta61_certification_entry(
+                elder_id=elder_id,
+                metrics=metrics,
+                beta6_fallback_summary=beta6_fallback_summary,
+            )
+            if not beta61_certification_pass:
+                logger.error(
+                    "Beta 6.1 certification entry FAILED for %s (reason=%s): %s",
+                    elder_id,
+                    beta61_certification_report.get("reason"),
+                    beta61_certification_report,
+                )
+
             stability_artifact_path = None
             artifact_root = _beta6_gate_artifact_output_dir(elder_id, beta6_run_id, registry_v2)
             if artifact_root is not None:
@@ -3397,6 +3576,7 @@ def train_files(file_paths: list[Path]):
                 and (not walk_forward_gate_enabled or walk_forward_gate_pass)
                 and backbone_gate_pass
                 and beta6_gate_pass
+                and beta61_certification_pass
                 and global_gate_pass
             ) else 0.0
             try:
@@ -3442,6 +3622,8 @@ def train_files(file_paths: list[Path]):
                 run_failure_stage = "promotion_apply_failed"
             elif not beta6_gate_pass:
                 run_failure_stage = "beta6_authority_failed"
+            elif not beta61_certification_pass:
+                run_failure_stage = "beta61_certification_failed"
             
             training_status = (
                 'rejected_by_global_gate'
@@ -3454,6 +3636,8 @@ def train_files(file_paths: list[Path]):
                 if promotion_apply_failed
                 else 'rejected_by_beta6_gate'
                 if not beta6_gate_pass
+                else 'rejected_by_beta61_certification'
+                if not beta61_certification_pass
                 else 'success'
             )
             run_outcome = training_status
@@ -3494,6 +3678,7 @@ def train_files(file_paths: list[Path]):
                         "beta6_fallback": beta6_fallback_summary,
                         "beta6_phase4_runtime_policy": beta6_phase4_runtime_policy,
                         "beta6_runtime_activation_preflight": runtime_activation_preflight_report,
+                        "beta61_certification_entry": beta61_certification_report,
                         "phase6_stability": phase6_stability_report,
                         "walk_forward_rolled_back_rooms": wf_rolled_back_rooms,
                         "walk_forward_deactivated_rooms": wf_deactivated_rooms,

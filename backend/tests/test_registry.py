@@ -170,6 +170,34 @@ class TestModelRegistry(unittest.TestCase):
         # In this integration test with touch(), we can check if destination exists
         self.assertTrue((models_dir / f"{self.room_name}_model.keras").exists())
 
+    def test_rollback_to_version_restores_latest_decision_trace(self):
+        info = {
+            "versions": [
+                {"version": 1, "accuracy": 0.8, "promoted": False},
+                {"version": 2, "accuracy": 0.9, "promoted": True},
+            ],
+            "current_version": 2,
+        }
+        self.registry._save_version_info(self.elder_id, self.room_name, info)
+
+        models_dir = self.registry.get_models_dir(self.elder_id)
+        (models_dir / f"{self.room_name}_v1_model.keras").touch()
+        (models_dir / f"{self.room_name}_v2_model.keras").touch()
+        (models_dir / f"{self.room_name}_v1_scaler.pkl").touch()
+        (models_dir / f"{self.room_name}_v2_scaler.pkl").touch()
+        (models_dir / f"{self.room_name}_v1_label_encoder.pkl").touch()
+        (models_dir / f"{self.room_name}_v2_label_encoder.pkl").touch()
+        (models_dir / f"{self.room_name}_v1_decision_trace.json").write_text(json.dumps({"saved_version": 1}))
+        (models_dir / f"{self.room_name}_v2_decision_trace.json").write_text(json.dumps({"saved_version": 2}))
+        (models_dir / f"{self.room_name}_decision_trace.json").write_text(json.dumps({"saved_version": 6}))
+
+        success = self.registry.rollback_to_version(self.elder_id, self.room_name, 1)
+        self.assertTrue(success)
+        self.assertEqual(
+            json.loads((models_dir / f"{self.room_name}_decision_trace.json").read_text())["saved_version"],
+            1,
+        )
+
     def test_rollback_removes_stale_threshold_when_missing(self):
         """Rollback should delete latest thresholds if target version has none."""
         info = {
@@ -232,6 +260,7 @@ class TestModelRegistry(unittest.TestCase):
         (models_dir / f"{self.room_name}_scaler.pkl").touch()
         (models_dir / f"{self.room_name}_label_encoder.pkl").touch()
         (models_dir / f"{self.room_name}_thresholds.json").write_text('{"0": 0.8}')
+        (models_dir / f"{self.room_name}_decision_trace.json").write_text(json.dumps({"saved_version": 1}))
 
         ok = self.registry.deactivate_current_version(self.elder_id, self.room_name)
         self.assertTrue(ok)
@@ -239,6 +268,7 @@ class TestModelRegistry(unittest.TestCase):
         self.assertFalse((models_dir / f"{self.room_name}_scaler.pkl").exists())
         self.assertFalse((models_dir / f"{self.room_name}_label_encoder.pkl").exists())
         self.assertFalse((models_dir / f"{self.room_name}_thresholds.json").exists())
+        self.assertFalse((models_dir / f"{self.room_name}_decision_trace.json").exists())
 
         updated = self.registry._load_version_info(self.elder_id, self.room_name)
         self.assertEqual(updated["current_version"], 0)

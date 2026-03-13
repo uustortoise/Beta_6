@@ -388,6 +388,15 @@ Define a checklist that fails if:
 4. rollback fallback state is incomplete
 5. any room is `block`
 6. runtime topology expectations do not match saved artifacts
+7. room status is missing/unknown (GO requires explicit `pass|conditional|block`)
+
+Implementation target:
+- add `_evaluate_beta61_certification_entry(...)` in `backend/run_daily_analysis.py`
+- persist checklist output in training metadata as `beta61_certification_entry`
+- fail closed with `rejected_by_beta61_certification` when checklist fails
+- always emit tracked certification signals:
+  - PostgreSQL preflight details
+  - historical-corrections availability/details
 
 **Step 2: Run the targeted tests**
 
@@ -412,7 +421,7 @@ Expected:
 2. authority artifacts are signed
 3. no fallback-target crash
 4. `phase6_stability_report.json` shows non-zero pipeline success in the real environment
-5. `GO` is allowed only with `pass` and `conditional`, never with `block`
+5. `GO` is allowed only with `pass` and `conditional`, never with `block` (or unknown status)
 
 **Step 4: Verify the run artifacts**
 
@@ -427,6 +436,7 @@ Expected:
 1. room verdicts are explicit as `pass`, `conditional`, or `block`
 2. PostgreSQL / historical-corrections availability is recorded as a tracked certification signal
 3. Bedroom runtime expectations match the saved single-stage fallback topology if `runtime_enabled=false`
+4. `training_history.metadata.beta61_certification_entry` includes explicit checklist checks and failure reason (if any)
 
 **Step 5: Commit**
 

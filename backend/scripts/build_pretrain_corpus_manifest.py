@@ -60,13 +60,12 @@ def main() -> int:
         "Stats: "
         f"files_scanned={stats.get('files_scanned', 0)} "
         f"records_kept={stats.get('records_kept', 0)} "
+        f"quarantined={stats.get('quarantined', 0)} "
         f"p0_violations={stats.get('p0_violations', 0)}"
     )
-    p0_violations = int(stats.get("p0_violations", 0) or 0)
-    records_kept = int(stats.get("records_kept", 0) or 0)
-    if p0_violations > 0 or records_kept <= 0:
-        if records_kept <= 0 and p0_violations == 0:
-            print("Manifest gate failed: no usable records kept")
+    gate = manifest.get("gate", {}) if isinstance(manifest, dict) else {}
+    if not bool(gate.get("approved", False)):
+        print(f"Manifest gate failed: {gate.get('blocking_reasons', [])}")
         return 2
     return 0
 

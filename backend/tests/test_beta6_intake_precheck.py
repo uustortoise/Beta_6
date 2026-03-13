@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from ml.beta6.data_manifest import CorpusManifestPolicy, build_pretrain_corpus_manifest
 from ml.beta6.intake_precheck import (
     REASON_INTAKE_INVALID_ARTIFACT,
     REASON_INTAKE_MISSING_ARTIFACT,
@@ -93,3 +94,28 @@ def test_enforce_approved_intake_artifact_blocks_invalid_schema(tmp_path: Path):
     with pytest.raises(IntakeGateBlockedError) as exc_info:
         enforce_approved_intake_artifact(artifact_path)
     assert exc_info.value.reason_code == REASON_INTAKE_INVALID_ARTIFACT
+
+
+def test_enforce_approved_intake_artifact_accepts_approved_pretrain_manifest(tmp_path: Path):
+    csv_path = tmp_path / "clean.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "elder_id,timestamp,room,activity,f1,f2",
+                "HK0011_jessica,2025-12-04T07:00:00,Bedroom,sleep,1,0",
+                "HK0011_jessica,2025-12-04T07:05:00,Bedroom,bedroom_normal_use,0,0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    manifest = build_pretrain_corpus_manifest(
+        corpus_roots=[tmp_path],
+        policy=CorpusManifestPolicy(min_rows=2, min_features=2, max_missing_ratio=0.2),
+    )
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    loaded = enforce_approved_intake_artifact(manifest_path, require_report_files=False)
+
+    assert loaded["gate"]["approved"] is True
+    assert loaded["stats"]["records_kept"] == 1

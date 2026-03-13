@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from ml.beta6.data_manifest import CorpusManifestPolicy, build_pretrain_corpus_manifest
 from ml.beta6.intake_gate import assert_intake_artifact_approved, validate_intake_artifact
 
 
@@ -79,3 +80,62 @@ def test_assert_intake_artifact_approved_raises_for_rejected_bundle(tmp_path: Pa
 
     with pytest.raises(ValueError, match="not approved"):
         assert_intake_artifact_approved(artifact_path)
+
+
+def test_intake_gate_auto_approves_clean_pretrain_manifest(tmp_path: Path):
+    csv_path = tmp_path / "clean.csv"
+    csv_path.write_text(
+        "\n".join(
+            [
+                "elder_id,timestamp,room,activity,f1,f2",
+                "HK0011_jessica,2025-12-04T07:00:00,Bedroom,sleep,1,0",
+                "HK0011_jessica,2025-12-04T07:05:00,Bedroom,bedroom_normal_use,0,0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    manifest = build_pretrain_corpus_manifest(
+        corpus_roots=[tmp_path],
+        policy=CorpusManifestPolicy(min_rows=2, min_features=2, max_missing_ratio=0.2),
+    )
+
+    normalized = validate_intake_artifact(manifest)
+
+    assert normalized["gate"]["approved"] is True
+    assert normalized["summary"]["user_tags"] == ["HK0011_jessica"]
+
+
+def test_intake_gate_quarantines_red_flag_files_with_explicit_reasons(tmp_path: Path):
+    clean = tmp_path / "clean.csv"
+    clean.write_text(
+        "\n".join(
+            [
+                "elder_id,timestamp,room,activity,f1,f2",
+                "HK0011_jessica,2025-12-04T07:00:00,Bedroom,sleep,1,0",
+                "HK0011_jessica,2025-12-04T07:05:00,Bedroom,bedroom_normal_use,0,0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    bad = tmp_path / "missing_date.csv"
+    bad.write_text(
+        "\n".join(
+            [
+                "elder_id,room,activity,f1,f2",
+                "HK0011_jessica,Kitchen,meal_preparation,1,0",
+                "HK0011_jessica,Kitchen,meal_preparation,1,1",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = build_pretrain_corpus_manifest(
+        corpus_roots=[tmp_path],
+        policy=CorpusManifestPolicy(min_rows=2, min_features=2, max_missing_ratio=0.2),
+    )
+    normalized = validate_intake_artifact(manifest)
+
+    assert normalized["gate"]["approved"] is True
+    assert len(normalized["quarantine"]) == 1
+    assert normalized["quarantine"][0]["path"].endswith("missing_date.csv")
+    assert normalized["quarantine"][0]["quarantine_reasons"] == ["manifest_missing_date_tag"]

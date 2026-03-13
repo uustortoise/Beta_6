@@ -1,14 +1,41 @@
+import json
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from ml.beta6.data_manifest import CorpusManifestPolicy, build_pretrain_corpus_manifest
+from ml.beta6.data_manifest import (
+    CorpusManifestPolicy,
+    build_pretrain_corpus_manifest,
+    load_feature_matrix,
+)
 
 
 def _write_csv(path: Path, matrix: np.ndarray) -> None:
     frame = pd.DataFrame(matrix, columns=[f"f{i}" for i in range(matrix.shape[1])])
     frame.to_csv(path, index=False)
+
+
+def _write_labeled_frame(path: Path, *, elder_id: str = "HK0011_jessica") -> None:
+    frame = pd.DataFrame(
+        {
+            "elder_id": [elder_id, elder_id, elder_id, elder_id],
+            "timestamp": [
+                "2025-12-04T07:00:00",
+                "2025-12-04T07:05:00",
+                "2025-12-05T12:00:00",
+                "2025-12-05T12:15:00",
+            ],
+            "room": ["Bedroom", "Bedroom", "Kitchen", "Kitchen"],
+            "activity": ["sleep", "bedroom_normal_use", "meal_preparation", "meal_preparation"],
+            "pir": [1.0, 0.0, 1.0, 1.0],
+            "door": [0.0, 0.0, 1.0, 0.0],
+        }
+    )
+    if path.suffix.lower() == ".parquet":
+        frame.to_parquet(path, index=False)
+    else:
+        frame.to_csv(path, index=False)
 
 
 def test_manifest_fingerprint_is_stable_across_reruns(tmp_path: Path):
@@ -68,3 +95,48 @@ def test_manifest_empty_corpus_is_p0_violation(tmp_path: Path):
     assert manifest["stats"]["records_kept"] == 0
     assert manifest["stats"]["p0_violations"] >= 1
     assert any(v["reason_code"] == "manifest_empty_corpus" for v in manifest["violations"])
+
+
+def test_intake_manifest_tracks_user_and_date_tags(tmp_path: Path):
+    _write_labeled_frame(tmp_path / "jessica_4_5dec.csv")
+
+    manifest = build_pretrain_corpus_manifest(
+        corpus_roots=[tmp_path],
+        policy=CorpusManifestPolicy(min_rows=2, min_features=2, max_missing_ratio=0.2),
+    )
+
+    assert manifest["gate"]["approved"] is True
+    assert manifest["summary"]["user_tags"] == ["HK0011_jessica"]
+    assert manifest["summary"]["date_tags"] == ["2025-12-04", "2025-12-05"]
+    entry = manifest["entries"][0]
+    assert entry["source_tags"]["user_tags"] == ["HK0011_jessica"]
+    assert entry["source_tags"]["date_tags"] == ["2025-12-04", "2025-12-05"]
+
+
+def test_intake_summary_includes_per_room_per_date_label_counts(tmp_path: Path):
+    _write_labeled_frame(tmp_path / "jessica_4_5dec.parquet")
+
+    manifest = build_pretrain_corpus_manifest(
+        corpus_roots=[tmp_path],
+        policy=CorpusManifestPolicy(min_rows=2, min_features=2, max_missing_ratio=0.2),
+    )
+
+    counts = manifest["summary"]["per_room_per_date_label_counts"]
+    assert {"room": "bedroom", "date": "2025-12-04", "activity": "sleep", "count": 1} in counts
+    assert {
+        "room": "kitchen",
+        "date": "2025-12-05",
+        "activity": "meal_preparation",
+        "count": 2,
+    } in counts
+
+
+def test_load_feature_matrix_ignores_metadata_columns_in_labeled_tables(tmp_path: Path):
+    csv_path = tmp_path / "labeled.csv"
+    _write_labeled_frame(csv_path)
+
+    matrix = load_feature_matrix(csv_path)
+
+    assert matrix.shape == (4, 2)
+    assert matrix.dtype == np.float32
+    assert np.array_equal(matrix[:, 0], np.array([1.0, 0.0, 1.0, 1.0], dtype=np.float32))

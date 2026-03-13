@@ -40,6 +40,43 @@ _REQUIRED_REPORT_FIELDS = (
     "smoke_json",
 )
 _REQUIRED_GATE_FIELDS = ("approved", "blocking_reasons")
+_PRETRAIN_REQUIRED_TOP_LEVEL = (
+    "manifest_version",
+    "generated_at",
+    "policy",
+    "corpus_roots",
+    "entries",
+    "duplicates",
+    "quarantine",
+    "violations",
+    "summary",
+    "gate",
+    "stats",
+    "fingerprint",
+)
+_PRETRAIN_REQUIRED_SUMMARY_FIELDS = (
+    "user_tags",
+    "date_tags",
+    "per_room_per_date_label_counts",
+)
+_PRETRAIN_REQUIRED_ENTRY_FIELDS = (
+    "path",
+    "extension",
+    "content_hash",
+    "row_count",
+    "feature_count",
+    "missing_ratio",
+    "status",
+    "source_tags",
+    "label_summary",
+)
+_PRETRAIN_REQUIRED_SOURCE_TAG_FIELDS = ("user_tags", "date_tags")
+_PRETRAIN_REQUIRED_LABEL_SUMMARY_FIELDS = ("per_room_per_date_label_counts",)
+
+
+def _is_pretrain_manifest(payload: Mapping[str, Any]) -> bool:
+    version = payload.get("manifest_version")
+    return isinstance(version, str) and version.startswith("beta6_pretrain_manifest_")
 
 
 def _ensure_mapping(name: str, value: Any) -> Mapping[str, Any]:
@@ -90,6 +127,8 @@ def validate_intake_artifact(
     Returns a normalized dictionary on success; raises on violations.
     """
     top = _ensure_mapping("intake_artifact", artifact)
+    if _is_pretrain_manifest(top):
+        return _validate_pretrain_manifest(top)
     _ensure_exact_keys("intake_artifact", top, _REQUIRED_TOP_LEVEL)
 
     version = _ensure_nonempty_str("artifact_version", top["artifact_version"])
@@ -166,6 +205,84 @@ def validate_intake_artifact(
     normalized = dict(top)
     normalized["reports"] = resolved_reports
     return normalized
+
+
+def _validate_pretrain_manifest(top: Mapping[str, Any]) -> Dict[str, Any]:
+    _ensure_exact_keys("intake_artifact", top, _PRETRAIN_REQUIRED_TOP_LEVEL)
+    _ensure_nonempty_str("manifest_version", top["manifest_version"])
+    _ensure_nonempty_str("generated_at", top["generated_at"])
+
+    policy = _ensure_mapping("policy", top["policy"])
+    if "include_extensions" not in policy:
+        raise ValueError("policy.include_extensions is required")
+
+    corpus_roots = top["corpus_roots"]
+    if not isinstance(corpus_roots, list):
+        raise TypeError("corpus_roots must be a list")
+
+    summary = _ensure_mapping("summary", top["summary"])
+    _ensure_exact_keys("summary", summary, _PRETRAIN_REQUIRED_SUMMARY_FIELDS)
+
+    gate = _ensure_mapping("gate", top["gate"])
+    _ensure_exact_keys("gate", gate, _REQUIRED_GATE_FIELDS)
+    approved = gate["approved"]
+    if not isinstance(approved, bool):
+        raise TypeError("gate.approved must be a boolean")
+    blocking_reasons = gate["blocking_reasons"]
+    if not isinstance(blocking_reasons, list) or any(
+        not isinstance(reason, str) or not reason.strip() for reason in blocking_reasons
+    ):
+        raise TypeError("gate.blocking_reasons must be a list of non-empty strings")
+
+    entries = top["entries"]
+    quarantine = top["quarantine"]
+    duplicates = top["duplicates"]
+    violations = top["violations"]
+    for field_name, payload in (
+        ("entries", entries),
+        ("quarantine", quarantine),
+        ("duplicates", duplicates),
+        ("violations", violations),
+    ):
+        if not isinstance(payload, list):
+            raise TypeError(f"{field_name} must be a list")
+
+    for item in entries:
+        entry = _ensure_mapping("entries[]", item)
+        _ensure_exact_keys("entries[]", entry, _PRETRAIN_REQUIRED_ENTRY_FIELDS)
+        _ensure_nonempty_str("entries[].path", entry["path"])
+        _ensure_nonempty_str("entries[].content_hash", entry["content_hash"])
+        if str(entry["status"]).strip() != "auto_approved":
+            raise ValueError("entries[].status must be 'auto_approved'")
+        source_tags = _ensure_mapping("entries[].source_tags", entry["source_tags"])
+        _ensure_exact_keys("entries[].source_tags", source_tags, _PRETRAIN_REQUIRED_SOURCE_TAG_FIELDS)
+        label_summary = _ensure_mapping("entries[].label_summary", entry["label_summary"])
+        _ensure_exact_keys(
+            "entries[].label_summary",
+            label_summary,
+            _PRETRAIN_REQUIRED_LABEL_SUMMARY_FIELDS,
+        )
+
+    for item in quarantine:
+        entry = _ensure_mapping("quarantine[]", item)
+        if "quarantine_reasons" not in entry:
+            raise ValueError("quarantine[].quarantine_reasons is required")
+        reasons = entry["quarantine_reasons"]
+        if not isinstance(reasons, list) or any(
+            not isinstance(reason, str) or not reason.strip() for reason in reasons
+        ):
+            raise TypeError("quarantine[].quarantine_reasons must be a list of non-empty strings")
+
+    stats = _ensure_mapping("stats", top["stats"])
+    records_kept = int(stats.get("records_kept", len(entries)) or 0)
+    if approved and records_kept <= 0:
+        raise ValueError("gate.approved cannot be true when stats.records_kept <= 0")
+    if approved and len(blocking_reasons) != 0:
+        raise ValueError("gate.approved cannot be true when blocking reasons exist")
+    if (not approved) and len(blocking_reasons) == 0:
+        raise ValueError("gate.blocking_reasons must be non-empty when gate.approved is false")
+
+    return dict(top)
 
 
 def load_intake_artifact(path: Path | str, *, require_report_files: bool = True) -> Dict[str, Any]:

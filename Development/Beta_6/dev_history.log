@@ -232,6 +232,28 @@
   - green phase: `PYTHONPATH=backend pytest backend/tests/test_beta6_import_boundaries.py -q` -> 3 passed, 3 warnings
   - regression sweep: `PYTHONPATH=backend pytest backend/tests/test_beta6_import_boundaries.py backend/tests/test_beta6_shim_import_guard.py backend/tests/test_beta6_registry_v2.py backend/tests/test_beta6_timeline_hard_gates.py backend/tests/test_beta6_trainer_intake_gate.py -q` -> 27 passed, 3 warnings
   - syntax: `python3 -m py_compile backend/ml/beta6/beta6_trainer.py backend/ml/beta6/training/beta6_trainer.py backend/ml/beta6/registry_v2.py backend/ml/beta6/registry/registry_v2.py backend/ml/beta6/timeline_hard_gates.py backend/ml/beta6/gates/timeline_hard_gates.py backend/tests/test_beta6_import_boundaries.py` -> passed
+2026-03-13 09:42:15 UTC | TASK-23 | Build governed Beta 6.2 intake/quarantine manifest contract
+- Context: Task 9 required the offline training-file intake path to distinguish clean auto-approved sources from quarantined red-flag sources. The branch already had deterministic manifesting and a separate label-pack intake gate, but there was no first-class governed manifest schema with user/date tags, per-room/per-date label summaries, or intake-gate compatibility.
+- Files changed:
+  - `backend/ml/beta6/data/data_manifest.py`
+  - `backend/ml/beta6/gates/intake_gate.py`
+  - `backend/scripts/build_pretrain_corpus_manifest.py`
+  - `backend/tests/test_build_pretrain_corpus_manifest_script.py`
+  - `backend/tests/test_beta6_data_manifest.py`
+  - `backend/tests/test_beta6_intake_gate.py`
+  - `backend/tests/test_beta6_intake_precheck.py`
+  - `docs/planning/beta6_pretrain_corpus_manifest.md`
+- Actions:
+  - upgraded the pretrain corpus manifest builder to emit a governed `v2` schema with explicit `entries`, `quarantine`, `summary`, and `gate` sections
+  - made tabular manifests metadata-aware by excluding user/date/room/activity columns from feature-matrix quality checks, which allows labeled training tables to auto-approve when their numeric sensor features are usable
+  - added user/date tagging plus aggregated `per_room_per_date_label_counts` summaries for labeled tabular sources
+  - changed intake semantics so mixed corpora can proceed when at least one file is auto-approved while preserving quarantined sources and reasons for review
+  - extended `validate_intake_artifact(...)` / `enforce_approved_intake_artifact(...)` to accept the governed pretrain manifest contract alongside the legacy label-pack intake artifact
+- Verification:
+  - red phase: `PYTHONPATH=backend pytest backend/tests/test_build_pretrain_corpus_manifest_script.py backend/tests/test_beta6_data_manifest.py backend/tests/test_beta6_intake_gate.py backend/tests/test_beta6_intake_precheck.py -q` -> 7 failed, 12 passed (expected missing governed-manifest features before implementation)
+  - green phase: `PYTHONPATH=backend pytest backend/tests/test_build_pretrain_corpus_manifest_script.py backend/tests/test_beta6_data_manifest.py backend/tests/test_beta6_intake_gate.py backend/tests/test_beta6_intake_precheck.py -q` -> 19 passed, 3 warnings
+  - regression sweep: `PYTHONPATH=backend pytest backend/tests/test_build_pretrain_corpus_manifest_script.py backend/tests/test_beta6_data_manifest.py backend/tests/test_beta6_intake_gate.py backend/tests/test_beta6_intake_precheck.py backend/tests/test_beta6_self_supervised_pretrain.py backend/tests/test_beta6_trainer_intake_gate.py -q` -> 30 passed, 3 warnings
+  - syntax: `python3 -m py_compile backend/scripts/build_pretrain_corpus_manifest.py backend/ml/beta6/data/data_manifest.py backend/ml/beta6/gates/intake_gate.py backend/ml/beta6/gates/intake_precheck.py backend/tests/test_build_pretrain_corpus_manifest_script.py backend/tests/test_beta6_data_manifest.py backend/tests/test_beta6_intake_gate.py backend/tests/test_beta6_intake_precheck.py` -> passed
 2026-03-13 09:17:33 UTC | TASK-22 | Fix Task 7 review regressions in registry alias strictness and certification-status visibility
 - Context: review of `dcc4789` found two follow-up issues: registry repair was treating missing latest `*_decision_trace.json` aliases as mandatory and skipping otherwise loadable rooms, and the new `rejected_by_beta61_certification` training status was not counted or rendered consistently in ops/health/dashboard summaries.
 - Files changed:

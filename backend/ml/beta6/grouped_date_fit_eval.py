@@ -301,6 +301,43 @@ def _prepare_segmented_holdout_frame(
     return pd.concat(processed_segments, ignore_index=True)
 
 
+def _build_explicit_split_sequence_data(
+    *,
+    platform: ElderlyCarePlatform,
+    room_name: str,
+    split_df: pd.DataFrame | None,
+    seq_length: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    if split_df is None or split_df.empty:
+        return None
+
+    processed = _prepare_segmented_holdout_frame(
+        platform=platform,
+        room_name=room_name,
+        holdout_df=split_df,
+    )
+    if "activity_encoded" not in processed.columns:
+        raise ValueError(f"explicit split preprocessing missing activity_encoded for room={room_name}")
+
+    sensor_data = np.asarray(processed[platform.sensor_columns].values, dtype=np.float32)
+    labels = np.asarray(processed["activity_encoded"].values, dtype=np.int32)
+    timestamps = np.asarray(pd.to_datetime(processed["timestamp"]), dtype="datetime64[ns]")
+    X_seq, y_seq, seq_timestamps = safe_create_sequences(
+        platform=platform,
+        sensor_data=sensor_data,
+        labels=labels,
+        seq_length=int(seq_length),
+        room_name=room_name,
+        timestamps=timestamps,
+        strict=True,
+    )
+    return (
+        np.asarray(X_seq, dtype=np.float32),
+        np.asarray(y_seq, dtype=np.int32),
+        np.asarray(seq_timestamps, dtype="datetime64[ns]"),
+    )
+
+
 def _encoder_classes(label_encoder: Any) -> list[str]:
     classes = getattr(label_encoder, "classes_", None)
     if classes is None:
@@ -428,15 +465,45 @@ def _fit_room_candidate(
         train_df=train_df,
     )
     resolved_seq_length = int(seq_length or calculate_sequence_length(platform, room_name))
-    with _zero_validation_split():
-        fit_metrics = pipeline.train_room(
-            room_name=room_name,
-            processed_df=processed_train,
-            seq_length=resolved_seq_length,
-            elder_id=candidate_namespace,
-            training_mode="full_retrain",
-            defer_promotion=True,
+    explicit_validation_data = _build_explicit_split_sequence_data(
+        platform=platform,
+        room_name=room_name,
+        split_df=split_frames.get("validation"),
+        seq_length=resolved_seq_length,
+    )
+    explicit_calibration_sequences = _build_explicit_split_sequence_data(
+        platform=platform,
+        room_name=room_name,
+        split_df=split_frames.get("calibration"),
+        seq_length=resolved_seq_length,
+    )
+    explicit_calibration_data = (
+        None
+        if explicit_calibration_sequences is None
+        else (
+            explicit_calibration_sequences[0],
+            explicit_calibration_sequences[1],
         )
+    )
+
+    train_room_kwargs = {
+        "room_name": room_name,
+        "processed_df": processed_train,
+        "seq_length": resolved_seq_length,
+        "elder_id": candidate_namespace,
+        "training_mode": "full_retrain",
+        "defer_promotion": True,
+    }
+    if explicit_validation_data is not None:
+        train_room_kwargs["explicit_validation_data"] = explicit_validation_data
+    if explicit_calibration_data is not None:
+        train_room_kwargs["explicit_calibration_data"] = explicit_calibration_data
+
+    if explicit_validation_data is not None or explicit_calibration_data is not None:
+        fit_metrics = pipeline.train_room(**train_room_kwargs)
+    else:
+        with _zero_validation_split():
+            fit_metrics = pipeline.train_room(**train_room_kwargs)
     if not isinstance(fit_metrics, dict):
         raise ValueError(f"fit did not return metrics for room={room_name}")
     saved_version = int(fit_metrics.get("saved_version", 0) or 0)

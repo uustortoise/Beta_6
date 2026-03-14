@@ -778,6 +778,82 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertEqual(metrics["model_identity"]["family"], "per_resident_full_model")
         self.assertIsNone(metrics["model_identity"]["backbone_id"])
 
+    @patch.object(TrainingPipeline, "_calibrate_class_thresholds")
+    @patch('ml.training.TrainingPipeline.augment_training_data')
+    @patch('ml.training.build_transformer_model')
+    @patch('ml.training.get_room_config')
+    def test_train_room_uses_explicit_validation_and_calibration_overrides(
+        self,
+        mock_get_config,
+        mock_build_model,
+        mock_augment,
+        mock_calibrate_thresholds,
+    ):
+        mock_config = MagicMock()
+        mock_config.get_sequence_window.return_value = 60
+        mock_config.get_data_interval.return_value = 10
+        mock_get_config.return_value = mock_config
+
+        seq_timestamps = pd.date_range(start='2023-01-01', periods=10, freq='10s').to_numpy()
+        mock_augment.return_value = (
+            np.zeros((10, 5, 3), dtype=np.float32),
+            np.zeros(10, dtype=np.int32),
+            seq_timestamps,
+        )
+
+        mock_model = MagicMock()
+        mock_model.fit.return_value.history = {'accuracy': [0.95], 'val_loss': [0.15]}
+        mock_model.predict.side_effect = lambda X, verbose=0: np.tile(
+            np.asarray([[0.9, 0.1]], dtype=np.float32),
+            (len(X), 1),
+        )
+        mock_build_model.return_value = mock_model
+
+        captured = {}
+
+        def _capture_calibration(*, model, X_calib, y_calib, room_name):
+            captured["X_calib"] = np.asarray(X_calib)
+            captured["y_calib"] = np.asarray(y_calib)
+            return {0: 0.5, 1: 0.5}
+
+        mock_calibrate_thresholds.side_effect = _capture_calibration
+
+        processed_df = pd.DataFrame({
+            's1': np.random.randn(100),
+            's2': np.random.randn(100),
+            's3': np.random.randn(100),
+            'activity_encoded': np.random.randint(0, 2, 100),
+            'timestamp': pd.date_range(start='2023-01-01', periods=100, freq='10s')
+        })
+        explicit_validation = (
+            np.ones((4, 5, 3), dtype=np.float32),
+            np.asarray([0, 1, 0, 1], dtype=np.int32),
+            pd.date_range(start='2023-01-02', periods=4, freq='10s').to_numpy(),
+        )
+        explicit_calibration = (
+            np.full((3, 5, 3), 2.0, dtype=np.float32),
+            np.asarray([1, 0, 1], dtype=np.int32),
+        )
+
+        metrics = self.pipeline.train_room(
+            room_name='room1',
+            processed_df=processed_df,
+            seq_length=5,
+            elder_id='elder1',
+            explicit_validation_data=explicit_validation,
+            explicit_calibration_data=explicit_calibration,
+        )
+
+        fit_validation = mock_model.fit.call_args.kwargs["validation_data"]
+        np.testing.assert_array_equal(fit_validation[0], explicit_validation[0])
+        np.testing.assert_array_equal(fit_validation[1], explicit_validation[1])
+        np.testing.assert_array_equal(captured["X_calib"], explicit_calibration[0])
+        np.testing.assert_array_equal(captured["y_calib"], explicit_calibration[1])
+        self.assertEqual(metrics["validation_source"], "explicit_split")
+        self.assertEqual(metrics["calibration_source"], "explicit_split")
+        self.assertEqual(metrics["validation_samples"], 4)
+        self.assertEqual(metrics["calibration_samples"], 3)
+
     @patch('ml.training.TrainingPipeline.augment_training_data')
     @patch('ml.training.build_transformer_model')
     @patch('ml.training.get_room_config')

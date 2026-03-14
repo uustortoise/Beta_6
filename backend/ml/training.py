@@ -5485,7 +5485,9 @@ class TrainingPipeline:
                    training_mode: str = "full_retrain",
                    defer_promotion: bool = False,
                    gate_evaluation_result: Optional[Dict[str, Any]] = None,
-                   event_first_shadow: Optional[bool] = None) -> Dict[str, Any]:
+                   event_first_shadow: Optional[bool] = None,
+                   explicit_validation_data: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]] = None,
+                   explicit_calibration_data: Optional[Tuple[np.ndarray, np.ndarray]] = None) -> Dict[str, Any]:
         """
         Train a model for a specific room.
         
@@ -5499,6 +5501,10 @@ class TrainingPipeline:
             defer_promotion: Whether to defer promotion to latest
             gate_evaluation_result: Optional pre-training gate evaluation result from GateIntegrationPipeline
             event_first_shadow: Optional override for event-first shadow execution.
+            explicit_validation_data: Optional explicit validation split override as
+                `(X_val, y_val, seq_timestamps)` for grouped-date flows.
+            explicit_calibration_data: Optional explicit calibration split override as
+                `(X_calib, y_calib)` for grouped-date flows.
             
         Returns:
             Dict containing training metrics with gate_pass and gate_reasons
@@ -5672,6 +5678,31 @@ class TrainingPipeline:
             X_seq = X_seq[order]
             y_seq = y_seq[order]
             seq_timestamps = seq_timestamps[order]
+
+            validation_override = None
+            if explicit_validation_data is not None:
+                X_val_override = np.asarray(explicit_validation_data[0], dtype=np.float32)
+                y_val_override = np.asarray(explicit_validation_data[1], dtype=np.int32)
+                ts_val_override = np.asarray(explicit_validation_data[2], dtype="datetime64[ns]")
+                if not (
+                    len(X_val_override) == len(y_val_override) == len(ts_val_override)
+                ):
+                    raise ValueError(
+                        f"explicit validation data mismatch for {room_name}: "
+                        f"X={len(X_val_override)}, y={len(y_val_override)}, ts={len(ts_val_override)}"
+                    )
+                validation_override = (X_val_override, y_val_override, ts_val_override)
+
+            calibration_override = None
+            if explicit_calibration_data is not None:
+                X_calib_override = np.asarray(explicit_calibration_data[0], dtype=np.float32)
+                y_calib_override = np.asarray(explicit_calibration_data[1], dtype=np.int32)
+                if len(X_calib_override) != len(y_calib_override):
+                    raise ValueError(
+                        f"explicit calibration data mismatch for {room_name}: "
+                        f"X={len(X_calib_override)}, y={len(y_calib_override)}"
+                    )
+                calibration_override = (X_calib_override, y_calib_override)
 
             unoccupied_cfg = self._resolve_unoccupied_downsample_config(room_name)
             total_sequences_pre_split = int(len(X_seq))
@@ -5848,7 +5879,46 @@ class TrainingPipeline:
             shadow_eval_probs = None
             split_support_debug: Dict[str, Any] = {}
             calib_split_support_debug: Dict[str, Any] = {}
-            if val_split > 0:
+            validation_source = "none"
+            calibration_source = "none"
+            if validation_override is not None or calibration_override is not None:
+                X_train, y_train = X_seq, y_seq
+                ts_train = seq_timestamps
+                if validation_override is not None:
+                    X_val, y_val, ts_val = validation_override
+                    validation_data = (X_val, y_val)
+                    shadow_eval_timestamps = ts_val
+                    validation_source = "explicit_split"
+                else:
+                    validation_data = None
+                    shadow_eval_timestamps = None
+
+                if calibration_override is not None:
+                    calibration_data = calibration_override
+                    calibration_source = "explicit_split"
+                elif validation_data is not None:
+                    calibration_data = validation_data
+                    calibration_source = "validation_fallback"
+                else:
+                    calibration_data = None
+
+                split_support_debug = {
+                    "mode": "explicit_split",
+                    "train_sequences": int(len(X_train)),
+                    "validation_sequences": int(len(validation_data[0])) if validation_data is not None else 0,
+                }
+                calib_split_support_debug = {
+                    "mode": calibration_source,
+                    "calibration_sequences": int(len(calibration_data[0])) if calibration_data is not None else 0,
+                }
+                sampling_reference_labels = validation_data[1] if validation_data is not None else None
+                logger.info(
+                    f"Using explicit grouped-date split for {room_name}: "
+                    f"Train={len(X_train)}, "
+                    f"Val={len(validation_data[0]) if validation_data is not None else 0}, "
+                    f"Calib={len(calibration_data[0]) if calibration_data is not None else 0}"
+                )
+            elif val_split > 0:
                 default_split_idx = int(len(X_seq) * (1 - val_split))
                 default_split_idx = max(1, min(len(X_seq) - 1, default_split_idx))
                 split_idx, split_support_debug = self._select_temporal_split_index_with_support(
@@ -5901,6 +5971,8 @@ class TrainingPipeline:
                         validation_data = (X_val, y_val)
                         shadow_eval_timestamps = ts_val
                         calibration_data = (X_calib, y_calib)
+                        validation_source = "temporal_holdout_split"
+                        calibration_source = "temporal_calibration_split"
                         logger.info(
                             f"Using split for {room_name}: Train={len(X_train)}, "
                             f"Val={len(X_val)}, Calib={len(X_calib)}"
@@ -5909,6 +5981,8 @@ class TrainingPipeline:
                         validation_data = (X_holdout, y_holdout)
                         shadow_eval_timestamps = ts_holdout
                         calibration_data = (X_holdout, y_holdout)
+                        validation_source = "temporal_holdout_split"
+                        calibration_source = "validation_fallback"
                         logger.warning(
                             f"Calibration split fallback for {room_name}: "
                             f"holdout support could not satisfy separate val/calib guarantees "
@@ -5918,6 +5992,8 @@ class TrainingPipeline:
                     validation_data = (X_holdout, y_holdout)
                     shadow_eval_timestamps = ts_holdout
                     calibration_data = (X_holdout, y_holdout)
+                    validation_source = "temporal_holdout_split"
+                    calibration_source = "validation_fallback"
                     logger.warning(
                         f"Calibration split fallback for {room_name}: "
                         f"using full holdout for validation+calibration ({len(X_holdout)} samples)"
@@ -5933,6 +6009,8 @@ class TrainingPipeline:
                 X_train, y_train = X_seq, y_seq
                 ts_train = seq_timestamps
                 validation_data = None
+                validation_source = "none"
+                calibration_source = "none"
                 sampling_reference_labels = None
                 logger.info(f"Training on full dataset ({len(X_seq)} samples)")
 
@@ -6335,6 +6413,10 @@ class TrainingPipeline:
                 'train_class_support_post_minority_sampling': train_class_support_post_minority_sampling,
                 'policy_hash': policy_hash,
                 'metric_source': 'holdout_validation',
+                'validation_source': validation_source,
+                'calibration_source': calibration_source,
+                'validation_samples': int(len(validation_data[0])) if validation_data is not None else 0,
+                'calibration_samples': int(len(calibration_data[0])) if calibration_data is not None else 0,
                 'validation_min_class_support': 0,
                 'validation_class_support': {},
                 'holdout_min_class_support': 0,

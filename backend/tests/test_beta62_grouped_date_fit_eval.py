@@ -8,6 +8,7 @@ import pytest
 from scripts import run_beta62_grouped_date_fit_eval as script
 from ml.beta6.grouped_date_fit_eval import (
     _evaluate_room_candidate,
+    _fit_room_candidate,
     _prepare_segmented_training_frame,
     _resolve_saved_candidate_artifacts,
     run_grouped_date_fit_eval,
@@ -659,6 +660,120 @@ def test_grouped_date_fit_eval_evaluates_holdout_with_segmented_sequences(
 
     assert report["status"] == "completed"
     assert report["sequence_count"] == 4
+
+
+def test_fit_room_candidate_passes_explicit_validation_and_calibration_sequences(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    split_frames = {
+        "train": _prepared_split_frame(
+            start="2025-12-04 08:00:00",
+            room="Bathroom",
+            activity="bathroom_normal_use",
+            split="train",
+            segment_role="baseline",
+            segment_date="2025-12-04",
+        ),
+        "validation": _prepared_split_frame(
+            start="2025-12-05 08:00:00",
+            room="Bathroom",
+            activity="bathroom_normal_use",
+            split="validation",
+            segment_role="baseline",
+            segment_date="2025-12-05",
+        ),
+        "calibration": _prepared_split_frame(
+            start="2025-12-06 08:00:00",
+            room="Bathroom",
+            activity="bathroom_normal_use",
+            split="calibration",
+            segment_role="baseline",
+            segment_date="2025-12-06",
+        ),
+        "holdout": _prepared_split_frame(
+            start="2026-03-08 08:00:00",
+            room="Bathroom",
+            activity="bathroom_normal_use",
+            split="holdout",
+            segment_role="candidate",
+            segment_date="2026-03-08",
+        ),
+    }
+
+    captured = {}
+
+    class DummyPlatform:
+        sensor_columns = ["co2", "vibration", "humidity", "temperature", "sound", "motion", "light"]
+
+        def __init__(self):
+            self.scalers = {}
+
+        def preprocess_without_scaling(self, df, room_name, is_training=False, apply_denoising=False):
+            return df.copy()
+
+        def apply_scaling(self, df, room_name, is_training=False, scaler_fit_range=None):
+            if is_training:
+                self.scalers[room_name] = object()
+            scaled = df.copy()
+            scaled["activity_encoded"] = 0
+            return scaled
+
+    class DummyTrainingPipeline:
+        def __init__(self, platform, registry):
+            self.platform = platform
+            self.registry = registry
+            self.augment_training_data = lambda *args: args[3:6]
+
+        def train_room(self, **kwargs):
+            captured["explicit_validation_data"] = kwargs.get("explicit_validation_data")
+            captured["explicit_calibration_data"] = kwargs.get("explicit_calibration_data")
+            return {
+                "saved_version": 3,
+                "validation_source": "explicit_split",
+                "calibration_source": "explicit_split",
+                "validation_samples": int(len(kwargs["explicit_validation_data"][1])),
+                "calibration_samples": int(len(kwargs["explicit_calibration_data"][1])),
+            }
+
+    monkeypatch.setattr("ml.beta6.grouped_date_fit_eval.ElderlyCarePlatform", DummyPlatform)
+    monkeypatch.setattr("ml.beta6.grouped_date_fit_eval.TrainingPipeline", DummyTrainingPipeline)
+    monkeypatch.setattr("ml.beta6.grouped_date_fit_eval.ModelRegistry", lambda _: object())
+    monkeypatch.setattr(
+        "ml.beta6.grouped_date_fit_eval._resolve_saved_candidate_artifacts",
+        lambda **kwargs: {
+            "requested_saved_version": 3,
+            "resolved_saved_version": 3,
+            "artifact_paths": {
+                "model": str(tmp_path / "Bathroom_v3_model.keras"),
+                "scaler": str(tmp_path / "Bathroom_v3_scaler.pkl"),
+                "label_encoder": str(tmp_path / "Bathroom_v3_label_encoder.pkl"),
+            },
+        },
+    )
+
+    fit_result = _fit_room_candidate(
+        room_name="Bathroom",
+        split_frames=split_frames,
+        candidate_namespace="HK0011_jessica_candidate_grouped_date_explicit",
+        backend_dir=tmp_path,
+        seq_length=3,
+    )
+
+    explicit_validation = captured["explicit_validation_data"]
+    explicit_calibration = captured["explicit_calibration_data"]
+
+    assert explicit_validation is not None
+    assert explicit_calibration is not None
+    assert explicit_validation[0].shape[0] > 0
+    assert explicit_validation[1].shape[0] > 0
+    assert explicit_validation[2].shape[0] == explicit_validation[1].shape[0]
+    assert explicit_calibration[0].shape[0] > 0
+    assert explicit_calibration[1].shape[0] > 0
+    assert fit_result["fit_metrics"]["validation_source"] == "explicit_split"
+    assert fit_result["fit_metrics"]["calibration_source"] == "explicit_split"
+    assert fit_result["fit_metrics"]["validation_samples"] == int(explicit_validation[1].shape[0])
+    assert fit_result["fit_metrics"]["calibration_samples"] == int(explicit_calibration[1].shape[0])
 
 
 def test_grouped_date_fit_eval_cli_writes_result_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

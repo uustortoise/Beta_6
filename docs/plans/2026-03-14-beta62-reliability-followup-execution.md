@@ -12,11 +12,11 @@ This document is execution-oriented. Each task is meant to be run in order and c
 
 ## Live Execution Ledger
 
-- Status date: `2026-03-14`
+- Status date: `2026-03-14 14:32:51 UTC`
 - Execution branch: `codex/beta62-reliability-followup-execution`
 - Execution workspace: `/Users/dickson/DT/DT_development/Development/Beta_6/.worktrees/beta62-reliability-followup-execution`
 - Base commit: `c309523`
-- Current task: `Task 2: Make validation and calibration real`
+- Current task: `Task 3: Make timeline quality first-class`
 - Baseline verification on this branch:
   - `pytest backend/tests/test_beta62_grouped_date_supervised.py backend/tests/test_beta62_grouped_date_fit_eval.py -q`
   - result: `8 passed, 3 warnings in 1.09s`
@@ -30,8 +30,8 @@ This document is execution-oriented. Each task is meant to be run in order and c
 | Task | Status | Exact reason / dependency |
 | --- | --- | --- |
 | Task 1: Finish the grouped-date path end-to-end | completed | Hardened grouped-date code and tests were ported onto this branch. The safe-6 rerun finished cleanly and wrote `grouped_date_fit_eval_report_rerun.json` without manual recovery. Known caveat carried forward: result `holdout_metrics` still emit `walk_forward_unavailable` summaries instead of direct holdout accuracy/F1. |
-| Task 2: Make validation and calibration real | in_progress | Next reliability gap. The rerun still logs `No calibration split available ... using default threshold=0.8`, and the grouped-date result payload is not yet using explicit validation/calibration splits to produce decision-grade holdout summaries. |
-| Task 3: Make timeline quality first-class | deferred | Depends on Task 2 so timeline gates attach to the real candidate result payload rather than a still-moving runner contract. |
+| Task 2: Make validation and calibration real | completed | `grouped_date_fit_eval.py` now builds explicit validation/calibration sequences from grouped-date split artifacts, `TrainingPipeline.train_room(...)` accepts explicit override inputs, and fit metrics now record `validation_source`, `calibration_source`, `validation_samples`, and `calibration_samples`. Verified by new red-green coverage plus the grouped-date/training regression slice. |
+| Task 3: Make timeline quality first-class | deferred | Next task. Depends on the Task 2 split-consumption surface now being stable. |
 | Task 4: Standardize room decision outputs | deferred | Depends on Task 3 so statuses can include timeline-quality blockers from the same result surface. |
 | Task 5: Keep grouped-date worst-slice gating | deferred | Depends on Task 4 so worst-slice findings land inside the standardized room decision payload. |
 | Task 6: Keep data governance strict | deferred | Depends on Task 1 and Task 5 so manifest lineage and grouped-date decision outputs use one settled evidence contract. |

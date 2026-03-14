@@ -1740,6 +1740,8 @@ class TrainingPipeline:
         defer_promotion: bool = False,
         gate_evaluation_result: Optional[Dict[str, Any]] = None,
         event_first_shadow: Optional[bool] = None,
+        explicit_validation_data: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]] = None,
+        explicit_calibration_data: Optional[Tuple[np.ndarray, np.ndarray]] = None,
     ) -> Dict[str, Any]:
         repro = self._active_policy().reproducibility
         seeds = [int(seed) for seed in repro.multi_seed_candidate_seeds] or [int(repro.random_seed)]
@@ -1763,6 +1765,8 @@ class TrainingPipeline:
                     defer_promotion=True,
                     gate_evaluation_result=gate_evaluation_result,
                     event_first_shadow=event_first_shadow,
+                    explicit_validation_data=explicit_validation_data,
+                    explicit_calibration_data=explicit_calibration_data,
                 )
             summary, no_regress_ok = self._build_seed_panel_candidate_summary(candidate_metrics or {})
             candidates.append(
@@ -5521,6 +5525,8 @@ class TrainingPipeline:
                     defer_promotion=defer_promotion,
                     gate_evaluation_result=gate_evaluation_result,
                     event_first_shadow=event_first_shadow,
+                    explicit_validation_data=explicit_validation_data,
+                    explicit_calibration_data=explicit_calibration_data,
                 )
             training_mode = (training_mode or "full_retrain").strip().lower()
             is_correction_fine_tune = training_mode == "correction_fine_tune"
@@ -5877,6 +5883,7 @@ class TrainingPipeline:
             shadow_eval_timestamps = None
             shadow_eval_y_true = None
             shadow_eval_probs = None
+            holdout_eval_labels = None
             split_support_debug: Dict[str, Any] = {}
             calib_split_support_debug: Dict[str, Any] = {}
             validation_source = "none"
@@ -5939,6 +5946,7 @@ class TrainingPipeline:
                 X_holdout = X_seq[split_idx:]
                 y_holdout = y_seq[split_idx:]
                 ts_holdout = seq_timestamps[split_idx:]
+                holdout_eval_labels = y_holdout
 
                 # Separate calibration split from holdout when enough samples exist.
                 if len(X_holdout) >= int(calibration_policy.separate_calibration_min_holdout):
@@ -6502,13 +6510,14 @@ class TrainingPipeline:
                 metrics["prediction_audit"] = prediction_audit
             
             # Add per-class metrics if validation was performed
-            if val_split > 0:
-                holdout_classes, holdout_counts = np.unique(y_holdout, return_counts=True)
-                holdout_support_map = {str(int(c)): int(n) for c, n in zip(holdout_classes, holdout_counts)}
-                metrics["holdout_class_support"] = holdout_support_map
-                metrics["holdout_min_class_support"] = (
-                    min(holdout_support_map.values()) if holdout_support_map else 0
-                )
+            if validation_data is not None:
+                if holdout_eval_labels is not None:
+                    holdout_classes, holdout_counts = np.unique(holdout_eval_labels, return_counts=True)
+                    holdout_support_map = {str(int(c)): int(n) for c, n in zip(holdout_classes, holdout_counts)}
+                    metrics["holdout_class_support"] = holdout_support_map
+                    metrics["holdout_min_class_support"] = (
+                        min(holdout_support_map.values()) if holdout_support_map else 0
+                    )
                 y_val_eval = validation_data[1]
                 val_classes, val_counts = np.unique(y_val_eval, return_counts=True)
                 val_support_map = {str(int(c)): int(n) for c, n in zip(val_classes, val_counts)}

@@ -854,6 +854,73 @@ class TestTrainingPipeline(unittest.TestCase):
         self.assertEqual(metrics["validation_samples"], 4)
         self.assertEqual(metrics["calibration_samples"], 3)
 
+    @patch.object(TrainingPipeline, "_calibrate_class_thresholds")
+    @patch('ml.training.TrainingPipeline.augment_training_data')
+    @patch('ml.training.build_transformer_model')
+    @patch('ml.training.get_room_config')
+    def test_train_room_explicit_overrides_drive_metrics_for_large_sequence_sets(
+        self,
+        mock_get_config,
+        mock_build_model,
+        mock_augment,
+        mock_calibrate_thresholds,
+    ):
+        mock_config = MagicMock()
+        mock_config.get_sequence_window.return_value = 60
+        mock_config.get_data_interval.return_value = 10
+        mock_get_config.return_value = mock_config
+
+        sequence_count = 120
+        seq_timestamps = pd.date_range(start='2023-01-01', periods=sequence_count, freq='10s').to_numpy()
+        mock_augment.return_value = (
+            np.zeros((sequence_count, 5, 3), dtype=np.float32),
+            np.asarray(([0, 1] * (sequence_count // 2)), dtype=np.int32),
+            seq_timestamps,
+        )
+
+        mock_model = MagicMock()
+        mock_model.fit.return_value.history = {'accuracy': [0.95], 'val_loss': [0.15]}
+        mock_model.predict.side_effect = lambda X, verbose=0: np.tile(
+            np.asarray([[0.8, 0.2]], dtype=np.float32),
+            (len(X), 1),
+        )
+        mock_build_model.return_value = mock_model
+        mock_calibrate_thresholds.return_value = {0: 0.5, 1: 0.5}
+
+        processed_df = pd.DataFrame({
+            's1': np.random.randn(200),
+            's2': np.random.randn(200),
+            's3': np.random.randn(200),
+            'activity_encoded': np.random.randint(0, 2, 200),
+            'timestamp': pd.date_range(start='2023-01-01', periods=200, freq='10s')
+        })
+        explicit_validation = (
+            np.ones((6, 5, 3), dtype=np.float32),
+            np.asarray([0, 1, 0, 1, 0, 1], dtype=np.int32),
+            pd.date_range(start='2023-01-02', periods=6, freq='10s').to_numpy(),
+        )
+        explicit_calibration = (
+            np.full((4, 5, 3), 2.0, dtype=np.float32),
+            np.asarray([1, 0, 1, 0], dtype=np.int32),
+        )
+
+        metrics = self.pipeline.train_room(
+            room_name='room1',
+            processed_df=processed_df,
+            seq_length=5,
+            elder_id='elder1',
+            explicit_validation_data=explicit_validation,
+            explicit_calibration_data=explicit_calibration,
+        )
+
+        self.assertEqual(metrics["validation_source"], "explicit_split")
+        self.assertEqual(metrics["calibration_source"], "explicit_split")
+        self.assertEqual(metrics["validation_class_support"], {"0": 3, "1": 3})
+        self.assertEqual(metrics["validation_min_class_support"], 3)
+        self.assertEqual(metrics["holdout_class_support"], {})
+        self.assertEqual(metrics["holdout_min_class_support"], 0)
+        self.assertIsNotNone(metrics.get("macro_f1"))
+
     @patch('ml.training.TrainingPipeline.augment_training_data')
     @patch('ml.training.build_transformer_model')
     @patch('ml.training.get_room_config')
@@ -2512,6 +2579,67 @@ class TestTrainingPipeline(unittest.TestCase):
         unexpected_retrain.train_room.assert_not_called()
         self.assertEqual(result["saved_version"], 102)
         self.assertEqual(result["seed_panel_debug"]["selected_seed"], 13)
+
+    def test_train_room_with_multi_seed_panel_forwards_explicit_split_overrides(self):
+        self.pipeline._active_policy = MagicMock(
+            return_value=SimpleNamespace(
+                reproducibility=SimpleNamespace(
+                    multi_seed_candidate_seeds=[11, 13],
+                    random_seed=11,
+                )
+            )
+        )
+        explicit_validation = (
+            np.ones((2, 5, 3), dtype=np.float32),
+            np.asarray([0, 1], dtype=np.int32),
+            pd.date_range(start='2023-01-02', periods=2, freq='10s').to_numpy(),
+        )
+        explicit_calibration = (
+            np.full((2, 5, 3), 2.0, dtype=np.float32),
+            np.asarray([1, 0], dtype=np.int32),
+        )
+
+        first_candidate = MagicMock()
+        first_candidate.train_room.return_value = {
+            "macro_f1": 0.60,
+            "gate_pass": True,
+            "gate_reasons": [],
+            "predicted_class_distribution": {
+                "livingroom_normal_use": 55,
+                "unoccupied": 45,
+            },
+            "saved_version": 101,
+        }
+        second_candidate = MagicMock()
+        second_candidate.train_room.return_value = {
+            "macro_f1": 0.62,
+            "gate_pass": True,
+            "gate_reasons": [],
+            "predicted_class_distribution": {
+                "livingroom_normal_use": 50,
+                "unoccupied": 50,
+            },
+            "saved_version": 102,
+        }
+
+        with patch.object(
+            self.pipeline,
+            "_spawn_candidate_pipeline",
+            side_effect=[first_candidate, second_candidate],
+        ):
+            self.pipeline._train_room_with_multi_seed_panel(
+                room_name="LivingRoom",
+                processed_df=pd.DataFrame(),
+                seq_length=5,
+                elder_id="elder-1",
+                explicit_validation_data=explicit_validation,
+                explicit_calibration_data=explicit_calibration,
+            )
+
+        for candidate in (first_candidate, second_candidate):
+            kwargs = candidate.train_room.call_args.kwargs
+            self.assertIs(kwargs["explicit_validation_data"], explicit_validation)
+            self.assertIs(kwargs["explicit_calibration_data"], explicit_calibration)
 
     def test_spawn_candidate_pipeline_respects_runtime_seed_override_with_explicit_policy(self):
         policy = load_policy_from_env(

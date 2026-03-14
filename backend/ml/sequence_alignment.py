@@ -18,12 +18,42 @@ class SequenceLabelAlignmentError(Exception):
     pass
 
 
+def _resolve_max_sequence_gap_seconds(platform, room_name: str) -> Optional[float]:
+    interval_token = getattr(platform, "data_interval", None)
+    try:
+        from config import get_room_config
+
+        room_interval = get_room_config().get_data_interval(room_name)
+        if room_interval:
+            interval_token = room_interval
+    except Exception:
+        pass
+
+    if not interval_token:
+        return None
+    try:
+        if isinstance(interval_token, (int, float)):
+            seconds = float(interval_token)
+        else:
+            token_str = str(interval_token).strip()
+            if token_str.replace(".", "", 1).isdigit():
+                seconds = float(token_str)
+            else:
+                seconds = float(pd.to_timedelta(token_str).total_seconds())
+    except Exception:
+        return None
+    if seconds <= 0:
+        return None
+    return max(seconds * 1.5, seconds + 1.0)
+
+
 def create_labeled_sequences_strict(
     sensor_data: np.ndarray,
     labels: np.ndarray,
     seq_length: int,
     stride: int = 1,
     timestamps: Optional[np.ndarray] = None,
+    max_gap_seconds: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Create sequences with strict label alignment.
@@ -86,9 +116,25 @@ def create_labeled_sequences_strict(
     y_seq = []
     seq_ts = []
     
+    max_gap_ns = None
+    if max_gap_seconds is not None:
+        max_gap_ns = int(float(max_gap_seconds) * 1_000_000_000)
+
+    skipped_gap_windows = 0
     for i in range(n_sequences):
         start_idx = i * stride
         end_idx = start_idx + seq_length
+
+        if timestamps is not None and max_gap_ns is not None:
+            window_ts = pd.to_datetime(timestamps[start_idx:end_idx], errors="coerce")
+            if window_ts.isna().any():
+                skipped_gap_windows += 1
+                continue
+            ts_ns = window_ts.view("int64")
+            diffs = np.diff(ts_ns)
+            if np.any(diffs <= 0) or np.any(diffs > max_gap_ns):
+                skipped_gap_windows += 1
+                continue
         
         # Extract sequence
         seq = sensor_data[start_idx:end_idx]
@@ -101,6 +147,12 @@ def create_labeled_sequences_strict(
         if timestamps is not None:
             seq_ts.append(timestamps[end_idx - 1])
     
+    if not X_seq:
+        raise SequenceLabelAlignmentError(
+            f"No sequences remain after timestamp-gap filtering: "
+            f"n_samples={n_samples}, seq_length={seq_length}, skipped_windows={skipped_gap_windows}"
+        )
+
     X_seq = np.array(X_seq)
     y_seq = np.array(y_seq)
     seq_ts = np.array(seq_ts) if timestamps is not None else np.arange(len(y_seq))
@@ -220,12 +272,14 @@ def safe_create_sequences(
     
     # Strict path - use explicit alignment
     try:
+        max_gap_seconds = _resolve_max_sequence_gap_seconds(platform, room_name)
         X_seq, y_seq, seq_ts = create_labeled_sequences_strict(
             sensor_data=sensor_data,
             labels=labels,
             seq_length=seq_length,
             stride=1,
             timestamps=timestamps,
+            max_gap_seconds=max_gap_seconds,
         )
         
         # Hard assertion

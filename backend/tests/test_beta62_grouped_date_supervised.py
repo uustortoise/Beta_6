@@ -198,6 +198,50 @@ def test_grouped_date_supervised_materializes_split_artifacts_with_lineage(tmp_p
     assert sorted(holdout_df["__segment_role"].unique().tolist()) == ["candidate"]
 
 
+def test_grouped_date_supervised_report_embeds_full_manifest_contract(tmp_path: Path):
+    baseline_path = tmp_path / "HK0011_jessica_train_4dec2025.parquet"
+    candidate_path = tmp_path / "HK0011_jessica_train_8mar2026.xlsx"
+
+    _write_day_parquet(
+        baseline_path,
+        {
+            "LivingRoom": _room_frame("2025-12-04 09:00:00", room="LivingRoom", activity="livingroom_normal_use", motion=1.0, light=650.0, sound=4.5, co2=3300.0),
+        },
+    )
+    _write_day_workbook(
+        candidate_path,
+        {
+            "LivingRoom": _room_frame("2026-03-08 09:00:00", room="LivingRoom", activity="livingroom_normal_use", motion=1.0, light=690.0, sound=4.7, co2=3450.0),
+        },
+    )
+
+    manifest = {
+        "schema_version": "beta62.grouped_date_supervised_manifest.v1",
+        "resident_id": "HK0011_jessica",
+        "target_rooms": ["LivingRoom"],
+        "sequence_length_by_room": {"livingroom": 2},
+        "segments": [
+            {"role": "baseline", "date": "2025-12-04", "split": "train", "path": str(baseline_path)},
+            {"role": "candidate", "date": "2026-03-08", "split": "holdout", "path": str(candidate_path)},
+        ],
+        "notes": ["room-scoped staged subset"],
+    }
+
+    report = run_grouped_date_supervised(manifest)
+
+    assert report["manifest"] == {
+        "schema_version": "beta62.grouped_date_supervised_manifest.v1",
+        "resident_id": "HK0011_jessica",
+        "target_rooms": ["livingroom"],
+        "sequence_length_by_room": {"livingroom": 2},
+        "segments": [
+            {"role": "baseline", "date": "2025-12-04", "split": "train", "path": str(baseline_path.resolve())},
+            {"role": "candidate", "date": "2026-03-08", "split": "holdout", "path": str(candidate_path.resolve())},
+        ],
+        "notes": ["room-scoped staged subset"],
+    }
+
+
 def test_grouped_date_supervised_cli_emits_grouped_report(tmp_path: Path, monkeypatch):
     baseline_path = tmp_path / "HK0011_jessica_train_4dec2025.parquet"
     candidate_path = tmp_path / "HK0011_jessica_train_8mar2026.xlsx"

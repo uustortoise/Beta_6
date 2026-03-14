@@ -260,6 +260,9 @@ def run_grouped_date_supervised(
         "target_rooms": [_normalize_room_name(room) for room in target_rooms],
         "manifest": {
             "schema_version": normalized["schema_version"],
+            "resident_id": normalized["resident_id"],
+            "target_rooms": [_normalize_room_name(room) for room in target_rooms],
+            "sequence_length_by_room": dict(sorted(sequence_length_by_room.items())),
             "segments": [
                 {
                     "role": segment.role,

@@ -1,11 +1,18 @@
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from scripts import run_beta62_grouped_date_fit_eval as script
-from ml.beta6.grouped_date_fit_eval import run_grouped_date_fit_eval
+from ml.beta6.grouped_date_fit_eval import (
+    _evaluate_room_candidate,
+    _prepare_segmented_training_frame,
+    _resolve_saved_candidate_artifacts,
+    run_grouped_date_fit_eval,
+)
+from ml.registry import ModelRegistry
 
 
 def _prepared_split_frame(
@@ -394,6 +401,264 @@ def test_grouped_date_fit_eval_accepts_manifest_plus_prepared_artifacts(
     assert payload["manifest"]["resident_id"] == "HK0011_jessica"
     assert payload["room_results"]["kitchen"]["artifact_paths"]["train"] == str(train_path)
     assert payload["room_results"]["kitchen"]["artifact_paths"]["holdout"] == str(holdout_path)
+
+
+def test_grouped_date_fit_eval_accepts_embedded_report_manifest_without_manifest_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    train_path = tmp_path / "prepared" / "HK0011_jessica_bedroom_train.parquet"
+    holdout_path = tmp_path / "prepared" / "HK0011_jessica_bedroom_holdout.parquet"
+    _write_parquet(
+        train_path,
+        _prepared_split_frame(
+            start="2025-12-04 00:00:00",
+            room="Bedroom",
+            activity="sleep",
+            split="train",
+            segment_role="baseline",
+            segment_date="2025-12-04",
+        ),
+    )
+    _write_parquet(
+        holdout_path,
+        _prepared_split_frame(
+            start="2026-03-08 00:00:00",
+            room="Bedroom",
+            activity="sleep",
+            split="holdout",
+            segment_role="candidate",
+            segment_date="2026-03-08",
+        ),
+    )
+
+    report = {
+        "schema_version": "beta62.grouped_date_supervised_report.v1",
+        "manifest": {
+            "schema_version": "beta62.grouped_date_supervised_manifest.v1",
+            "resident_id": "HK0011_jessica",
+            "target_rooms": ["bedroom"],
+            "sequence_length_by_room": {"bedroom": 5},
+            "segments": [
+                {"role": "baseline", "date": "2025-12-04", "split": "train", "path": "/tmp/4dec.parquet"},
+                {"role": "candidate", "date": "2026-03-08", "split": "holdout", "path": "/tmp/8mar.xlsx"},
+            ],
+            "notes": ["embedded-only contract"],
+        },
+        "resident_id": "HK0011_jessica",
+        "target_rooms": ["bedroom"],
+        "room_reports": {
+            "bedroom": {
+                "split_summary": {
+                    "train": {"artifact_path": str(train_path)},
+                    "holdout": {"artifact_path": str(holdout_path)},
+                }
+            }
+        },
+    }
+
+    monkeypatch.setattr(
+        "ml.beta6.grouped_date_fit_eval._fit_room_candidate",
+        lambda *, room_name, seq_length, **kwargs: {
+            "saved_version": 4,
+            "fit_metrics": {"accuracy": 0.91},
+            "candidate_artifact_paths": {"model": f"/tmp/{room_name}_v4.keras"},
+            "seq_length_seen": seq_length,
+        },
+    )
+    monkeypatch.setattr(
+        "ml.beta6.grouped_date_fit_eval._evaluate_room_candidate",
+        lambda **kwargs: {"accuracy": 0.77, "macro_f1": 0.63},
+    )
+
+    payload = run_grouped_date_fit_eval(
+        supervised_report=report,
+        artifact_dir=tmp_path / "prepared",
+        candidate_namespace="HK0011_jessica_candidate_embedded_report_only",
+    )
+
+    assert payload["manifest"]["resident_id"] == "HK0011_jessica"
+    assert len(payload["manifest"]["sha256"]) == 64
+    assert payload["room_results"]["bedroom"]["artifact_paths"]["holdout"] == str(holdout_path)
+
+
+def test_grouped_date_fit_eval_resolves_latest_complete_candidate_artifacts(tmp_path: Path):
+    registry = ModelRegistry(str(tmp_path))
+    candidate_namespace = "HK0011_jessica_candidate_reused"
+    room_name = "LivingRoom"
+    models_dir = registry.get_models_dir(candidate_namespace)
+
+    versions_path = models_dir / f"{room_name}_versions.json"
+    versions_path.write_text(
+        json.dumps(
+            {
+                "current_version": 0,
+                "versions": [
+                    {"version": 1, "promoted": False},
+                    {"version": 2, "promoted": False},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    (models_dir / f"{room_name}_v1_model.keras").write_text("stub", encoding="utf-8")
+    for suffix in ["model.keras", "scaler.pkl", "label_encoder.pkl", "thresholds.json"]:
+        (models_dir / f"{room_name}_v2_{suffix}").write_text("stub", encoding="utf-8")
+
+    resolved = _resolve_saved_candidate_artifacts(
+        registry=registry,
+        candidate_namespace=candidate_namespace,
+        room_name=room_name,
+        requested_saved_version=1,
+    )
+
+    assert resolved["requested_saved_version"] == 1
+    assert resolved["resolved_saved_version"] == 2
+    assert resolved["artifact_paths"]["model"].endswith("LivingRoom_v2_model.keras")
+    assert resolved["artifact_paths"]["scaler"].endswith("LivingRoom_v2_scaler.pkl")
+    assert resolved["artifact_paths"]["label_encoder"].endswith("LivingRoom_v2_label_encoder.pkl")
+
+
+def test_grouped_date_fit_eval_preprocesses_train_segments_independently():
+    train_df = pd.concat(
+        [
+            _prepared_split_frame(
+                start="2025-12-04 08:00:00",
+                room="Bathroom",
+                activity="bathroom_normal_use",
+                split="train",
+                segment_role="baseline",
+                segment_date="2025-12-04",
+            ),
+            _prepared_split_frame(
+                start="2026-03-09 08:00:00",
+                room="Bathroom",
+                activity="bathroom_normal_use",
+                split="train",
+                segment_role="candidate",
+                segment_date="2026-03-09",
+            ),
+        ],
+        ignore_index=True,
+    )
+
+    class DummyPlatform:
+        sensor_columns = ["co2", "vibration", "humidity", "temperature", "sound", "motion", "light"]
+
+        def __init__(self):
+            self.preprocess_calls = []
+            self.scale_calls = []
+
+        def preprocess_without_scaling(self, df, room_name, is_training=False, apply_denoising=False):
+            self.preprocess_calls.append(
+                {
+                    "room_name": room_name,
+                    "rows": len(df),
+                    "start": pd.to_datetime(df["timestamp"]).min().date().isoformat(),
+                    "end": pd.to_datetime(df["timestamp"]).max().date().isoformat(),
+                    "is_training": bool(is_training),
+                }
+            )
+            return df[["timestamp"] + self.sensor_columns + ["activity"]].copy()
+
+        def apply_scaling(self, df, room_name, is_training=False, scaler_fit_range=None):
+            self.scale_calls.append(
+                {
+                    "room_name": room_name,
+                    "rows": len(df),
+                    "is_training": bool(is_training),
+                    "fit_sample_count": None if scaler_fit_range is None else scaler_fit_range.get("fit_sample_count"),
+                }
+            )
+            scaled = df.copy()
+            scaled["activity_encoded"] = 0
+            return scaled[["timestamp"] + self.sensor_columns + ["activity_encoded"]]
+
+    platform = DummyPlatform()
+
+    processed = _prepare_segmented_training_frame(
+        platform=platform,
+        room_name="Bathroom",
+        train_df=train_df,
+    )
+
+    assert [call["start"] for call in platform.preprocess_calls] == ["2025-12-04", "2026-03-09"]
+    assert [call["rows"] for call in platform.preprocess_calls] == [6, 6]
+    assert platform.scale_calls == [
+        {
+            "room_name": "Bathroom",
+            "rows": 12,
+            "is_training": True,
+            "fit_sample_count": 12,
+        }
+    ]
+    assert len(processed) == 12
+
+
+def test_grouped_date_fit_eval_evaluates_holdout_with_segmented_sequences(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class DummyRegistry:
+        def load_room_model(self, path, room_name, compile_model=False):
+            return {"room_name": room_name, "path": path}
+
+    class DummyPlatform:
+        sensor_columns = ["co2", "vibration", "humidity", "temperature", "sound", "motion", "light"]
+
+        def __init__(self):
+            self.scalers = {}
+
+    class DummyEncoder:
+        classes_ = np.array(["bathroom_normal_use", "unoccupied"], dtype=object)
+
+    holdout_df = _prepared_split_frame(
+        start="2026-03-08 08:00:00",
+        room="Bathroom",
+        activity="bathroom_normal_use",
+        split="holdout",
+        segment_role="candidate",
+        segment_date="2026-03-08",
+    )
+
+    fit_result = {
+        "registry": DummyRegistry(),
+        "platform": DummyPlatform(),
+        "candidate_artifact_paths": {
+            "model": str(tmp_path / "Bathroom_v1_model.keras"),
+            "scaler": str(tmp_path / "Bathroom_v1_scaler.pkl"),
+            "label_encoder": str(tmp_path / "Bathroom_v1_label_encoder.pkl"),
+        },
+        "seq_length": 3,
+        "saved_version": 1,
+    }
+
+    monkeypatch.setattr(
+        "ml.beta6.grouped_date_fit_eval._prepare_segmented_holdout_frame",
+        lambda **kwargs: holdout_df[["timestamp", "co2", "vibration", "humidity", "temperature", "sound", "motion", "light", "activity"]].copy(),
+    )
+    monkeypatch.setattr(
+        "ml.beta6.grouped_date_fit_eval.joblib.load",
+        lambda path: object() if str(path).endswith("_scaler.pkl") else DummyEncoder(),
+    )
+    monkeypatch.setattr(
+        "ml.beta6.grouped_date_fit_eval.evaluate_model",
+        lambda **kwargs: {
+            "status": "completed",
+            "summary": {"num_folds": 0},
+            "sequence_count": int(len(kwargs["X_seq"])),
+        },
+    )
+
+    report = _evaluate_room_candidate(
+        room_name="Bathroom",
+        holdout_df=holdout_df,
+        fit_result=fit_result,
+    )
+
+    assert report["status"] == "completed"
+    assert report["sequence_count"] == 4
 
 
 def test_grouped_date_fit_eval_cli_writes_result_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
